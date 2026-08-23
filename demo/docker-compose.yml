@@ -1,0 +1,24 @@
+# Two services would be one too many. There is exactly ONE: the API.
+#
+# There is no CodeRifts container, no key server, no sidecar — because the claim
+# being demonstrated is that grant verification needs none of them. The API holds a
+# pinned public key and verifies signatures locally.
+#
+# Scene 5 makes that literal:
+#   docker compose run --rm --network none api node /app/demo/offline-check.js
+# `--network none` gives the container no network interface at all, and verification
+# still returns GRANT_CURRENT.
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

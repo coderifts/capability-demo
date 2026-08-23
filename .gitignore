@@ -1,0 +1,7 @@
+node_modules/
+
+# DEMO key material is generated at build time and must never be committed —
+# not because it is secret (it is worthless), but so nobody can mistake a
+# checked-in PEM for something reusable.
+demo/keys/*
+!demo/keys/.gitkeep

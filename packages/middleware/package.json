@@ -1,0 +1,15 @@
+{
+  "name": "@coderifts/capability-express",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Express middleware that verifies cr.exec.v1 execution grants OFFLINE against a pinned Ed25519 public key.",
+  "license": "MIT",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  }
+}

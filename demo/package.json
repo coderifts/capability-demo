@@ -1,0 +1,17 @@
+{
+  "name": "capability-demo-api",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Demo Express API whose mutations require a valid cr.exec.v1 execution grant.",
+  "license": "MIT",
+  "main": "src/server.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "keys": "node gen-keys.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "@coderifts/capability-express": "file:../packages/middleware"
+  }
+}
