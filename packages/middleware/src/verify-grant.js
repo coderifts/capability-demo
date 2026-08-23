@@ -39,6 +39,16 @@ const SIGNED_FIELDS = Object.freeze([
   'kid', 'receipt_digest', 'scope_hash', 'audience', 'operation', 'target_id', 'jti', 'iat', 'exp',
 ]);
 
+/**
+ * ATOMIC-profile field (docs/cr-exec-v1.md § Profiles). Optional and additive:
+ * present  → ATOMIC (one-use consumption is the EXECUTOR's job — see demo/src/db.js)
+ * absent   → BEARER (today's grant, unchanged)
+ * It is a SEPARATE signed field and is deliberately NOT folded into scope_hash:
+ * after-payload binding and state binding are independent facts, so rotating a nonce
+ * must not look like a different after-shape.
+ */
+const OPTIONAL_SIGNED_FIELDS = Object.freeze(['state_nonce']);
+
 function sha256hex(str) {
   return crypto.createHash('sha256').update(String(str), 'utf8').digest('hex');
 }
@@ -62,16 +72,28 @@ function receiptDigest(token) {
 }
 
 function signingInput(body) {
-  return [
+  const parts = [
     SIGNING_PREFIX,
     scalar(body.kid), scalar(body.receipt_digest), scalar(body.scope_hash),
     scalar(body.audience), scalar(body.operation), scalar(body.target_id),
     scalar(body.jti), scalar(body.iat), scalar(body.exp),
-  ].join('|');
+  ];
+  // The |{state_nonce} slot is appended ONLY when non-empty, so a BEARER grant's
+  // signing input stays byte-identical to pre-ATOMIC issuances.
+  if (body.state_nonce != null && String(body.state_nonce).length > 0) {
+    parts.push(String(body.state_nonce));
+  }
+  return parts.join('|');
+}
+
+/** ATOMIC iff a non-empty state_nonce is carried. */
+function grantProfile(payload) {
+  return payload && payload.state_nonce != null && String(payload.state_nonce).length > 0
+    ? 'ATOMIC' : 'BEARER';
 }
 
 function fieldHasDelimiter(body) {
-  for (const k of SIGNED_FIELDS) {
+  for (const k of [...SIGNED_FIELDS, ...OPTIONAL_SIGNED_FIELDS]) {
     if (typeof body[k] === 'string' && body[k].includes('|')) return true;
   }
   return false;
@@ -103,8 +125,13 @@ function parseGrantToken(token) {
       return { ok: false, status: 'MALFORMED', reason: 'missing_field', payload };
     }
   }
+  for (const k of OPTIONAL_SIGNED_FIELDS) {
+    if (payload[k] !== undefined && typeof payload[k] !== 'string') {
+      return { ok: false, status: 'MALFORMED', reason: 'bad_optional', payload };
+    }
+  }
   // Reserved keys (cnf, nbf, max_uses, …) are NOT accepted in this phase.
-  const allowed = new Set(['v', ...SIGNED_FIELDS]);
+  const allowed = new Set(['v', ...SIGNED_FIELDS, ...OPTIONAL_SIGNED_FIELDS]);
   for (const k of Object.keys(payload)) {
     if (!allowed.has(k)) {
       return { ok: false, status: 'MALFORMED', reason: 'unknown_field', payload };
@@ -220,6 +247,8 @@ function verifyExecutionGrant(token, opts = {}) {
 
 module.exports = {
   GRANT_VERSION,
+  grantProfile,
+  OPTIONAL_SIGNED_FIELDS,
   SIGNING_PREFIX,
   CLOCK_SKEW_LEEWAY_MS,
   SIGNED_FIELDS,

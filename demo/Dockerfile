@@ -15,7 +15,7 @@ COPY demo/ /app/demo/
 # shipped from the host. Regenerated on every rebuild.
 RUN node gen-keys.js
 
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl postgresql-client
 
 EXPOSE 3000
 CMD ["node", "src/server.js"]

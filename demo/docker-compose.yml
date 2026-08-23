@@ -1,24 +1,47 @@
-# Two services would be one too many. There is exactly ONE: the API.
+# Two services now — and the second one is NOT a CodeRifts service.
 #
-# There is no CodeRifts container, no key server, no sidecar — because the claim
-# being demonstrated is that grant verification needs none of them. The API holds a
-# pinned public key and verifies signatures locally.
+# `db` is the executor's OWN state: it holds the articles, the consumed_grants ledger, and
+# the state challenges. It is not an authorization oracle and is never consulted about
+# whether a grant is valid — that stays offline against a pinned key. What Postgres buys
+# is ATOMICITY: one transaction that CASes the state, consumes the grant, and mutates.
 #
-# Scene 5 makes that literal:
-#   docker compose run --rm --network none api node /app/demo/offline-check.js
-# `--network none` gives the container no network interface at all, and verification
-# still returns GRANT_CURRENT.
+# There is still no CodeRifts container. Scene 5 remains true:
+#   docker run --rm --network none <image> node /app/demo/offline-check.js
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: demo
+      POSTGRES_USER: demo
+      POSTGRES_DB: demo
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d demo"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   api:
     build:
       context: ..
       dockerfile: demo/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "3000:3000"
     environment:
       PORT: "3000"
+      DATABASE_URL: "postgres://demo:demo@db:5432/demo"
+    # The image generates its own DEMO keypair at build (so `docker run --network none` is
+    # self-contained for scene 5). For the compose demo we mount the HOST keys instead, so the
+    # host-side issuer (demo/issue-grant.js) and the in-container verifier share one keypair.
+    # Without this the API would reject every host-issued grant with INVALID_SIGNATURE.
+    volumes:
+      - ./keys:/app/demo/keys:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 20

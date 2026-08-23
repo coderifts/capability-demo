@@ -9,7 +9,9 @@
     "demo"
   ],
   "scripts": {
-    "test": "node --test \"packages/middleware/test/*.test.js\""
+    "test": "node --test \"packages/middleware/test/*.test.js\"",
+    "test:pg": "node --test \"demo/test/*.test.js\"",
+    "test:all": "npm test && npm run test:pg"
   },
   "engines": {
     "node": ">=20"

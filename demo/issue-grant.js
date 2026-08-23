@@ -40,9 +40,11 @@ function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
 function scalar(v) { return v == null ? '' : String(v); }
 
 function signingInput(b) {
-  return [SIGNING_PREFIX, scalar(b.kid), scalar(b.receipt_digest), scalar(b.scope_hash),
+  const parts = [SIGNING_PREFIX, scalar(b.kid), scalar(b.receipt_digest), scalar(b.scope_hash),
     scalar(b.audience), scalar(b.operation), scalar(b.target_id),
-    scalar(b.jti), scalar(b.iat), scalar(b.exp)].join('|');
+    scalar(b.jti), scalar(b.iat), scalar(b.exp)];
+  if (b.state_nonce != null && String(b.state_nonce).length > 0) parts.push(String(b.state_nonce));
+  return parts.join('|');
 }
 
 function parseArgs(argv) {
@@ -94,6 +96,12 @@ function issue(opts) {
     iat: toUtcSeconds(iatDate),
     exp: toUtcSeconds(new Date(iatDate.getTime() + ttl * 1000)),
   };
+  // ATOMIC profile: a non-empty state_nonce is a SEPARATE signed field, appended to the
+  // signing input only when present, and deliberately NOT folded into scope_hash.
+  // Omit it and the grant is BEARER with a byte-identical pre-ATOMIC signing input.
+  if (opts.state_nonce != null && opts.state_nonce !== true && String(opts.state_nonce).length > 0) {
+    payload.state_nonce = String(opts.state_nonce);
+  }
   const sig = crypto.sign(null, Buffer.from(signingInput(payload), 'utf8'), privateKey);
   return `${b64url(Buffer.from(JSON.stringify(payload), 'utf8'))}.${b64url(sig)}`;
 }
@@ -102,7 +110,7 @@ if (require.main === module) {
   const a = parseArgs(process.argv);
   if (!a.operation) {
     process.stderr.write('usage: node demo/issue-grant.js --operation <op> [--target-id <id>] '
-      + '[--body <json> | --body-file <path>] [--ttl <s>] [--iat-offset <s>] [--audience <aud>]\n');
+      + '[--body <json> | --body-file <path>] [--ttl <s>] [--iat-offset <s>] [--audience <aud>] [--state-nonce <n>]\n');
     process.exit(2);
   }
   process.stdout.write(issue(a) + '\n');

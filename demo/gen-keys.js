@@ -20,6 +20,7 @@ const path = require('node:path');
 
 const KEYS_DIR = path.join(__dirname, 'keys');
 const KID = 'DEMO-KEY-DO-NOT-USE';
+const EXEC_KID = 'DEMO-EXECUTOR-KEY-DO-NOT-USE';
 
 function main() {
   fs.mkdirSync(KEYS_DIR, { recursive: true });
@@ -38,8 +39,31 @@ function main() {
       keys: [{ kid: KID, public_key_pem: pubPem, status: 'active', valid_from: null, retired_at: null }],
     }, null, 2) + '\n',
   );
-  process.stdout.write(`demo keypair generated in demo/keys (kid=${KID}) — DEMO MATERIAL, never reuse\n`);
+  // ── Executor key (customer-held, per cr.exec.attest.v1) ──────────────────────────
+  // The executor signs cr.exec.attest.v1. In production this key belongs to the CUSTOMER
+  // and CodeRifts never receives it. Here it is DEMO material generated at build.
+  const ex = crypto.generateKeyPairSync('ed25519');
+  fs.writeFileSync(path.join(KEYS_DIR, 'executor-private.pem'),
+    ex.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
+  fs.writeFileSync(
+    path.join(KEYS_DIR, 'executor-keys.json'),
+    JSON.stringify({
+      _comment:
+        'DEMO EXECUTOR REGISTRY — generated locally by demo/gen-keys.js. Customer-held key; '
+        + 'CodeRifts never receives it. Shape is the (b)-ready registry document from '
+        + 'docs/cr-exec-attest-v1.md (same shape as .well-known/coderifts-keys.json).',
+      keys: [{
+        kid: EXEC_KID,
+        public_key_pem: ex.publicKey.export({ type: 'spki', format: 'pem' }),
+        status: 'active',
+        valid_from: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+        retired_at: null,
+      }],
+    }, null, 2) + '\n',
+  );
+
+  process.stdout.write(`demo keypairs generated in demo/keys (grant kid=${KID}, executor kid=${EXEC_KID}) — DEMO MATERIAL, never reuse\n`);
 }
 
 if (require.main === module) main();
-module.exports = { KID, KEYS_DIR };
+module.exports = { KID, EXEC_KID, KEYS_DIR };

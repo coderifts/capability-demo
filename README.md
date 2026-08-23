@@ -24,13 +24,14 @@ with `--network none`. Unplugging the network does not change a single verdict.
 ## Quickstart
 
 ```bash
-cd demo && docker compose up -d --build   # 1. build + start the API (generates a DEMO keypair)
-cd .. && ./demo/run-demo.sh               # 2. run the five scenes
-npm test                                  # 3. 48 unit tests, no network, no Docker
+cd demo && docker compose up -d --build   # 1. start Postgres + the API (generates DEMO keypairs)
+cd .. && ./demo/run-demo.sh               # 2. run the ten scenes
+npm run test:all                          # 3. 72 unit + 12 Postgres integration tests
 ```
 
-No Docker? `cd demo && npm install && npm run keys && npm start` serves the same API on
-:3000, and `run-demo.sh` works against it.
+`npm test` alone runs the 72 unit tests with no network and no Docker. The 12 integration
+tests need the `db` service (`cd demo && docker compose up -d db`); without it they **skip
+loudly with the reason**, never silently pass.
 
 <details>
 <summary>Expected output of <code>./demo/run-demo.sh</code></summary>
@@ -186,6 +187,72 @@ Analyze mode never mints a grant; STOP / REQUEST_APPROVAL never mint one either.
 any CodeRifts key. The demo grant also binds a labelled stand-in receipt digest rather than
 a real receipt token.
 
+## Two profiles: BEARER and ATOMIC
+
+The grant format carries an optional `state_nonce`. Its presence is the profile discriminator,
+and the two coexist — a BEARER grant behaves exactly as it did in round 1.
+
+| | **BEARER** (no `state_nonce`) | **ATOMIC** (`state_nonce` present) |
+|---|---|---|
+| Consumption | stateless — replayable until `exp` | **one-use**, enforced by a Postgres PRIMARY KEY |
+| State binding | after-payload only (`scope_hash`) | + CAS against the state the issuer saw |
+| Attestation | none | `cr.exec.attest.v1` returned on commit |
+| Round-1 behaviour | byte-identical | n/a (new) |
+
+`state_nonce` is a **separate signed field** and is deliberately **not** folded into
+`scope_hash`: after-payload binding and state binding are independent facts, so rotating a
+nonce must not look like a different after-shape. A BEARER grant's signing input stays
+byte-identical to pre-ATOMIC issuances because the `|{state_nonce}` slot is appended only when
+non-empty.
+
+### Challenge-first state binding
+
+```
+POST /state-challenge {"target_id":"42"}
+  -> { state_nonce, current_digest, expires_at }
+```
+
+`current_digest` hashes the target's current row. **Absence is a different fact from empty**:
+a missing row hashes the explicit marker `absent:<id>`, never the empty string — otherwise
+"deleted" and "blank" would be indistinguishable to the CAS.
+
+### The atomic execute path — ONE transaction
+
+```
+BEGIN
+  SELECT ... FROM state_challenges WHERE state_nonce = $1 FOR UPDATE   -- (1) CAS
+    -> unknown / expired / wrong target / digest moved  => ROLLBACK
+  INSERT INTO consumed_grants (jti, scope_hash)                        -- (2) the ledger
+    -> 23505 unique_violation  => GRANT_CONSUMED, ROLLBACK
+  <the mutation>                                                       -- (3) the write
+  UPDATE state_challenges SET consumed_at = now()
+  <sign cr.exec.attest.v1>   INSERT INTO attestations
+COMMIT
+```
+
+The one-use guarantee is **the PRIMARY KEY**, not application logic. There is no
+SELECT-then-INSERT race and no "have I seen this jti?" check that could be wrong under
+concurrency: 20 simultaneous requests with one grant all reach the INSERT, exactly one wins,
+and the other 19 roll back with their mutations undone.
+
+## Execution attestations (`cr.exec.attest.v1`)
+
+On commit the executor signs a statement with **its own** key and returns it in the response.
+Executor keys are **customer-held** — CodeRifts never receives them. The registry uses the
+(b)-ready document shape from the spec (same shape as `.well-known/coderifts-keys.json`).
+
+```bash
+node demo/verify-attest.js --token <attestation> --grant <grant>
+```
+
+Statuses mirror the reference kernel exactly: `ATTEST_VALID`,
+`ATTEST_RETIRED_KEY_VALID_AT_ISSUE`, `ATTEST_INVALID_SIGNATURE`, `ATTEST_UNKNOWN_KEY`,
+`ATTEST_MALFORMED`, `ATTEST_UNBOUND`.
+
+One deliberate asymmetry with grants: a **retired** executor key still verifies an attestation
+whose `committed_at` fell inside `[valid_from, retired_at)`. A grant is *live permission*
+(retired => never valid); an attestation is a *historical statement*, like a receipt.
+
 ## Honesty — what this proves and what it does not
 
 **Proves:** a non-admin caller inside this boundary cannot mutate without a grant that
@@ -197,9 +264,19 @@ target, and request body — verified with no network access.
 - **No bypass.** Anything that reaches the data without traversing this middleware is
   unaffected: root on the host, a DB console, an admin panel on another route, a migration
   job, a second service sharing the database.
-- **No replay protection.** A grant is a stateless bearer token. Within its TTL (300 s
-  default) a stolen grant authorizes *the same* operation/target/body for *any* presenter.
-  One-use / atomic consumption is PHASE-2, explicitly not this format.
+- **The bearer replay window exists ONLY on the BEARER profile. The ATOMIC profile's ledger
+  closes it.** A BEARER grant is a stateless token: within its TTL a stolen copy authorizes the
+  same operation/target/body for any presenter. An ATOMIC grant is consumed exactly once by the
+  `consumed_grants` primary key, so a stolen copy buys a replayer nothing after first use.
+- **An attestation proves that a holder of the executor key asserts this commit.** It does not
+  prove the executor's code is unmodified — **deploy attestation is out of scope**, a later
+  artifact, not this one. It does not prove a human saw anything, does not prove the grant is
+  still currently authorized (the statement is historical), and `result_digest` is the
+  executor's choice of bytes — not a CodeRifts fingerprint, receipt digest, or after-payload hash.
+- **The CAS detects drift; it does not prevent privileged writes.** Scene 9 shows root writing
+  straight to Postgres with no grant at all. Nothing here stops that. What the challenge-first
+  CAS does is *notice*: the granted mutation is refused because the state the issuer authorized
+  is no longer the state on disk.
 - **No global enforcement claim.** Coverage is **per-adapter**. Mounting the guard on a
   route says something about that route and nothing about any other.
 - **No proof of possession.** `cnf` is reserved and unimplemented; absent `cnf` = bearer.
