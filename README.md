@@ -1,7 +1,9 @@
 # capability-demo — offline enforcement for `cr.exec.v1` execution grants
 
 The reference PHASE-1 enforcement point for the CodeRifts execution-grant format, plus a
-demo API where **mutation without a valid grant is HTTP 403**.
+demo API where **mutation through the guarded route without a valid grant is HTTP 403** — a refusal this
+process issues about itself, not a capability boundary. See *What the 403 is, and what it is not* below
+before citing it as evidence.
 
 ## What this is, and why
 
@@ -12,6 +14,35 @@ boundary an unauthorized call cannot cross. `docs/cr-exec-v1.md` is candid that 
 format and the verifier "is not the same as a mutation gateway checking grants." This repo
 is the gateway half: a small Express middleware that treats a signed, scope-bound grant as
 the only way through.
+
+### What the 403 is, and what it is not
+
+**The 403 is this process refusing itself.** `requireExecutionGrant()` is Express middleware running
+inside the demo API, and `demo/src/atomic.js` returns its own `403`s from the same process. There is
+no `GRANT`/`REVOKE`, no row-level security and no policy anywhere in this repo, and
+`demo/src/server.js` reads and writes the `articles` table through the **same pool** the guarded
+route uses. So anything already inside this process can write the table without the middleware ever
+running — an unmapped route, a direct `pool.query`, a script importing `db.js`.
+
+That makes `raw → 403` evidence about **routing**, not about capability. It shows that requests
+travelling the guarded path without a valid grant are refused, which is the thing this reference is
+for. It is *not* a capability boundary, and a 403 produced by the same program that owns the data is
+not independent enforcement. Do not cite it as one.
+
+**The one exception, and it is narrow.** The `consumed_grants.jti` **PRIMARY KEY** is enforced by
+PostgreSQL, not by us: two concurrent requests presenting the same grant both reach the `INSERT`,
+exactly one wins, and the loser takes SQLSTATE 23505 which rolls back its whole transaction
+including the mutation. That is genuinely structural — no application check could get it right under
+concurrency. But it constrains **one-use**, not **who may write**. It is the only structural element
+in this repo, and it does not make the 403 one.
+
+**Consequence for the sidecar reference (roadmap 1091).** If a sidecar is to mean more than this
+demo does, it needs target-side exclusion that the executor cannot revoke: the mutating process
+running as a **separate OS user** from the one owning the data, filesystem ACLs or a database role
+that simply lacks write permission, so that bypassing the gateway fails at the kernel or the database
+rather than at our own `if`. Middleware that refuses itself can always be routed around by whoever
+mounts the routes. This demo is the format-and-verifier half; it is deliberately not that half, and
+copying it as though it were is the mistake this section exists to prevent.
 
 The second idea is that the check must be **offline**. A boundary that phones home to
 authorize is a boundary that fails open when the network does, and one whose latency and
