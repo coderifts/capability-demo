@@ -266,6 +266,12 @@ COMMIT                                         -- deferred trigger: status='cons
 The returned `atomic_execution_attestation` is issued only after COMMIT. It asserts the
 executor authorized this exact transaction for commit — not that the transaction committed.
 
+**Posture receipt (`cr.posture.receipt.v1`).** 42501 is the DENY; the posture reader
+re-reads `pg_catalog` and signs that the deny is still wired (owners, DML ACLs,
+SECURITY DEFINER, `cr_owner` NOLOGIN, TEMPORARY revoked). Drift (an admin GRANT)
+does not restore privileges — it revokes the enforcement claim and yields a signed
+drift artifact. STEP 6 will assemble `prove`; this is one section of it.
+
 The one-use guarantee is **the PRIMARY KEY**, not application logic. There is no
 SELECT-then-INSERT race and no "have I seen this jti?" check that could be wrong under
 concurrency: 20 simultaneous requests with one grant all reach the INSERT, exactly one wins,
