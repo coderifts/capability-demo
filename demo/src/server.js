@@ -50,8 +50,8 @@ function buildApp({
 } = {}) {
   const app = express();
   const executor = loadExecutor();
-  // STEP 1: host routes use `pool` (cr_host). The atomic write uses executorPool
-  // (cr_executor). STEP 2 will shrink executor to EXECUTE-only on the gate.
+  // STEP 1: host routes use `pool` (cr_host).
+  // STEP 2: atomic write uses executorPool (cr_executor) calling cr_execute_grant only.
   if (!executorPool) {
     throw new Error('buildApp: executorPool is required (cr_executor) — host_role must not run atomic DML');
   }
@@ -87,8 +87,8 @@ function buildApp({
     } finally { client.release(); }
   });
 
-  /** Shared handler: routes the request by grant PROFILE. */
-  const handle = (mutate, targetOf) => async (req, res) => {
+  /** Shared handler: routes the request by grant PROFILE. Mutation is in cr_execute_grant. */
+  const handle = (targetOf) => async (req, res) => {
     const payload = req.coderifts.payload;
     const profile = grantProfile(payload);
     const targetId = targetOf(req);
@@ -106,8 +106,13 @@ function buildApp({
     }
 
     const out = await atomicExecute({
-      pool: executorPool, payload, targetId, executor,
-      mutate: (client) => mutate(client, req),
+      pool: executorPool,
+      payload,
+      targetId,
+      executor,
+      operation: payload.operation,
+      title: req.body && req.body.title,
+      body: req.body && req.body.body,
     });
     if (!out.ok) {
       return res.status(out.http).json({
@@ -122,23 +127,10 @@ function buildApp({
   };
 
   app.post('/articles', captureRawBody(), guard, handle(
-    async (client, req) => {
-      const b = req.body || {};
-      const r = await client.query(
-        'INSERT INTO articles (title, body) VALUES ($1,$2) RETURNING id, title, body',
-        [String(b.title || ''), String(b.body || '')],
-      );
-      return r.rows[0];
-    },
     (req) => (req.params && req.params.id != null ? String(req.params.id) : ''),
   ));
 
   app.delete('/articles/:id', captureRawBody(), guard, handle(
-    async (client, req) => {
-      const r = await client.query('DELETE FROM articles WHERE id::text = $1 RETURNING id, title, body',
-        [String(req.params.id)]);
-      return r.rows[0] || { id: req.params.id, deleted: true };
-    },
     (req) => String(req.params.id),
   ));
 
@@ -158,7 +150,7 @@ async function main() {
   const executorPool = makePool(executorUrl());
   buildApp({ pool: hostPool, executorPool }).listen(PORT, () => {
     process.stdout.write(
-      `demo api on ${PORT} (offline grants; ATOMIC as cr_executor; host_role has no articles DML)\n`,
+      `demo api on ${PORT} (offline grants; ATOMIC via cr_execute_grant; executor has no table DML)\n`,
     );
   });
 }

@@ -21,8 +21,9 @@ the only way through.
 inside the demo API, and `demo/src/atomic.js` returns its own `403`s from the same process. There is
 no row-level security anywhere in this repo. STEP 1 split the former single `demo` role:
 `cr_host` has **zero DML on `articles`** (raw INSERT is SQLSTATE 42501, not a Node 403);
-`cr_executor` runs the ATOMIC transaction; `cr_owner` (NOLOGIN) owns the tables. The bootstrap
-`demo` superuser can still write (scene 9). STEP 2 will put the executor behind a gate function.
+`cr_executor` has EXECUTE on `cr_execute_grant` only (no table DML); `cr_owner` (NOLOGIN) owns
+the tables and the SECURITY DEFINER gate. The bootstrap `demo` superuser can still write
+(scene 9). STEP 3 will sign and seal out of the DB.
 
 That makes `raw → 403` evidence about **routing**, not about capability. It shows that requests
 travelling the guarded path without a valid grant are refused, which is the thing this reference is
@@ -35,14 +36,13 @@ is enforced by PostgreSQL: two concurrent requests presenting the same grant bot
 transaction including the mutation. That constrains **one-use**. STEP 1 adds **who may write
 `articles`**: `cr_host` has no INSERT/UPDATE/DELETE, so a raw host query fails with SQLSTATE
 42501 — not a Node 403. The bootstrap `demo` role can still write (scene 9). STEP 2 will
-narrow `cr_executor` to EXECUTE-only on a gate function.
+narrow `cr_executor` further (seal). `cr_execute_grant` already consumes and mutates; it does not sign.
 
-**Consequence for the sidecar reference (roadmap 1091).** STEP 1 gives `cr_host` a database
-role that simply lacks write permission on `articles` (SQLSTATE 42501). That is the host-side
-denial. It is not yet the full target-side exclusion: `cr_executor` still has DML (STEP 2
-narrows it to EXECUTE on the gate), and the bootstrap `demo` superuser can still write
-(scene 9). Middleware that refuses itself can always be routed around by whoever mounts the
-routes — that is why the 403 is not this proof.
+**Consequence for the sidecar reference (roadmap 1091).** `cr_host` has no write on
+`articles` (42501). `cr_executor` has no table DML either — only EXECUTE on
+`cr_execute_grant` (SECURITY DEFINER, owned by `cr_owner`). The bootstrap `demo`
+superuser can still write (scene 9). Middleware that refuses itself can always be
+routed around; the 403 is not this proof. STEP 3 signs and seals out of the DB.
 
 The second idea is that the check must be **offline**. A boundary that phones home to
 authorize is a boundary that fails open when the network does, and one whose latency and

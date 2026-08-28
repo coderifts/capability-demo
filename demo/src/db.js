@@ -11,8 +11,8 @@
  *
  * STEP 1 — two LOGIN roles besides the bootstrap superuser (demo/sql/roles.sql):
  *   hostUrl()      cr_host      — ZERO DML on articles (42501)
- *   executorUrl()  cr_executor  — atomicExecute DML (STEP 2 will shrink this)
- * migrate() must run as the bootstrap role (CREATE ROLE / ALTER OWNER).
+ *   executorUrl()  cr_executor  — EXECUTE on cr_execute_grant only (STEP 2)
+ * migrate() must run as the bootstrap role (CREATE ROLE / ALTER OWNER / CREATE FUNCTION).
  */
 
 const { Pool } = require('pg');
@@ -23,6 +23,7 @@ const OWNER_ROLE = 'cr_owner';
 const HOST_ROLE = 'cr_host';
 const EXECUTOR_ROLE = 'cr_executor';
 const ROLES_SQL = fs.readFileSync(path.join(__dirname, '..', 'sql', 'roles.sql'), 'utf8');
+const GATE_SQL = fs.readFileSync(path.join(__dirname, '..', 'sql', 'gate.sql'), 'utf8');
 
 const DEFAULT_BOOTSTRAP_URL = 'postgres://demo:demo@localhost:55432/demo';
 
@@ -42,7 +43,10 @@ CREATE TABLE IF NOT EXISTS consumed_grants (
   jti             TEXT PRIMARY KEY,
   scope_hash      TEXT NOT NULL,
   consumed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  attestation_ref TEXT
+  attestation_ref TEXT,
+  target_profile  TEXT NOT NULL DEFAULT 'postgres.atomic',
+  status          TEXT NOT NULL DEFAULT 'consumed',
+  preimage        TEXT
 );
 
 -- Challenge-first state binding. current_digest records the state the ISSUER saw, so the
@@ -90,8 +94,18 @@ function executorUrl() {
 }
 
 async function migrate(pool) {
-  await pool.query(DDL);
-  await pool.query(ROLES_SQL);
+  const client = await pool.connect();
+  try {
+    // Parallel test files each call migrate(); ALTER OWNER / CREATE FUNCTION
+    // concurrent on the same rows raises XX000 tuple concurrently updated.
+    await client.query('SELECT pg_advisory_lock(11560002)');
+    await client.query(DDL);
+    await client.query(ROLES_SQL);
+    await client.query(GATE_SQL);
+  } finally {
+    try { await client.query('SELECT pg_advisory_unlock(11560002)'); } catch (_) { /* */ }
+    client.release();
+  }
 }
 
 /** Wait for Postgres to accept connections (compose start ordering). */
@@ -130,6 +144,7 @@ async function currentDigest(client, targetId) {
 module.exports = {
   DDL,
   ROLES_SQL,
+  GATE_SQL,
   OWNER_ROLE,
   HOST_ROLE,
   EXECUTOR_ROLE,

@@ -96,7 +96,7 @@ describe('PK one-use', () => {
     assert.equal(r2.code, 409);
     assert.equal(r2.json.status, 'GRANT_CONSUMED');
   });
-  test('the ledger row exists with the grant scope_hash + attestation_ref', async (t) => {
+  test('the ledger row exists with scope_hash, target_profile, consumed, preimage', async (t) => {
     if (guard(t)) return;
     const body = JSON.stringify({ title: 'A2', body: 'ledger' });
     const { g } = await atomicGrant(body);
@@ -105,7 +105,10 @@ describe('PK one-use', () => {
     const row = await pool.query('SELECT * FROM consumed_grants WHERE jti=$1', [jti]);
     assert.equal(row.rowCount, 1);
     assert.ok(row.rows[0].scope_hash.startsWith('sha256:'));
-    assert.ok(row.rows[0].attestation_ref);
+    assert.equal(row.rows[0].target_profile, 'postgres.atomic');
+    assert.equal(row.rows[0].status, 'consumed');
+    assert.ok(row.rows[0].preimage && String(row.rows[0].preimage).startsWith('cr.gate.preimage.v1|'));
+    assert.equal(row.rows[0].attestation_ref, null); // seal is STEP 3
   });
   test('a refused replay leaves NO extra article (full rollback)', async (t) => {
     if (guard(t)) return;

@@ -7,8 +7,7 @@
 --
 --   cr_owner     NOLOGIN  — owns the protected table and the ledger
 --   cr_host      LOGIN    — ZERO INSERT/UPDATE/DELETE on articles
---   cr_executor  LOGIN    — today's atomic transaction (STEP 2 narrows this
---                           to EXECUTE-only on the gate function)
+--   cr_executor  LOGIN    — EXECUTE on cr_execute_grant only (granted in gate.sql)
 --
 -- Passwords are demo material, matching HOST_DATABASE_URL / EXECUTOR_DATABASE_URL.
 
@@ -41,12 +40,8 @@ REVOKE ALL ON TABLE articles FROM cr_host;
 GRANT SELECT ON TABLE articles TO cr_host;
 GRANT SELECT, INSERT ON TABLE state_challenges TO cr_host;
 
--- executor: the existing atomicExecute transaction (CAS + consume + mutate + attest).
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE articles TO cr_executor;
-GRANT SELECT, INSERT, UPDATE ON TABLE consumed_grants TO cr_executor;
-GRANT SELECT, INSERT, UPDATE ON TABLE state_challenges TO cr_executor;
-GRANT SELECT, INSERT ON TABLE attestations TO cr_executor;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO cr_executor;
+-- cr_executor table DML is REVOKED in gate.sql after cr_execute_grant exists.
+-- STEP 1 used to GRANT full DML here; STEP 2 replaced that with EXECUTE-only.
 
 -- Bootstrap (POSTGRES_USER=demo) stays a member of the owner so migrate/TRUNCATE
 -- in tests still work. Superuser can still write — that is scene 9, not host_role.

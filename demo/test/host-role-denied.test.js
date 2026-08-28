@@ -64,12 +64,13 @@ describe('STEP 1 — host_role has zero DML on articles (SQLSTATE 42501)', () =>
     assert.equal(r.rows[0].u, HOST_ROLE);
   });
 
-  test('executor_role CAN INSERT (ATOMIC path still has DML in STEP 1)', async (t) => {
+  test('executor_role raw INSERT on articles is 42501 (gate-only writes)', async (t) => {
     if (guard(t)) return;
-    const r = await executorPool.query(
-      "INSERT INTO articles (title, body) VALUES ('exec', 'ok') RETURNING id",
-    );
-    assert.ok(r.rows[0].id);
-    await executorPool.query('DELETE FROM articles WHERE id = $1', [r.rows[0].id]);
+    try {
+      await executorPool.query("INSERT INTO articles (title, body) VALUES ('exec', 'direct')");
+      assert.fail('cr_executor must not INSERT articles directly');
+    } catch (err) {
+      assert.equal(err.code, '42501', `expected SQLSTATE 42501, got ${err.code}: ${err.message}`);
+    }
   });
 });
