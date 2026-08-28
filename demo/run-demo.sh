@@ -45,12 +45,14 @@ printf '    POST /articles (no header) -> %s %s\n' "$(code_of "$R")" "$(body_of 
 verdict "403" "$(code_of "$R")" "the raw path fails"
 
 # ── 2 ────────────────────────────────────────────────────────────────────────
-scene 2 "grant issued for THIS EXACT body → 200"
+scene 2 "BEARER grant (no state_nonce) → 403 BEARER_NOT_PERMITTED — the hole is closed"
 G=$(issue --operation publish --target-id '' --body "$BODY")
-printf '    issued grant: %s…\n' "${G:0:44}"
+printf '    issued BEARER grant (no state_nonce): %s…\n' "${G:0:44}"
 R=$(curl -s -w '\n%{http_code}' -X POST "$API/articles" -H "$CT" -H "$HDR: $G" -d "$BODY")
-printf '    POST /articles (with grant) -> %s %s\n' "$(code_of "$R")" "$(body_of "$R")"
-verdict "201" "$(code_of "$R")" "authorized mutation succeeds"
+printf '    POST /articles (BEARER grant) -> %s %s\n' "$(code_of "$R")" "$(body_of "$R")"
+STATUS=$(body_of "$R" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
+verdict "403" "$(code_of "$R")" "BEARER does not mutate"
+verdict "BEARER_NOT_PERMITTED" "$STATUS" "status is BEARER_NOT_PERMITTED"
 
 # ── 3 ────────────────────────────────────────────────────────────────────────
 scene 3 "same grant, ONE byte changed in the body → 403 GRANT_SCOPE_MISMATCH"

@@ -80,10 +80,11 @@ Claim under test: a non-admin caller inside this boundary cannot mutate without 
     POST /articles (no header) -> 403 {"error":"execution_grant_required","status":"MALFORMED","reason":"missing_grant_header"}
     ✅ VERDICT: the raw path fails
 
-─── SCENE 2 — grant issued for THIS EXACT body → 200
-    issued grant: eyJ2IjoiY3IuZXhlYy52MSIsImtpZCI6IkRFTU8tS0VZ…
-    POST /articles (with grant) -> 201 {"created":true,"article":{"title":"Ship it","body":"governed mutation"},"authorized_by":{"jti":"15391f2b-2c29-4e7a-b383-87d9a70097ed","operation":"publish","scope_hash":"sha256:8e5fb8a53a25ca547b364e647fb30e214b9146fc0da07b9941b193a9250a982f"}}
-    ✅ VERDICT: authorized mutation succeeds
+─── SCENE 2 — BEARER grant (no state_nonce) → 403 BEARER_NOT_PERMITTED
+    issued BEARER grant (no state_nonce): eyJ2IjoiY3IuZXhlYy52MSIsImtpZCI6IkRFTU8tS0VZ…
+    POST /articles (BEARER grant) -> 403 {"error":"execution_refused","profile":"BEARER","status":"BEARER_NOT_PERMITTED","reason":"execution_grant_bearer_unsupported"}
+    ✅ VERDICT: BEARER does not mutate
+    ✅ VERDICT: status is BEARER_NOT_PERMITTED
 
 ─── SCENE 3 — same grant, ONE byte changed in the body → 403 GRANT_SCOPE_MISMATCH
     original: {"title":"Ship it","body":"governed mutation"}
@@ -218,17 +219,19 @@ Analyze mode never mints a grant; STOP / REQUEST_APPROVAL never mint one either.
 any CodeRifts key. The demo grant also binds a labelled stand-in receipt digest rather than
 a real receipt token.
 
-## Two profiles: BEARER and ATOMIC
+## Two profiles: BEARER is refused; ATOMIC is the write path
 
-The grant format carries an optional `state_nonce`. Its presence is the profile discriminator,
-and the two coexist — a BEARER grant behaves exactly as it did in round 1.
+The grant format still carries an optional `state_nonce` (the verifier classifies
+tokens that way). **This executor does not mutate on BEARER.** A grant with no
+`state_nonce` is `403 BEARER_NOT_PERMITTED` — it never takes a DB client. Round-1
+"BEARER still writes" was a second, unguarded data plane; scene 2 now demonstrates
+the close. ATOMIC (`state_nonce` present) is the only mutation path.
 
 | | **BEARER** (no `state_nonce`) | **ATOMIC** (`state_nonce` present) |
 |---|---|---|
-| Consumption | stateless — replayable until `exp` | **one-use**, enforced by a Postgres PRIMARY KEY |
-| State binding | after-payload only (`scope_hash`) | + CAS against the state the issuer saw |
+| This executor | **refused** (`BEARER_NOT_PERMITTED`) — no write, no ledger | **one-use**, enforced by a Postgres PRIMARY KEY |
+| State binding | n/a (never reaches the write) | CAS against the state the issuer saw |
 | Attestation | none | `cr.exec.attest.v1` returned on commit |
-| Round-1 behaviour | byte-identical | n/a (new) |
 
 `state_nonce` is a **separate signed field** and is deliberately **not** folded into
 `scope_hash`: after-payload binding and state binding are independent facts, so rotating a
@@ -295,10 +298,10 @@ target, and request body — verified with no network access.
 - **No bypass.** Anything that reaches the data without traversing this middleware is
   unaffected: root on the host, a DB console, an admin panel on another route, a migration
   job, a second service sharing the database.
-- **The bearer replay window exists ONLY on the BEARER profile. The ATOMIC profile's ledger
-  closes it.** A BEARER grant is a stateless token: within its TTL a stolen copy authorizes the
-  same operation/target/body for any presenter. An ATOMIC grant is consumed exactly once by the
-  `consumed_grants` primary key, so a stolen copy buys a replayer nothing after first use.
+- **BEARER is closed at this executor.** A grant with no `state_nonce` is refused
+  (`BEARER_NOT_PERMITTED`) and writes nothing. The format can still *name* BEARER
+  (verifier `grantProfile`); this process will not honour it. ATOMIC consumption is
+  one-use via the `consumed_grants` primary key.
 - **An attestation proves that a holder of the executor key asserts this commit.** It does not
   prove the executor's code is unmodified — **deploy attestation is out of scope**, a later
   artifact, not this one. It does not prove a human saw anything, does not prove the grant is

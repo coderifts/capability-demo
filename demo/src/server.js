@@ -9,9 +9,8 @@
  * POST   /articles            GUARDED (publish)
  * DELETE /articles/:id        GUARDED (deploy)
  *
- * Both grant profiles coexist:
- *   BEARER (no state_nonce) → round-1 path, byte-identical behaviour, no ledger, no attestation.
- *   ATOMIC (state_nonce)    → single-transaction CAS + consume + mutate, returns an attestation.
+ * ATOMIC (state_nonce present) is the only mutation path: CAS + consume + mutate in one tx.
+ * BEARER (no state_nonce) is REFUSED here — no ledger, no write. It is a hole, not a residual.
  *
  * Still no CodeRifts service in the compose file: grant verification remains offline against
  * a pinned key. Postgres is the executor's own state, not an authorization oracle.
@@ -54,7 +53,7 @@ function buildApp({ pool, keysFile = KEYS_FILE, audience = process.env.CODERIFTS
     targetId: (req) => (req.params && req.params.id != null ? String(req.params.id) : ''),
   });
 
-  app.get('/health', (_q, r) => r.json({ status: 'ok', guard: 'offline-grant-verification', profiles: ['BEARER', 'ATOMIC'] }));
+  app.get('/health', (_q, r) => r.json({ status: 'ok', guard: 'offline-grant-verification', profiles: ['ATOMIC'] }));
 
   app.get('/articles/count', async (_q, r) => {
     const x = await pool.query('SELECT count(*)::int AS n FROM articles');
@@ -86,13 +85,15 @@ function buildApp({ pool, keysFile = KEYS_FILE, audience = process.env.CODERIFTS
     const targetId = targetOf(req);
 
     if (profile === 'BEARER') {
-      // Round-1 behaviour, unchanged: no ledger, no CAS, no attestation.
-      const client = await pool.connect();
-      try {
-        const row = await mutate(client, req);
-        return res.status(req.method === 'POST' ? 201 : 200)
-          .json({ ok: true, profile, row, attestation: null });
-      } finally { client.release(); }
+      // Closed: a grant with no state_nonce used to mutate with no ledger and no
+      // attestation — a second, unguarded data plane. Refuse; never take a client
+      // from the pool. ATOMIC is the only write path (atomic.js).
+      return res.status(403).json({
+        error: 'execution_refused',
+        profile: 'BEARER',
+        status: 'BEARER_NOT_PERMITTED',
+        reason: 'execution_grant_bearer_unsupported',
+      });
     }
 
     const out = await atomicExecute({

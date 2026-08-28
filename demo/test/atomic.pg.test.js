@@ -44,28 +44,28 @@ const guard = (t) => {
   return false;
 };
 
-describe('profiles coexist', () => {
-  test('BEARER grant (no state_nonce) still mutates — round-1 behaviour intact', async (t) => {
+describe('BEARER is refused — not a second data plane', () => {
+  test('BEARER grant (no state_nonce) is 403 BEARER_NOT_PERMITTED and writes no row', async (t) => {
     if (guard(t)) return;
+    const before = (await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c;
+    const ledger = (await pool.query('SELECT count(*)::int c FROM consumed_grants')).rows[0].c;
     const body = JSON.stringify({ title: 'B', body: 'bearer' });
     const r = await req('POST', '/articles', { body, grant: mkGrant({ operation: 'publish', target_id: '', body }) });
-    assert.equal(r.code, 201);
+    assert.equal(r.code, 403);
+    assert.equal(r.json.status, 'BEARER_NOT_PERMITTED');
+    assert.equal(r.json.reason, 'execution_grant_bearer_unsupported');
     assert.equal(r.json.profile, 'BEARER');
-    assert.equal(r.json.attestation, null, 'BEARER must not mint an attestation');
+    assert.equal((await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c, before);
+    assert.equal((await pool.query('SELECT count(*)::int c FROM consumed_grants')).rows[0].c, ledger);
   });
-  test('BEARER writes NOTHING to the ledger (stateless, as before)', async (t) => {
+  test('replaying a BEARER grant still writes nothing', async (t) => {
     if (guard(t)) return;
-    const n = (await pool.query('SELECT count(*)::int c FROM consumed_grants')).rows[0].c;
-    const body = JSON.stringify({ title: 'B2', body: 'bearer2' });
-    await req('POST', '/articles', { body, grant: mkGrant({ operation: 'publish', target_id: '', body }) });
-    assert.equal((await pool.query('SELECT count(*)::int c FROM consumed_grants')).rows[0].c, n);
-  });
-  test('BEARER is replayable (the honest bearer window) — ATOMIC is not', async (t) => {
-    if (guard(t)) return;
+    const before = (await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c;
     const body = JSON.stringify({ title: 'B3', body: 'replay' });
     const g = mkGrant({ operation: 'publish', target_id: '', body });
-    assert.equal((await req('POST', '/articles', { body, grant: g })).code, 201);
-    assert.equal((await req('POST', '/articles', { body, grant: g })).code, 201);
+    assert.equal((await req('POST', '/articles', { body, grant: g })).code, 403);
+    assert.equal((await req('POST', '/articles', { body, grant: g })).code, 403);
+    assert.equal((await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c, before);
   });
 });
 

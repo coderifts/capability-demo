@@ -7,8 +7,8 @@
  *   (3) the mutation itself
  * Any failure rolls back everything, so a refused grant can never leave a partial write.
  *
- * BEARER grants (no state_nonce) never enter this path — they keep round-1 behaviour
- * byte-identical. The two profiles coexist by design.
+ * BEARER grants (no state_nonce) never enter this path — the executor refuses them
+ * in server.js before any mutation. This module is ATOMIC-only.
  */
 
 const crypto = require('node:crypto');
