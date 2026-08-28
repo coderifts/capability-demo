@@ -9,7 +9,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const path = require('node:path');
 
-const { makePool, migrate, currentDigest, bootstrapUrl, hostUrl, executorUrl } = require('../src/db');
+const { makePool, migrate, currentDigest, bootstrapUrl, hostUrl, executorUrl, DEFAULT_DEPLOYMENT_ID } = require('../src/db');
 const { buildApp } = require('../src/server');
 const { issue } = require('../issue-grant');
 
@@ -109,7 +109,9 @@ describe('PK one-use', () => {
     assert.ok(row.rows[0].scope_hash.startsWith('sha256:'));
     assert.equal(row.rows[0].target_profile, 'postgres.atomic');
     assert.equal(row.rows[0].status, 'sealed');
+    assert.equal(row.rows[0].deployment_id, DEFAULT_DEPLOYMENT_ID);
     assert.ok(row.rows[0].preimage && String(row.rows[0].preimage).startsWith('cr.gate.preimage.v1|'));
+    assert.match(row.rows[0].preimage, new RegExp(`\\|${DEFAULT_DEPLOYMENT_ID}\\|sha256:`));
     assert.ok(row.rows[0].attestation_ref, 'seal stores the signature on attestation_ref');
     const registry = JSON.parse(require('node:fs').readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
     const pub = crypto.createPublicKey(registry.keys[0].public_key_pem);
@@ -122,6 +124,13 @@ describe('PK one-use', () => {
       crypto.verify(null, Buffer.from(`${row.rows[0].preimage}|tampered`, 'utf8'), pub, Buffer.from(row.rows[0].attestation_ref, 'base64url')),
       false,
       'a tampered preimage fails verify',
+    );
+    const didTampered = row.rows[0].preimage.replace(`|${DEFAULT_DEPLOYMENT_ID}|`, '|other-deployment|');
+    assert.notEqual(didTampered, row.rows[0].preimage);
+    assert.equal(
+      crypto.verify(null, Buffer.from(didTampered, 'utf8'), pub, Buffer.from(row.rows[0].attestation_ref, 'base64url')),
+      false,
+      'a tampered deployment_id in the preimage fails verify',
     );
     assert.equal(posted.json.atomic_execution_attestation.preimage, row.rows[0].preimage);
     assert.equal(posted.json.atomic_execution_attestation.signature, row.rows[0].attestation_ref);

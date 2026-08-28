@@ -34,6 +34,12 @@ const { computeScopeHash } = require('../packages/middleware/src/verify-grant');
 const SIGNING_PREFIX = 'crexec.v1';
 const DEFAULT_TTL_S = 300;          // docs/cr-exec-v1.md: default TTL 300s
 const TTL_CAP_S = 3600;             // hard cap 1h
+const DEFAULT_DEPLOYMENT_ID = 'demo-deployment';
+
+function configuredDeploymentId() {
+  const v = process.env.DEPLOYMENT_ID;
+  return (v != null && String(v).length > 0) ? String(v) : DEFAULT_DEPLOYMENT_ID;
+}
 
 function toUtcSeconds(d) { return d.toISOString().replace(/\.\d{3}Z$/, 'Z'); }
 function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
@@ -44,6 +50,7 @@ function signingInput(b) {
     scalar(b.audience), scalar(b.operation), scalar(b.target_id),
     scalar(b.jti), scalar(b.iat), scalar(b.exp)];
   if (b.state_nonce != null && String(b.state_nonce).length > 0) parts.push(String(b.state_nonce));
+  if (b.deployment_id != null && String(b.deployment_id).length > 0) parts.push(String(b.deployment_id));
   return parts.join('|');
 }
 
@@ -102,6 +109,12 @@ function issue(opts) {
   if (opts.state_nonce != null && opts.state_nonce !== true && String(opts.state_nonce).length > 0) {
     payload.state_nonce = String(opts.state_nonce);
   }
+  // STEP 4: every grant carries a deployment_id. Bound into the grant signature
+  // (optional-additive slot) and later into the gate preimage.
+  const deployment_id = opts.deployment_id != null && opts.deployment_id !== true
+    ? String(opts.deployment_id)
+    : configuredDeploymentId();
+  if (deployment_id.length > 0) payload.deployment_id = deployment_id;
   const sig = crypto.sign(null, Buffer.from(signingInput(payload), 'utf8'), privateKey);
   return `${b64url(Buffer.from(JSON.stringify(payload), 'utf8'))}.${b64url(sig)}`;
 }
@@ -110,10 +123,10 @@ if (require.main === module) {
   const a = parseArgs(process.argv);
   if (!a.operation) {
     process.stderr.write('usage: node demo/issue-grant.js --operation <op> [--target-id <id>] '
-      + '[--body <json> | --body-file <path>] [--ttl <s>] [--iat-offset <s>] [--audience <aud>] [--state-nonce <n>]\n');
+      + '[--body <json> | --body-file <path>] [--ttl <s>] [--iat-offset <s>] [--audience <aud>] [--state-nonce <n>] [--deployment-id <id>]\n');
     process.exit(2);
   }
   process.stdout.write(issue(a) + '\n');
 }
 
-module.exports = { issue, signingInput };
+module.exports = { issue, signingInput, configuredDeploymentId, DEFAULT_DEPLOYMENT_ID };

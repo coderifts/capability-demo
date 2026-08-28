@@ -81,8 +81,13 @@ function verifyAtomicExecutionAttestation(token, opts = {}) {
   const grant = opts.intended && opts.intended.grant;
   if (grant) {
     const jti = String(grant.jti || '');
-    if (!preimage.startsWith(`cr.gate.preimage.v1|${jti}|`)) {
-      return { valid: false, status: 'ATTEST_UNBOUND', reason: 'grant_jti_mismatch' };
+    const did = grant.deployment_id != null && String(grant.deployment_id).length > 0
+      ? String(grant.deployment_id) : '';
+    const prefix = did
+      ? `cr.gate.preimage.v1|${jti}|${did}|`
+      : `cr.gate.preimage.v1|${jti}|`;
+    if (!preimage.startsWith(prefix)) {
+      return { valid: false, status: 'ATTEST_UNBOUND', reason: did ? 'deployment_id_mismatch' : 'grant_jti_mismatch' };
     }
   }
   return {
@@ -111,10 +116,23 @@ function verifyPreimageSignature(preimage, signatureB64url, publicKey) {
  * @param {string} [o.title]
  * @param {string} [o.body]
  * @param {object} o.executor             { privateKey, kid } — used AFTER the gate, not inside it
+ * @param {string} o.deploymentId         sidecar's configured deployment_id (exactly one)
  * @param {boolean} [o.crashBeforeSeal]   TEST ONLY: throw between gate and seal
  * @returns {Promise<{ok:true,row:object,attestation:string,atomic_execution_attestation:object,preimage:string}|{ok:false,status:string,reason:string,http:number}>}
  */
-async function atomicExecute({ pool, payload, targetId, operation, title, body, executor, crashBeforeSeal }) {
+async function atomicExecute({ pool, payload, targetId, operation, title, body, executor, deploymentId, crashBeforeSeal }) {
+  const configured = deploymentId == null ? '' : String(deploymentId);
+  const grantDid = payload && payload.deployment_id != null ? String(payload.deployment_id) : '';
+  // REJECT before the gate: no BEGIN, no FOR UPDATE, no consume.
+  if (!configured || grantDid !== configured) {
+    return {
+      ok: false,
+      status: 'DEPLOYMENT_MISMATCH',
+      reason: 'deployment_id_mismatch',
+      http: 403,
+    };
+  }
+
   const client = await pool.connect();
   let begun = false;
   try {
@@ -124,7 +142,7 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
     const r = await client.query(
       `SELECT ok, status, reason, http, article_id, article_title, article_body,
               preimage, challenged_digest, current_digest_out
-         FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)`,
+         FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7,$8)`,
       [
         payload.jti,
         payload.scope_hash,
@@ -133,6 +151,7 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
         operation,
         title == null ? '' : String(title),
         body == null ? '' : String(body),
+        configured,
       ],
     );
     const g = r.rows[0];
@@ -160,8 +179,8 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
     const signature = signPreimage(executor.privateKey, preimage);
 
     await client.query(
-      `SELECT ok, status, reason, http, attestation_ref FROM cap_seal($1,$2,$3)`,
-      [payload.jti, preimage_hash, signature],
+      `SELECT ok, status, reason, http, attestation_ref FROM cap_seal($1,$2,$3,$4)`,
+      [configured, payload.jti, preimage_hash, signature],
     );
 
     await client.query('COMMIT');
@@ -175,6 +194,7 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
       v: ATOMIC_ATTEST_V,
       executor_kid: executor.kid,
       jti: payload.jti,
+      deployment_id: configured,
       preimage,
       preimage_hash,
       signature,

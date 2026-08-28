@@ -23,7 +23,10 @@
 -- event at COMMIT with NEW.status='consumed'. The function RE-SELECTS the
 -- current row by jti and only raises if status is still 'consumed'.
 
+DROP FUNCTION IF EXISTS cap_seal(text, text, text);
+
 CREATE OR REPLACE FUNCTION cap_seal(
+  p_deployment_id text,
   p_jti text,
   p_preimage_hash text,
   p_signature text
@@ -42,6 +45,10 @@ DECLARE
   g RECORD;
   expected_hash text;
 BEGIN
+  IF p_deployment_id IS NULL OR p_deployment_id = '' THEN
+    RAISE EXCEPTION 'cap_seal: missing_deployment_id'
+      USING ERRCODE = 'check_violation';
+  END IF;
   IF p_jti IS NULL OR p_jti = '' THEN
     RAISE EXCEPTION 'cap_seal: missing_jti'
       USING ERRCODE = 'check_violation';
@@ -54,7 +61,7 @@ BEGIN
   SELECT cg.jti, cg.status, cg.preimage, cg.attestation_ref
     INTO g
     FROM public.consumed_grants cg
-   WHERE cg.jti = p_jti
+   WHERE cg.deployment_id = p_deployment_id AND cg.jti = p_jti
      FOR UPDATE;
 
   IF NOT FOUND THEN
@@ -83,7 +90,7 @@ BEGIN
   UPDATE public.consumed_grants
      SET status = 'sealed',
          attestation_ref = p_signature
-   WHERE jti = p_jti;
+   WHERE deployment_id = p_deployment_id AND jti = p_jti;
 
   ok := true;
   status := 'SEALED';
@@ -94,9 +101,9 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION cap_seal(text, text, text) OWNER TO cr_owner;
-REVOKE ALL ON FUNCTION cap_seal(text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION cap_seal(text, text, text) TO cr_executor;
+ALTER FUNCTION cap_seal(text, text, text, text) OWNER TO cr_owner;
+REVOKE ALL ON FUNCTION cap_seal(text, text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION cap_seal(text, text, text, text) TO cr_executor;
 
 CREATE OR REPLACE FUNCTION cr_forbid_commit_unsigned()
 RETURNS trigger
@@ -110,7 +117,8 @@ BEGIN
   -- Re-read: NEW is the event-time image. Happy path is INSERT consumed then
   -- UPDATE sealed in the same tx; COMMIT-time state is what matters.
   -- Fail closed: a missing public row is not a pass (temp-table shadowing).
-  SELECT cg.status INTO cur FROM public.consumed_grants cg WHERE cg.jti = NEW.jti;
+  SELECT cg.status INTO cur FROM public.consumed_grants cg
+   WHERE cg.deployment_id = NEW.deployment_id AND cg.jti = NEW.jti;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'consumed_unsigned: jti % missing from public.consumed_grants at COMMIT', NEW.jti
       USING ERRCODE = 'check_violation';

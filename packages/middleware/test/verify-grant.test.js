@@ -156,6 +156,18 @@ describe('malformed / structure', () => {
     delete b.jti;
     assert.equal(V(`${b64url(Buffer.from(JSON.stringify(b)))}.x`).reason, 'missing_field');
   });
+  test('deployment_id is an optional signed field (STEP 4) and is covered by the signature', () => {
+    const r = V(mint({ deployment_id: 'demo-deployment' }));
+    assert.equal(r.status, 'GRANT_CURRENT');
+    assert.equal(r.payload.deployment_id, 'demo-deployment');
+    const [b, s] = mint({ deployment_id: 'demo-deployment' }).split('.');
+    const body = JSON.parse(Buffer.from(b, 'base64url').toString());
+    body.deployment_id = 'other-deployment';
+    const bad = verifyExecutionGrant(`${b64url(Buffer.from(JSON.stringify(body)))}.${s}`, {
+      publicKey, keyKid: KID, intended: {},
+    });
+    assert.equal(bad.status, 'INVALID_SIGNATURE');
+  });
   test('reserved key cnf → MALFORMED / unknown_field (not implemented this phase)', () => {
     const b = JSON.parse(Buffer.from(mint().split('.')[0], 'base64url').toString());
     b.cnf = { key_thumbprint: 'x' };

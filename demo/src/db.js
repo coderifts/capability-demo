@@ -4,10 +4,11 @@
  * Postgres layer for the ATOMIC executor profile.
  *
  * The one-use guarantee is NOT application logic — it is the PRIMARY KEY on
- * consumed_grants.jti. Two concurrent requests presenting the same grant both reach the
- * INSERT; exactly one wins, the other gets SQLSTATE 23505 and its whole transaction
- * (including the mutation) rolls back. No advisory lock, no SELECT-then-INSERT race,
- * no application-level "have I seen this?" check that could be wrong under concurrency.
+ * consumed_grants (deployment_id, jti). Two concurrent requests presenting the same
+ * grant both reach the INSERT; exactly one wins, the other gets SQLSTATE 23505 and
+ * its whole transaction (including the mutation) rolls back. Same jti under a
+ * different deployment_id is a different row. No advisory lock, no SELECT-then-INSERT
+ * race, no application-level "have I seen this?" check that could be wrong under concurrency.
  *
  * STEP 1 — two LOGIN roles besides the bootstrap superuser (demo/sql/roles.sql):
  *   hostUrl()      cr_host      — ZERO DML on articles (42501)
@@ -27,6 +28,13 @@ const GATE_SQL = fs.readFileSync(path.join(__dirname, '..', 'sql', 'gate.sql'), 
 const SEAL_SQL = fs.readFileSync(path.join(__dirname, '..', 'sql', 'seal.sql'), 'utf8');
 
 const DEFAULT_BOOTSTRAP_URL = 'postgres://demo:demo@localhost:55432/demo';
+const DEFAULT_DEPLOYMENT_ID = 'demo-deployment';
+
+/** Sidecar is configured with exactly one deployment_id. Signature-binding, not a WHERE filter. */
+function configuredDeploymentId() {
+  const v = process.env.DEPLOYMENT_ID;
+  return (v != null && String(v).length > 0) ? String(v) : DEFAULT_DEPLOYMENT_ID;
+}
 
 const DDL = `
 -- digest() for the state-CAS row hashes.
@@ -39,32 +47,38 @@ CREATE TABLE IF NOT EXISTS articles (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- The ledger. jti is the PK: that single constraint IS the one-use mechanism.
+-- The ledger. (deployment_id, jti) is the PK: that constraint IS the one-use mechanism.
+-- deployment_id is signature-binding (in the signed preimage), not a WHERE-clause tenant filter.
 CREATE TABLE IF NOT EXISTS consumed_grants (
-  jti             TEXT PRIMARY KEY,
+  deployment_id   TEXT NOT NULL DEFAULT '',
+  jti             TEXT NOT NULL,
   scope_hash      TEXT NOT NULL,
   consumed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   attestation_ref TEXT,
   target_profile  TEXT NOT NULL DEFAULT 'postgres.atomic',
   status          TEXT NOT NULL DEFAULT 'consumed',
-  preimage        TEXT
+  preimage        TEXT,
+  PRIMARY KEY (deployment_id, jti)
 );
 
 -- Challenge-first state binding. current_digest records the state the ISSUER saw, so the
 -- executor can CAS against it at commit time. Single-use: consumed_at stamps it.
+-- deployment_id is carried (stamped at issue); nonce remains the row key.
 CREATE TABLE IF NOT EXISTS state_challenges (
   state_nonce     TEXT PRIMARY KEY,
   target_id       TEXT NOT NULL,
   current_digest  TEXT NOT NULL,
   expires_at      TIMESTAMPTZ NOT NULL,
-  consumed_at     TIMESTAMPTZ
+  consumed_at     TIMESTAMPTZ,
+  deployment_id   TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS attestations (
   id          BIGSERIAL PRIMARY KEY,
   grant_jti   TEXT NOT NULL,
   token       TEXT NOT NULL,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deployment_id   TEXT NOT NULL DEFAULT ''
 );
 `;
 
@@ -161,4 +175,6 @@ module.exports = {
   bootstrapUrl,
   hostUrl,
   executorUrl,
+  configuredDeploymentId,
+  DEFAULT_DEPLOYMENT_ID,
 };

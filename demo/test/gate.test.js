@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 
 const {
   makePool, migrate, bootstrapUrl, hostUrl, executorUrl, EXECUTOR_ROLE,
+  DEFAULT_DEPLOYMENT_ID,
 } = require('../src/db');
 
 let bootstrap, hostPool, executorPool, reachable = false;
@@ -85,8 +86,8 @@ describe('STEP 2 — executor is locked out of direct writes; gate works', () =>
     try {
       await client.query('BEGIN');
       const r = await client.query(
-        `SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)`,
-        [jti, 'sha256:deadbeef', nonce, '', 'publish', title, 'ok'],
+        `SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [jti, 'sha256:deadbeef', nonce, '', 'publish', title, 'ok', DEFAULT_DEPLOYMENT_ID],
       );
       const g = r.rows[0];
       assert.equal(g.ok, true, JSON.stringify(g));
@@ -106,13 +107,13 @@ describe('STEP 2 — executor is locked out of direct writes; gate works', () =>
     const nonce = await challenge('');
     const jti = `jti-replay-${Date.now()}`;
     const title = `once-${jti}`;
-    const args = [jti, 'sha256:beef', nonce, '', 'publish', title, 'only'];
+    const args = [jti, 'sha256:beef', nonce, '', 'publish', title, 'only', DEFAULT_DEPLOYMENT_ID];
     const client = await executorPool.connect();
     try {
       await client.query('BEGIN');
-      const first = await client.query('SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)', args);
+      const first = await client.query('SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7,$8)', args);
       assert.equal(first.rows[0].ok, true);
-      const second = await client.query('SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)', args);
+      const second = await client.query('SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7,$8)', args);
       assert.equal(second.rows[0].ok, false);
       assert.equal(second.rows[0].status, 'GRANT_CONSUMED');
       assert.equal(second.rows[0].http, 409);

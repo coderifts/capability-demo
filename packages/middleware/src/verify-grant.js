@@ -47,7 +47,7 @@ const SIGNED_FIELDS = Object.freeze([
  * after-payload binding and state binding are independent facts, so rotating a nonce
  * must not look like a different after-shape.
  */
-const OPTIONAL_SIGNED_FIELDS = Object.freeze(['state_nonce']);
+const OPTIONAL_SIGNED_FIELDS = Object.freeze(['state_nonce', 'deployment_id']);
 
 function sha256hex(str) {
   return crypto.createHash('sha256').update(String(str), 'utf8').digest('hex');
@@ -82,6 +82,11 @@ function signingInput(body) {
   // signing input stays byte-identical to pre-ATOMIC issuances.
   if (body.state_nonce != null && String(body.state_nonce).length > 0) {
     parts.push(String(body.state_nonce));
+  }
+  // deployment_id is optional-additive (STEP 4). Appended only when present so
+  // grants issued before this field stay byte-identical.
+  if (body.deployment_id != null && String(body.deployment_id).length > 0) {
+    parts.push(String(body.deployment_id));
   }
   return parts.join('|');
 }

@@ -10,6 +10,15 @@
 ALTER TABLE consumed_grants ADD COLUMN IF NOT EXISTS target_profile TEXT NOT NULL DEFAULT 'postgres.atomic';
 ALTER TABLE consumed_grants ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'consumed';
 ALTER TABLE consumed_grants ADD COLUMN IF NOT EXISTS preimage TEXT;
+-- STEP 4: deployment_id is bound into the signed preimage. PK becomes (deployment_id, jti).
+ALTER TABLE consumed_grants ADD COLUMN IF NOT EXISTS deployment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE state_challenges ADD COLUMN IF NOT EXISTS deployment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE attestations ADD COLUMN IF NOT EXISTS deployment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE consumed_grants DROP CONSTRAINT IF EXISTS consumed_grants_pkey;
+ALTER TABLE consumed_grants ADD PRIMARY KEY (deployment_id, jti);
+
+-- Arity change: 7-arg (STEP 2/3) → 8-arg with p_deployment_id.
+DROP FUNCTION IF EXISTS cr_execute_grant(text, text, text, text, text, text, text);
 
 CREATE OR REPLACE FUNCTION cr_execute_grant(
   p_jti text,
@@ -18,7 +27,8 @@ CREATE OR REPLACE FUNCTION cr_execute_grant(
   p_target_id text,
   p_operation text,
   p_title text,
-  p_body text
+  p_body text,
+  p_deployment_id text
 ) RETURNS TABLE (
   ok boolean,
   status text,
@@ -42,6 +52,13 @@ DECLARE
   mut_digest text;
   pre text;
 BEGIN
+  -- Empty deployment_id is refused here with no lock/consume. The sidecar still
+  -- rejects a *mismatch* against its configured id BEFORE calling the gate.
+  IF p_deployment_id IS NULL OR p_deployment_id = '' THEN
+    ok := false; status := 'DEPLOYMENT_MISMATCH'; reason := 'deployment_id_required'; http := 403;
+    RETURN NEXT; RETURN;
+  END IF;
+
   -- (1) CAS — same checks as atomic.js:44-70
   SELECT sc.state_nonce, sc.target_id, sc.current_digest, sc.expires_at, sc.consumed_at
     INTO ch
@@ -81,8 +98,8 @@ BEGIN
 
   -- (2) Ledger. PK is the one-use mechanism (atomic.js:73-85).
   BEGIN
-    INSERT INTO public.consumed_grants (jti, scope_hash, target_profile, status)
-    VALUES (p_jti, p_scope_hash, 'postgres.atomic', 'consumed');
+    INSERT INTO public.consumed_grants (deployment_id, jti, scope_hash, target_profile, status)
+    VALUES (p_deployment_id, p_jti, p_scope_hash, 'postgres.atomic', 'consumed');
   EXCEPTION WHEN unique_violation THEN
     ok := false; status := 'GRANT_CONSUMED'; reason := 'grant_already_consumed'; http := 409;
     RETURN NEXT; RETURN;
@@ -122,12 +139,16 @@ BEGIN
       'UTF8'),
     'sha256'), 'hex');
 
-  -- Canonical preimage for STEP 3 signer. No private key. No signature.
-  -- jti | deployment_id-placeholder | mutation digest | target
-  pre := 'cr.gate.preimage.v1|' || coalesce(p_jti, '') || '|' || '' || '|sha256:' || mut_digest
+  -- Canonical preimage. deployment_id fills the STEP 3 placeholder slot and is
+  -- therefore part of the SIGNED bytes. Isolation stays the database; this is
+  -- signature-binding, not a WHERE-clause tenant filter.
+  -- jti | deployment_id | mutation digest | target
+  pre := 'cr.gate.preimage.v1|' || coalesce(p_jti, '') || '|' || coalesce(p_deployment_id, '')
+      || '|sha256:' || mut_digest
       || '|' || coalesce(p_target_id, '');
 
-  UPDATE public.consumed_grants SET preimage = pre WHERE jti = p_jti;
+  UPDATE public.consumed_grants SET preimage = pre
+   WHERE deployment_id = p_deployment_id AND jti = p_jti;
 
   ok := true; status := 'CONSUMED'; reason := NULL; http := 200;
   preimage := pre;
@@ -137,9 +158,9 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION cr_execute_grant(text, text, text, text, text, text, text) OWNER TO cr_owner;
-REVOKE ALL ON FUNCTION cr_execute_grant(text, text, text, text, text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION cr_execute_grant(text, text, text, text, text, text, text) TO cr_executor;
+ALTER FUNCTION cr_execute_grant(text, text, text, text, text, text, text, text) OWNER TO cr_owner;
+REVOKE ALL ON FUNCTION cr_execute_grant(text, text, text, text, text, text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION cr_execute_grant(text, text, text, text, text, text, text, text) TO cr_executor;
 
 -- STEP 2: executor may no longer write tables directly. Gate only.
 REVOKE ALL ON TABLE articles FROM cr_executor;

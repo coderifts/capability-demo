@@ -24,6 +24,7 @@ const { requireExecutionGrant, captureRawBody } = require('@coderifts/capability
 const { grantProfile } = require('@coderifts/capability-express/src/verify-grant');
 const {
   makePool, migrate, waitReady, currentDigest, hostUrl, executorUrl, bootstrapUrl,
+  configuredDeploymentId,
 } = require('./db');
 const { atomicExecute } = require('./atomic');
 
@@ -47,9 +48,11 @@ function loadExecutor() {
 
 function buildApp({
   pool, executorPool, keysFile = KEYS_FILE, audience = process.env.CODERIFTS_AUDIENCE || '',
+  deploymentId = configuredDeploymentId(),
 } = {}) {
   const app = express();
   const executor = loadExecutor();
+  const deployment_id = deploymentId == null ? '' : String(deploymentId);
   // STEP 1: host routes use `pool` (cr_host).
   // STEP 2: atomic write uses executorPool (cr_executor) calling cr_execute_grant only.
   if (!executorPool) {
@@ -79,9 +82,9 @@ function buildApp({
       const digest = await currentDigest(client, targetId);
       const expires_at = new Date(Date.now() + CHALLENGE_TTL_MS).toISOString();
       await client.query(
-        `INSERT INTO state_challenges (state_nonce, target_id, current_digest, expires_at)
-         VALUES ($1,$2,$3,$4)`,
-        [state_nonce, targetId, digest, expires_at],
+        `INSERT INTO state_challenges (state_nonce, target_id, current_digest, expires_at, deployment_id)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [state_nonce, targetId, digest, expires_at, deployment_id],
       );
       res.json({ state_nonce, target_id: targetId, current_digest: digest, expires_at });
     } finally { client.release(); }
@@ -111,6 +114,7 @@ function buildApp({
         payload,
         targetId,
         executor,
+        deploymentId: deployment_id,
         operation: payload.operation,
         title: req.body && req.body.title,
         body: req.body && req.body.body,

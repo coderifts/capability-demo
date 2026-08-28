@@ -13,6 +13,7 @@ const path = require('node:path');
 
 const {
   makePool, migrate, bootstrapUrl, hostUrl, executorUrl, HOST_ROLE, EXECUTOR_ROLE,
+  DEFAULT_DEPLOYMENT_ID,
 } = require('../src/db');
 const { loadExecutor } = require('../src/server');
 const {
@@ -76,7 +77,7 @@ describe('STEP 3 — cap_seal privileges', () => {
     const u = await hostPool.query('SELECT current_user AS u');
     assert.equal(u.rows[0].u, HOST_ROLE);
     try {
-      await hostPool.query('SELECT * FROM cap_seal($1,$2,$3)', ['nope', 'sha256:00', 'sig']);
+      await hostPool.query('SELECT * FROM cap_seal($1,$2,$3,$4)', [DEFAULT_DEPLOYMENT_ID, 'nope', 'sha256:00', 'sig']);
       assert.fail('cr_host must not EXECUTE cap_seal');
     } catch (err) {
       assert.equal(err.code, '42501', `expected SQLSTATE 42501, got ${err.code}: ${err.message}`);
@@ -91,19 +92,24 @@ describe('STEP 3 — happy path: gate → process-sign → seal → COMMIT', () 
     const jti = `jti-seal-happy-${Date.now()}`;
     const out = await atomicExecute({
       pool: executorPool,
-      payload: { jti, scope_hash: 'sha256:' + 'ab'.repeat(32), state_nonce: nonce },
+      payload: {
+        jti, scope_hash: 'sha256:' + 'ab'.repeat(32), state_nonce: nonce,
+        deployment_id: DEFAULT_DEPLOYMENT_ID,
+      },
       targetId: '',
       operation: 'publish',
       title: 'sealed-happy',
       body: 'ok',
       executor,
+      deploymentId: DEFAULT_DEPLOYMENT_ID,
     });
     assert.equal(out.ok, true);
     assert.equal(out.atomic_execution_attestation.v, ATOMIC_ATTEST_V);
     assert.equal(out.atomic_execution_attestation.jti, jti);
+    assert.equal(out.atomic_execution_attestation.deployment_id, DEFAULT_DEPLOYMENT_ID);
     assert.ok(String(out.preimage).startsWith('cr.gate.preimage.v1|'));
-    // deployment_id slot stays empty (STEP 4 fills it). Format: v1|{jti}||sha256:{digest}|{target}
-    assert.match(out.preimage, new RegExp(`^cr\\.gate\\.preimage\\.v1\\|${jti}\\|\\|sha256:[0-9a-f]{64}\\|`));
+    // Format: v1|{jti}|{deployment_id}|sha256:{digest}|{target}
+    assert.match(out.preimage, new RegExp(`^cr\\.gate\\.preimage\\.v1\\|${jti}\\|${DEFAULT_DEPLOYMENT_ID}\\|sha256:[0-9a-f]{64}\\|`));
     const led = await bootstrap.query('SELECT * FROM consumed_grants WHERE jti=$1', [jti]);
     assert.equal(led.rowCount, 1);
     assert.equal(led.rows[0].status, 'sealed');
@@ -125,15 +131,15 @@ describe('STEP 3 — seal rejects a foreign/altered preimage (raise + rollback)'
     try {
       await client.query('BEGIN');
       const g = await client.query(
-        'SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)',
-        [jti, 'sha256:' + 'cd'.repeat(32), nonce, '', 'publish', title, 'nope'],
+        'SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7,$8)',
+        [jti, 'sha256:' + 'cd'.repeat(32), nonce, '', 'publish', title, 'nope', DEFAULT_DEPLOYMENT_ID],
       );
       assert.equal(g.rows[0].ok, true);
       const foreign = `${g.rows[0].preimage}|altered`;
       const foreignHash = preimageHashOf(foreign);
       const foreignSig = signPreimage(executor.privateKey, foreign);
       await assert.rejects(
-        () => client.query('SELECT * FROM cap_seal($1,$2,$3)', [jti, foreignHash, foreignSig]),
+        () => client.query('SELECT * FROM cap_seal($1,$2,$3,$4)', [DEFAULT_DEPLOYMENT_ID, jti, foreignHash, foreignSig]),
         (err) => {
           assert.equal(err.code, '23514');
           assert.match(String(err.message), /foreign_preimage/);
@@ -157,8 +163,8 @@ describe('STEP 3 — mutate-but-skip-seal CANNOT COMMIT', () => {
     try {
       await client.query('BEGIN');
       const g = await client.query(
-        'SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)',
-        [jti, 'sha256:' + 'ef'.repeat(32), nonce, '', 'publish', title, 'unsigned'],
+        'SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7,$8)',
+        [jti, 'sha256:' + 'ef'.repeat(32), nonce, '', 'publish', title, 'unsigned', DEFAULT_DEPLOYMENT_ID],
       );
       assert.equal(g.rows[0].ok, true, JSON.stringify(g.rows[0]));
       await assert.rejects(
@@ -197,12 +203,16 @@ describe('STEP 3 — crash-before-seal rolls back fully', () => {
     await assert.rejects(
       () => atomicExecute({
         pool: executorPool,
-        payload: { jti, scope_hash: 'sha256:' + '11'.repeat(32), state_nonce: nonce },
+        payload: {
+          jti, scope_hash: 'sha256:' + '11'.repeat(32), state_nonce: nonce,
+          deployment_id: DEFAULT_DEPLOYMENT_ID,
+        },
         targetId: '',
         operation: 'publish',
         title,
         body: 'nope',
         executor,
+        deploymentId: DEFAULT_DEPLOYMENT_ID,
         crashBeforeSeal: true,
       }),
       /simulated crash-before-seal/,

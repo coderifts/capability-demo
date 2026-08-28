@@ -57,10 +57,10 @@ with `--network none`. Unplugging the network does not change a single verdict.
 ```bash
 cd demo && docker compose up -d --build   # 1. start Postgres + the API (generates DEMO keypairs)
 cd .. && ./demo/run-demo.sh               # 2. run the ten scenes
-npm run test:all                          # 3. 72 unit + 26 Postgres integration tests
+npm run test:all                          # 3. unit + live Postgres integration tests
 ```
 
-`npm test` alone runs the 72 unit tests with no network and no Docker. The 26 integration
+`npm test` alone runs the unit tests with no network and no Docker. The integration
 tests need the `db` service (`cd demo && docker compose up -d db`); without it they **skip
 loudly with the reason**, never silently pass.
 

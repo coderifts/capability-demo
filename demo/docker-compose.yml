@@ -38,6 +38,7 @@ services:
       DATABASE_URL: "postgres://demo:demo@db:5432/demo"
       HOST_DATABASE_URL: "postgres://cr_host:cr_host@db:5432/demo"
       EXECUTOR_DATABASE_URL: "postgres://cr_executor:cr_executor@db:5432/demo"
+      DEPLOYMENT_ID: "demo-deployment"
     # The image generates its own DEMO keypair at build (so `docker run --network none` is
     # self-contained for scene 5). For the compose demo we mount the HOST keys instead, so the
     # host-side issuer (demo/issue-grant.js) and the in-container verifier share one keypair.
