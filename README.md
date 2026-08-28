@@ -270,7 +270,12 @@ executor authorized this exact transaction for commit — not that the transacti
 re-reads `pg_catalog` and signs that the deny is still wired (owners, DML ACLs,
 SECURITY DEFINER, `cr_owner` NOLOGIN, TEMPORARY revoked). Drift (an admin GRANT)
 does not restore privileges — it revokes the enforcement claim and yields a signed
-drift artifact. STEP 6 will assemble `prove`; this is one section of it.
+drift artifact.
+
+**`coderifts prove`.** `node demo/prove.js` (or `npm run prove`) runs the six panel
+proofs against live Postgres and emits a signed transcript. It adds no enforcement.
+Grant-binding is explicit: without a grant, "signature valid; grant-binding NOT
+checked" — never a bare `ATTEST_VALID`.
 
 The one-use guarantee is **the PRIMARY KEY**, not application logic. There is no
 SELECT-then-INSERT race and no "have I seen this jti?" check that could be wrong under
