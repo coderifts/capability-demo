@@ -8,9 +8,23 @@
  * INSERT; exactly one wins, the other gets SQLSTATE 23505 and its whole transaction
  * (including the mutation) rolls back. No advisory lock, no SELECT-then-INSERT race,
  * no application-level "have I seen this?" check that could be wrong under concurrency.
+ *
+ * STEP 1 — two LOGIN roles besides the bootstrap superuser (demo/sql/roles.sql):
+ *   hostUrl()      cr_host      — ZERO DML on articles (42501)
+ *   executorUrl()  cr_executor  — atomicExecute DML (STEP 2 will shrink this)
+ * migrate() must run as the bootstrap role (CREATE ROLE / ALTER OWNER).
  */
 
 const { Pool } = require('pg');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const OWNER_ROLE = 'cr_owner';
+const HOST_ROLE = 'cr_host';
+const EXECUTOR_ROLE = 'cr_executor';
+const ROLES_SQL = fs.readFileSync(path.join(__dirname, '..', 'sql', 'roles.sql'), 'utf8');
+
+const DEFAULT_BOOTSTRAP_URL = 'postgres://demo:demo@localhost:55432/demo';
 
 const DDL = `
 -- digest() for the state-CAS row hashes.
@@ -53,8 +67,31 @@ function makePool(url) {
   return new Pool({ connectionString: url || process.env.DATABASE_URL, max: 20 });
 }
 
+/** Rewrite user/password on a postgres URL; host/port/db unchanged. */
+function rewriteRole(url, user, password) {
+  const u = new URL(url);
+  u.username = user;
+  u.password = password;
+  return u.toString();
+}
+
+function bootstrapUrl() {
+  return process.env.DATABASE_URL || DEFAULT_BOOTSTRAP_URL;
+}
+
+function hostUrl() {
+  return process.env.HOST_DATABASE_URL
+    || rewriteRole(bootstrapUrl(), HOST_ROLE, HOST_ROLE);
+}
+
+function executorUrl() {
+  return process.env.EXECUTOR_DATABASE_URL
+    || rewriteRole(bootstrapUrl(), EXECUTOR_ROLE, EXECUTOR_ROLE);
+}
+
 async function migrate(pool) {
   await pool.query(DDL);
+  await pool.query(ROLES_SQL);
 }
 
 /** Wait for Postgres to accept connections (compose start ordering). */
@@ -90,4 +127,19 @@ async function currentDigest(client, targetId) {
   return `sha256:${r.rows[0].digest}`;
 }
 
-module.exports = { DDL, makePool, migrate, waitReady, currentDigest, rowDigestSql };
+module.exports = {
+  DDL,
+  ROLES_SQL,
+  OWNER_ROLE,
+  HOST_ROLE,
+  EXECUTOR_ROLE,
+  makePool,
+  migrate,
+  waitReady,
+  currentDigest,
+  rowDigestSql,
+  rewriteRole,
+  bootstrapUrl,
+  hostUrl,
+  executorUrl,
+};

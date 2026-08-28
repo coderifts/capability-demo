@@ -19,30 +19,30 @@ the only way through.
 
 **The 403 is this process refusing itself.** `requireExecutionGrant()` is Express middleware running
 inside the demo API, and `demo/src/atomic.js` returns its own `403`s from the same process. There is
-no `GRANT`/`REVOKE`, no row-level security and no policy anywhere in this repo, and
-`demo/src/server.js` reads and writes the `articles` table through the **same pool** the guarded
-route uses. So anything already inside this process can write the table without the middleware ever
-running — an unmapped route, a direct `pool.query`, a script importing `db.js`.
+no row-level security anywhere in this repo. STEP 1 split the former single `demo` role:
+`cr_host` has **zero DML on `articles`** (raw INSERT is SQLSTATE 42501, not a Node 403);
+`cr_executor` runs the ATOMIC transaction; `cr_owner` (NOLOGIN) owns the tables. The bootstrap
+`demo` superuser can still write (scene 9). STEP 2 will put the executor behind a gate function.
 
 That makes `raw → 403` evidence about **routing**, not about capability. It shows that requests
 travelling the guarded path without a valid grant are refused, which is the thing this reference is
 for. It is *not* a capability boundary, and a 403 produced by the same program that owns the data is
 not independent enforcement. Do not cite it as one.
 
-**The one exception, and it is narrow.** The `consumed_grants.jti` **PRIMARY KEY** is enforced by
-PostgreSQL, not by us: two concurrent requests presenting the same grant both reach the `INSERT`,
-exactly one wins, and the loser takes SQLSTATE 23505 which rolls back its whole transaction
-including the mutation. That is genuinely structural — no application check could get it right under
-concurrency. But it constrains **one-use**, not **who may write**. It is the only structural element
-in this repo, and it does not make the 403 one.
+**Two Postgres facts, neither of which is the 403.** The `consumed_grants.jti` **PRIMARY KEY**
+is enforced by PostgreSQL: two concurrent requests presenting the same grant both reach the
+`INSERT`, exactly one wins, and the loser takes SQLSTATE 23505 which rolls back its whole
+transaction including the mutation. That constrains **one-use**. STEP 1 adds **who may write
+`articles`**: `cr_host` has no INSERT/UPDATE/DELETE, so a raw host query fails with SQLSTATE
+42501 — not a Node 403. The bootstrap `demo` role can still write (scene 9). STEP 2 will
+narrow `cr_executor` to EXECUTE-only on a gate function.
 
-**Consequence for the sidecar reference (roadmap 1091).** If a sidecar is to mean more than this
-demo does, it needs target-side exclusion that the executor cannot revoke: the mutating process
-running as a **separate OS user** from the one owning the data, filesystem ACLs or a database role
-that simply lacks write permission, so that bypassing the gateway fails at the kernel or the database
-rather than at our own `if`. Middleware that refuses itself can always be routed around by whoever
-mounts the routes. This demo is the format-and-verifier half; it is deliberately not that half, and
-copying it as though it were is the mistake this section exists to prevent.
+**Consequence for the sidecar reference (roadmap 1091).** STEP 1 gives `cr_host` a database
+role that simply lacks write permission on `articles` (SQLSTATE 42501). That is the host-side
+denial. It is not yet the full target-side exclusion: `cr_executor` still has DML (STEP 2
+narrows it to EXECUTE on the gate), and the bootstrap `demo` superuser can still write
+(scene 9). Middleware that refuses itself can always be routed around by whoever mounts the
+routes — that is why the 403 is not this proof.
 
 The second idea is that the check must be **offline**. A boundary that phones home to
 authorize is a boundary that fails open when the network does, and one whose latency and

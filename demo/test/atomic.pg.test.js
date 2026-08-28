@@ -9,14 +9,13 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const path = require('node:path');
 
-const { makePool, migrate, currentDigest } = require('../src/db');
+const { makePool, migrate, currentDigest, bootstrapUrl, hostUrl, executorUrl } = require('../src/db');
 const { buildApp } = require('../src/server');
 const { issue } = require('../issue-grant');
 
-const DB_URL = process.env.DATABASE_URL || 'postgres://demo:demo@localhost:55432/demo';
 const KEYS = path.join(__dirname, '..', 'keys');
 const KEYOPTS = { key: path.join(KEYS, 'demo-private.pem'), keys: path.join(KEYS, 'coderifts-keys.json') };
-let pool, server, base, reachable = false;
+let pool, hostPool, executorPool, server, base, reachable = false;
 
 async function req(method, p, { body, grant } = {}) {
   const headers = { 'Content-Type': 'application/json' };
@@ -29,18 +28,28 @@ const challenge = async (target_id = '') =>
 const mkGrant = (o) => issue({ ...KEYOPTS, ...o });
 
 before(async () => {
-  pool = makePool(DB_URL);
+  pool = makePool(bootstrapUrl());
   try { await pool.query('SELECT 1'); reachable = true; } catch (_) { return; }
   await migrate(pool);
   await pool.query('TRUNCATE articles, consumed_grants, state_challenges, attestations RESTART IDENTITY');
-  const app = buildApp({ pool, keysFile: KEYOPTS.keys });
+  hostPool = makePool(hostUrl());
+  executorPool = makePool(executorUrl());
+  const app = buildApp({ pool: hostPool, executorPool, keysFile: KEYOPTS.keys });
   await new Promise((r) => { server = app.listen(0, r); });
   base = `http://127.0.0.1:${server.address().port}`;
 });
-after(async () => { if (server) server.close(); if (pool) await pool.end(); });
+after(async () => {
+  if (server) server.close();
+  if (hostPool) await hostPool.end();
+  if (executorPool) await executorPool.end();
+  if (pool) await pool.end();
+});
 
 const guard = (t) => {
-  if (!reachable) { t.skip(`postgres unreachable at ${DB_URL} — run: cd demo && docker compose up -d db`); return true; }
+  if (!reachable) {
+    t.skip(`postgres unreachable at ${bootstrapUrl()} — run: cd demo && docker compose up -d db`);
+    return true;
+  }
   return false;
 };
 

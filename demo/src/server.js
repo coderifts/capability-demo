@@ -22,7 +22,9 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { requireExecutionGrant, captureRawBody } = require('@coderifts/capability-express');
 const { grantProfile } = require('@coderifts/capability-express/src/verify-grant');
-const { makePool, migrate, waitReady, currentDigest } = require('./db');
+const {
+  makePool, migrate, waitReady, currentDigest, hostUrl, executorUrl, bootstrapUrl,
+} = require('./db');
 const { atomicExecute } = require('./atomic');
 
 const KEYS_DIR = process.env.CODERIFTS_KEYS_DIR || path.join(__dirname, '..', 'keys');
@@ -43,9 +45,16 @@ function loadExecutor() {
   return { privateKey, kid };
 }
 
-function buildApp({ pool, keysFile = KEYS_FILE, audience = process.env.CODERIFTS_AUDIENCE || '' } = {}) {
+function buildApp({
+  pool, executorPool, keysFile = KEYS_FILE, audience = process.env.CODERIFTS_AUDIENCE || '',
+} = {}) {
   const app = express();
   const executor = loadExecutor();
+  // STEP 1: host routes use `pool` (cr_host). The atomic write uses executorPool
+  // (cr_executor). STEP 2 will shrink executor to EXECUTE-only on the gate.
+  if (!executorPool) {
+    throw new Error('buildApp: executorPool is required (cr_executor) — host_role must not run atomic DML');
+  }
   const guard = requireExecutionGrant({
     keysFile,
     audience,
@@ -97,7 +106,7 @@ function buildApp({ pool, keysFile = KEYS_FILE, audience = process.env.CODERIFTS
     }
 
     const out = await atomicExecute({
-      pool, payload, targetId, executor,
+      pool: executorPool, payload, targetId, executor,
       mutate: (client) => mutate(client, req),
     });
     if (!out.ok) {
@@ -142,11 +151,15 @@ function buildApp({ pool, keysFile = KEYS_FILE, audience = process.env.CODERIFTS
 }
 
 async function main() {
-  const pool = makePool();
-  await waitReady(pool);
-  await migrate(pool);
-  buildApp({ pool }).listen(PORT, () => {
-    process.stdout.write(`demo api on ${PORT} (offline grants; ATOMIC executor on postgres)\n`);
+  const bootstrap = makePool(bootstrapUrl());
+  await waitReady(bootstrap);
+  await migrate(bootstrap);
+  const hostPool = makePool(hostUrl());
+  const executorPool = makePool(executorUrl());
+  buildApp({ pool: hostPool, executorPool }).listen(PORT, () => {
+    process.stdout.write(
+      `demo api on ${PORT} (offline grants; ATOMIC as cr_executor; host_role has no articles DML)\n`,
+    );
   });
 }
 

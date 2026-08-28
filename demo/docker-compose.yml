@@ -33,7 +33,11 @@ services:
       - "3000:3000"
     environment:
       PORT: "3000"
+      # demo is bootstrap (CREATE ROLE / migrate / TRUNCATE). host_role has
+      # ZERO DML on articles; executor_role runs atomicExecute (STEP 1).
       DATABASE_URL: "postgres://demo:demo@db:5432/demo"
+      HOST_DATABASE_URL: "postgres://cr_host:cr_host@db:5432/demo"
+      EXECUTOR_DATABASE_URL: "postgres://cr_executor:cr_executor@db:5432/demo"
     # The image generates its own DEMO keypair at build (so `docker run --network none` is
     # self-contained for scene 5). For the compose demo we mount the HOST keys instead, so the
     # host-side issuer (demo/issue-grant.js) and the in-container verifier share one keypair.
