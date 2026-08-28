@@ -21,9 +21,9 @@ the only way through.
 inside the demo API, and `demo/src/atomic.js` returns its own `403`s from the same process. There is
 no row-level security anywhere in this repo. STEP 1 split the former single `demo` role:
 `cr_host` has **zero DML on `articles`** (raw INSERT is SQLSTATE 42501, not a Node 403);
-`cr_executor` has EXECUTE on `cr_execute_grant` only (no table DML); `cr_owner` (NOLOGIN) owns
-the tables and the SECURITY DEFINER gate. The bootstrap `demo` superuser can still write
-(scene 9). STEP 3 will sign and seal out of the DB.
+`cr_executor` has EXECUTE on `cr_execute_grant` and `cap_seal` only (no table DML); `cr_owner` (NOLOGIN) owns
+the tables and the SECURITY DEFINER functions. The bootstrap `demo` superuser can still write
+(scene 9). STEP 3: the executor PROCESS signs the gate preimage out of the DB with a local key and `cap_seal` binds that signature before COMMIT.
 
 That makes `raw → 403` evidence about **routing**, not about capability. It shows that requests
 travelling the guarded path without a valid grant are refused, which is the thing this reference is
@@ -35,14 +35,14 @@ is enforced by PostgreSQL: two concurrent requests presenting the same grant bot
 `INSERT`, exactly one wins, and the loser takes SQLSTATE 23505 which rolls back its whole
 transaction including the mutation. That constrains **one-use**. STEP 1 adds **who may write
 `articles`**: `cr_host` has no INSERT/UPDATE/DELETE, so a raw host query fails with SQLSTATE
-42501 — not a Node 403. The bootstrap `demo` role can still write (scene 9). STEP 2 will
-narrow `cr_executor` further (seal). `cr_execute_grant` already consumes and mutates; it does not sign.
+42501 — not a Node 403. The bootstrap `demo` role can still write (scene 9). STEP 2
+narrowed `cr_executor` to EXECUTE-only on the gate. `cr_execute_grant` consumes and mutates and does not sign; the process signs, `cap_seal` binds.
 
 **Consequence for the sidecar reference (roadmap 1091).** `cr_host` has no write on
 `articles` (42501). `cr_executor` has no table DML either — only EXECUTE on
-`cr_execute_grant` (SECURITY DEFINER, owned by `cr_owner`). The bootstrap `demo`
+`cr_execute_grant` and `cap_seal` (SECURITY DEFINER, owned by `cr_owner`). The bootstrap `demo`
 superuser can still write (scene 9). Middleware that refuses itself can always be
-routed around; the 403 is not this proof. STEP 3 signs and seals out of the DB.
+routed around; the 403 is not this proof. A deferred constraint trigger forbids COMMIT of a consumed-unsigned ledger row.
 
 The second idea is that the check must be **offline**. A boundary that phones home to
 authorize is a boundary that fails open when the network does, and one whose latency and
@@ -57,10 +57,10 @@ with `--network none`. Unplugging the network does not change a single verdict.
 ```bash
 cd demo && docker compose up -d --build   # 1. start Postgres + the API (generates DEMO keypairs)
 cd .. && ./demo/run-demo.sh               # 2. run the ten scenes
-npm run test:all                          # 3. 72 unit + 12 Postgres integration tests
+npm run test:all                          # 3. 72 unit + 26 Postgres integration tests
 ```
 
-`npm test` alone runs the 72 unit tests with no network and no Docker. The 12 integration
+`npm test` alone runs the 72 unit tests with no network and no Docker. The 26 integration
 tests need the `db` service (`cd demo && docker compose up -d db`); without it they **skip
 loudly with the reason**, never silently pass.
 
@@ -253,25 +253,29 @@ a missing row hashes the explicit marker `absent:<id>`, never the empty string �
 ### The atomic execute path — ONE transaction
 
 ```
-BEGIN
-  SELECT ... FROM state_challenges WHERE state_nonce = $1 FOR UPDATE   -- (1) CAS
-    -> unknown / expired / wrong target / digest moved  => ROLLBACK
-  INSERT INTO consumed_grants (jti, scope_hash)                        -- (2) the ledger
-    -> 23505 unique_violation  => GRANT_CONSUMED, ROLLBACK
-  <the mutation>                                                       -- (3) the write
-  UPDATE state_challenges SET consumed_at = now()
-  <sign cr.exec.attest.v1>   INSERT INTO attestations
-COMMIT
+BEGIN                                          -- one pg client, held by the executor PROCESS
+  SELECT cr_execute_grant(...)                 -- consume + mutate + persist canonical preimage
+    -> unknown / expired / drift / 23505       => ROLLBACK (status stays unsigned, so COMMIT
+                                                 would also fail the deferred constraint)
+  PROCESS signs the exact returned preimage    -- local executor key; never KMS; never inside SQL
+  SELECT cap_seal(jti, preimage_hash, signature)
+    -> foreign preimage                        => RAISE, ROLLBACK
+COMMIT                                         -- deferred trigger: status='consumed' cannot COMMIT
 ```
+
+The returned `atomic_execution_attestation` is issued only after COMMIT. It asserts the
+executor authorized this exact transaction for commit — not that the transaction committed.
 
 The one-use guarantee is **the PRIMARY KEY**, not application logic. There is no
 SELECT-then-INSERT race and no "have I seen this jti?" check that could be wrong under
 concurrency: 20 simultaneous requests with one grant all reach the INSERT, exactly one wins,
 and the other 19 roll back with their mutations undone.
 
-## Execution attestations (`cr.exec.attest.v1`)
+## Execution attestations (`atomic_execution_attestation`)
 
-On commit the executor signs a statement with **its own** key and returns it in the response.
+After COMMIT the executor returns an `atomic_execution_attestation`: a signature over the
+**exact gate preimage bytes** with **its own** local key. That asserts the executor
+authorized this exact transaction for commit — not that the transaction committed.
 Executor keys are **customer-held** — CodeRifts never receives them. The registry uses the
 (b)-ready document shape from the spec (same shape as `.well-known/coderifts-keys.json`).
 
@@ -302,11 +306,11 @@ target, and request body — verified with no network access.
   (`BEARER_NOT_PERMITTED`) and writes nothing. The format can still *name* BEARER
   (verifier `grantProfile`); this process will not honour it. ATOMIC consumption is
   one-use via the `consumed_grants` primary key.
-- **An attestation proves that a holder of the executor key asserts this commit.** It does not
-  prove the executor's code is unmodified — **deploy attestation is out of scope**, a later
-  artifact, not this one. It does not prove a human saw anything, does not prove the grant is
-  still currently authorized (the statement is historical), and `result_digest` is the
-  executor's choice of bytes — not a CodeRifts fingerprint, receipt digest, or after-payload hash.
+- **An `atomic_execution_attestation` proves that a holder of the executor key authorized this
+  exact preimage for commit.** It does not prove the executor's code is unmodified — **deploy
+  attestation is out of scope**, a later artifact, not this one. It does not prove a human saw
+  anything, does not prove the grant is still currently authorized, and does not claim the
+  transaction committed (STEP 5 is the posture receipt).
 - **The CAS detects drift; it does not prevent privileged writes.** Scene 9 shows root writing
   straight to Postgres with no grant at all. Nothing here stops that. What the challenge-first
   CAS does is *notice*: the granted mutation is refused because the state the issuer authorized

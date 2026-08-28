@@ -76,39 +76,48 @@ describe('STEP 2 — executor is locked out of direct writes; gate works', () =>
     }
   });
 
-  test('cr_executor CAN call cr_execute_grant — mutation + jti consumed + preimage', async (t) => {
+  test('cr_executor CAN call cr_execute_grant — mutation + preimage (in-tx; unsigned cannot COMMIT)', async (t) => {
     if (guard(t)) return;
     const nonce = await challenge('');
     const jti = `jti-gate-${Date.now()}`;
-    const r = await executorPool.query(
-      `SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)`,
-      [jti, 'sha256:deadbeef', nonce, '', 'publish', 'gate', 'ok'],
-    );
-    const g = r.rows[0];
-    assert.equal(g.ok, true, JSON.stringify(g));
-    assert.ok(g.article_id);
-    assert.equal(g.article_title, 'gate');
-    assert.ok(String(g.preimage).startsWith('cr.gate.preimage.v1|'));
-    const led = await bootstrap.query('SELECT * FROM consumed_grants WHERE jti = $1', [jti]);
-    assert.equal(led.rowCount, 1);
-    assert.equal(led.rows[0].target_profile, 'postgres.atomic');
-    assert.equal(led.rows[0].status, 'consumed');
-    assert.equal(led.rows[0].preimage, g.preimage);
-    assert.equal(led.rows[0].attestation_ref, null);
+    const title = `gate-${jti}`;
+    const client = await executorPool.connect();
+    try {
+      await client.query('BEGIN');
+      const r = await client.query(
+        `SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)`,
+        [jti, 'sha256:deadbeef', nonce, '', 'publish', title, 'ok'],
+      );
+      const g = r.rows[0];
+      assert.equal(g.ok, true, JSON.stringify(g));
+      assert.ok(g.article_id);
+      assert.equal(g.article_title, title);
+      assert.ok(String(g.preimage).startsWith('cr.gate.preimage.v1|'));
+      // Autocommit of this row is forbidden (deferred trigger). Inspect in-tx
+      // via the gate return; ROLLBACK so no unsigned row persists.
+      await client.query('ROLLBACK');
+    } finally { client.release(); }
+    assert.equal((await bootstrap.query('SELECT count(*)::int c FROM consumed_grants WHERE jti=$1', [jti])).rows[0].c, 0);
+    assert.equal((await bootstrap.query('SELECT count(*)::int c FROM articles WHERE title=$1', [title])).rows[0].c, 0);
   });
 
   test('replay through the function → GRANT_CONSUMED, no second row', async (t) => {
     if (guard(t)) return;
     const nonce = await challenge('');
     const jti = `jti-replay-${Date.now()}`;
-    const args = [jti, 'sha256:beef', nonce, '', 'publish', 'once', 'only'];
-    const first = await executorPool.query('SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)', args);
-    assert.equal(first.rows[0].ok, true);
-    const before = (await bootstrap.query('SELECT count(*)::int c FROM articles')).rows[0].c;
-    const second = await executorPool.query('SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)', args);
-    assert.equal(second.rows[0].ok, false);
-    assert.equal(second.rows[0].status, 'GRANT_CONSUMED');
-    assert.equal(second.rows[0].http, 409);
-    assert.equal((await bootstrap.query('SELECT count(*)::int c FROM articles')).rows[0].c, before);
+    const title = `once-${jti}`;
+    const args = [jti, 'sha256:beef', nonce, '', 'publish', title, 'only'];
+    const client = await executorPool.connect();
+    try {
+      await client.query('BEGIN');
+      const first = await client.query('SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)', args);
+      assert.equal(first.rows[0].ok, true);
+      const second = await client.query('SELECT * FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)', args);
+      assert.equal(second.rows[0].ok, false);
+      assert.equal(second.rows[0].status, 'GRANT_CONSUMED');
+      assert.equal(second.rows[0].http, 409);
+      await client.query('ROLLBACK');
+    } finally { client.release(); }
+    assert.equal((await bootstrap.query('SELECT count(*)::int c FROM articles WHERE title=$1', [title])).rows[0].c, 0);
   });
 });

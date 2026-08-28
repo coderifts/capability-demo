@@ -24,6 +24,7 @@ const HOST_ROLE = 'cr_host';
 const EXECUTOR_ROLE = 'cr_executor';
 const ROLES_SQL = fs.readFileSync(path.join(__dirname, '..', 'sql', 'roles.sql'), 'utf8');
 const GATE_SQL = fs.readFileSync(path.join(__dirname, '..', 'sql', 'gate.sql'), 'utf8');
+const SEAL_SQL = fs.readFileSync(path.join(__dirname, '..', 'sql', 'seal.sql'), 'utf8');
 
 const DEFAULT_BOOTSTRAP_URL = 'postgres://demo:demo@localhost:55432/demo';
 
@@ -102,7 +103,9 @@ async function migrate(pool) {
     await client.query(DDL);
     await client.query(ROLES_SQL);
     await client.query(GATE_SQL);
+    await client.query(SEAL_SQL);
   } finally {
+    try { await client.query('RESET ROLE'); } catch (_) { /* */ }
     try { await client.query('SELECT pg_advisory_unlock(11560002)'); } catch (_) { /* */ }
     client.release();
   }
@@ -145,6 +148,7 @@ module.exports = {
   DDL,
   ROLES_SQL,
   GATE_SQL,
+  SEAL_SQL,
   OWNER_ROLE,
   HOST_ROLE,
   EXECUTOR_ROLE,

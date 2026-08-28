@@ -88,42 +88,51 @@ function buildApp({
   });
 
   /** Shared handler: routes the request by grant PROFILE. Mutation is in cr_execute_grant. */
-  const handle = (targetOf) => async (req, res) => {
+  const handle = (targetOf) => async (req, res, next) => {
     const payload = req.coderifts.payload;
     const profile = grantProfile(payload);
     const targetId = targetOf(req);
 
-    if (profile === 'BEARER') {
-      // Closed: a grant with no state_nonce used to mutate with no ledger and no
-      // attestation — a second, unguarded data plane. Refuse; never take a client
-      // from the pool. ATOMIC is the only write path (atomic.js).
-      return res.status(403).json({
-        error: 'execution_refused',
-        profile: 'BEARER',
-        status: 'BEARER_NOT_PERMITTED',
-        reason: 'execution_grant_bearer_unsupported',
-      });
-    }
+    try {
+      if (profile === 'BEARER') {
+        // Closed: a grant with no state_nonce used to mutate with no ledger and no
+        // attestation — a second, unguarded data plane. Refuse; never take a client
+        // from the pool. ATOMIC is the only write path (atomic.js).
+        return res.status(403).json({
+          error: 'execution_refused',
+          profile: 'BEARER',
+          status: 'BEARER_NOT_PERMITTED',
+          reason: 'execution_grant_bearer_unsupported',
+        });
+      }
 
-    const out = await atomicExecute({
-      pool: executorPool,
-      payload,
-      targetId,
-      executor,
-      operation: payload.operation,
-      title: req.body && req.body.title,
-      body: req.body && req.body.body,
-    });
-    if (!out.ok) {
-      return res.status(out.http).json({
-        error: 'execution_refused', profile, status: out.status, reason: out.reason,
-        ...(out.detail ? { detail: out.detail } : {}),
+      const out = await atomicExecute({
+        pool: executorPool,
+        payload,
+        targetId,
+        executor,
+        operation: payload.operation,
+        title: req.body && req.body.title,
+        body: req.body && req.body.body,
       });
+      if (!out.ok) {
+        return res.status(out.http).json({
+          error: 'execution_refused', profile, status: out.status, reason: out.reason,
+          ...(out.detail ? { detail: out.detail } : {}),
+        });
+      }
+      // Artifact is returned only AFTER COMMIT (atomicExecute commits first).
+      // It asserts the executor authorized this exact transaction for commit —
+      // not that the transaction committed.
+      return res.status(req.method === 'POST' ? 201 : 200).json({
+        ok: true, profile, row: out.row,
+        attestation: out.attestation,
+        atomic_execution_attestation: out.atomic_execution_attestation,
+        authorized_by: { jti: payload.jti, operation: payload.operation, state_nonce: payload.state_nonce },
+      });
+    } catch (err) {
+      return next(err);
     }
-    return res.status(req.method === 'POST' ? 201 : 200).json({
-      ok: true, profile, row: out.row, attestation: out.attestation,
-      authorized_by: { jti: payload.jti, operation: payload.operation, state_nonce: payload.state_nonce },
-    });
   };
 
   app.post('/articles', captureRawBody(), guard, handle(
@@ -150,7 +159,7 @@ async function main() {
   const executorPool = makePool(executorUrl());
   buildApp({ pool: hostPool, executorPool }).listen(PORT, () => {
     process.stdout.write(
-      `demo api on ${PORT} (offline grants; ATOMIC via cr_execute_grant; executor has no table DML)\n`,
+      `demo api on ${PORT} (offline grants; ATOMIC via session-tx gate+sign+seal; executor has no table DML)\n`,
     );
   });
 }

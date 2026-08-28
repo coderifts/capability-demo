@@ -33,7 +33,7 @@ CREATE OR REPLACE FUNCTION cr_execute_grant(
 )
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   ch RECORD;
@@ -45,7 +45,7 @@ BEGIN
   -- (1) CAS — same checks as atomic.js:44-70
   SELECT sc.state_nonce, sc.target_id, sc.current_digest, sc.expires_at, sc.consumed_at
     INTO ch
-    FROM state_challenges sc
+    FROM public.state_challenges sc
    WHERE sc.state_nonce = p_state_nonce
      FOR UPDATE;
 
@@ -69,7 +69,7 @@ BEGIN
     (SELECT 'sha256:' || encode(digest(
        'row:' || a.id || ':' || a.title || ':' || a.body || ':' || extract(epoch from a.updated_at),
        'sha256'), 'hex')
-     FROM articles a WHERE a.id::text = coalesce(p_target_id, '')),
+     FROM public.articles a WHERE a.id::text = coalesce(p_target_id, '')),
     'sha256:' || encode(digest('absent:' || coalesce(p_target_id, ''), 'sha256'), 'hex')
   ) INTO now_digest;
 
@@ -81,7 +81,7 @@ BEGIN
 
   -- (2) Ledger. PK is the one-use mechanism (atomic.js:73-85).
   BEGIN
-    INSERT INTO consumed_grants (jti, scope_hash, target_profile, status)
+    INSERT INTO public.consumed_grants (jti, scope_hash, target_profile, status)
     VALUES (p_jti, p_scope_hash, 'postgres.atomic', 'consumed');
   EXCEPTION WHEN unique_violation THEN
     ok := false; status := 'GRANT_CONSUMED'; reason := 'grant_already_consumed'; http := 409;
@@ -97,18 +97,18 @@ BEGIN
 
   -- (3) Mutation — publish=INSERT, deploy=DELETE (server.js:124-143).
   IF p_operation = 'publish' THEN
-    INSERT INTO articles (title, body)
+    INSERT INTO public.articles (title, body)
     VALUES (coalesce(p_title, ''), coalesce(p_body, ''))
     RETURNING id, title, body INTO mut;
   ELSIF p_operation = 'deploy' THEN
-    DELETE FROM articles WHERE id::text = coalesce(p_target_id, '')
+    DELETE FROM public.articles WHERE id::text = coalesce(p_target_id, '')
     RETURNING id, title, body INTO mut;
   ELSE
     ok := false; status := 'STATE_CHALLENGE_UNKNOWN'; reason := 'unknown_operation'; http := 403;
     RETURN NEXT; RETURN;
   END IF;
 
-  UPDATE state_challenges SET consumed_at = clock_timestamp() WHERE state_nonce = p_state_nonce;
+  UPDATE public.state_challenges SET consumed_at = clock_timestamp() WHERE state_nonce = p_state_nonce;
 
   IF mut IS NOT NULL THEN
     article_id := mut.id;
@@ -127,7 +127,7 @@ BEGIN
   pre := 'cr.gate.preimage.v1|' || coalesce(p_jti, '') || '|' || '' || '|sha256:' || mut_digest
       || '|' || coalesce(p_target_id, '');
 
-  UPDATE consumed_grants SET preimage = pre WHERE jti = p_jti;
+  UPDATE public.consumed_grants SET preimage = pre WHERE jti = p_jti;
 
   ok := true; status := 'CONSUMED'; reason := NULL; http := 200;
   preimage := pre;

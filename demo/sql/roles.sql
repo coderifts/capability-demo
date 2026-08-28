@@ -25,6 +25,18 @@ END $$;
 
 GRANT USAGE ON SCHEMA public TO cr_host, cr_executor;
 
+-- TEMP is in the default PUBLIC grant and is searched first even when
+-- search_path='public'. A session TEMP TABLE consumed_grants would shadow
+-- SECURITY DEFINER lookups. Pin functions to pg_catalog, public, pg_temp
+-- AND revoke TEMP from the login roles.
+DO $$
+BEGIN
+  EXECUTE format(
+    'REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC, cr_host, cr_executor',
+    current_database()
+  );
+END $$;
+
 ALTER TABLE articles OWNER TO cr_owner;
 ALTER TABLE consumed_grants OWNER TO cr_owner;
 ALTER TABLE state_challenges OWNER TO cr_owner;

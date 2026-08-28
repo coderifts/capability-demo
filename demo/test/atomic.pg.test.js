@@ -56,25 +56,24 @@ const guard = (t) => {
 describe('BEARER is refused — not a second data plane', () => {
   test('BEARER grant (no state_nonce) is 403 BEARER_NOT_PERMITTED and writes no row', async (t) => {
     if (guard(t)) return;
-    const before = (await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c;
-    const ledger = (await pool.query('SELECT count(*)::int c FROM consumed_grants')).rows[0].c;
-    const body = JSON.stringify({ title: 'B', body: 'bearer' });
-    const r = await req('POST', '/articles', { body, grant: mkGrant({ operation: 'publish', target_id: '', body }) });
+    const body = JSON.stringify({ title: 'B-bearer-refused', body: 'bearer' });
+    const grant = mkGrant({ operation: 'publish', target_id: '', body });
+    const jti = JSON.parse(Buffer.from(grant.split('.')[0], 'base64url')).jti;
+    const r = await req('POST', '/articles', { body, grant });
     assert.equal(r.code, 403);
     assert.equal(r.json.status, 'BEARER_NOT_PERMITTED');
     assert.equal(r.json.reason, 'execution_grant_bearer_unsupported');
     assert.equal(r.json.profile, 'BEARER');
-    assert.equal((await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c, before);
-    assert.equal((await pool.query('SELECT count(*)::int c FROM consumed_grants')).rows[0].c, ledger);
+    assert.equal((await pool.query("SELECT count(*)::int c FROM articles WHERE title='B-bearer-refused'")).rows[0].c, 0);
+    assert.equal((await pool.query('SELECT count(*)::int c FROM consumed_grants WHERE jti=$1', [jti])).rows[0].c, 0);
   });
   test('replaying a BEARER grant still writes nothing', async (t) => {
     if (guard(t)) return;
-    const before = (await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c;
-    const body = JSON.stringify({ title: 'B3', body: 'replay' });
+    const body = JSON.stringify({ title: 'B3-bearer-replay', body: 'replay' });
     const g = mkGrant({ operation: 'publish', target_id: '', body });
     assert.equal((await req('POST', '/articles', { body, grant: g })).code, 403);
     assert.equal((await req('POST', '/articles', { body, grant: g })).code, 403);
-    assert.equal((await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c, before);
+    assert.equal((await pool.query("SELECT count(*)::int c FROM articles WHERE title='B3-bearer-replay'")).rows[0].c, 0);
   });
 });
 
@@ -92,32 +91,50 @@ describe('PK one-use', () => {
     assert.equal(r1.code, 201);
     assert.equal(r1.json.profile, 'ATOMIC');
     assert.ok(r1.json.attestation, 'ATOMIC must mint an attestation');
+    assert.ok(r1.json.atomic_execution_attestation, 'ATOMIC returns atomic_execution_attestation after COMMIT');
+    assert.equal(r1.json.atomic_execution_attestation.v, 'cr.atomic.execution.attestation.v1');
     const r2 = await req('POST', '/articles', { body, grant: g });
     assert.equal(r2.code, 409);
     assert.equal(r2.json.status, 'GRANT_CONSUMED');
   });
-  test('the ledger row exists with scope_hash, target_profile, consumed, preimage', async (t) => {
+  test('the ledger row exists sealed, with a signature that verifies offline', async (t) => {
     if (guard(t)) return;
     const body = JSON.stringify({ title: 'A2', body: 'ledger' });
     const { g } = await atomicGrant(body);
-    await req('POST', '/articles', { body, grant: g });
+    const posted = await req('POST', '/articles', { body, grant: g });
+    assert.equal(posted.code, 201);
     const jti = JSON.parse(Buffer.from(g.split('.')[0], 'base64url')).jti;
     const row = await pool.query('SELECT * FROM consumed_grants WHERE jti=$1', [jti]);
     assert.equal(row.rowCount, 1);
     assert.ok(row.rows[0].scope_hash.startsWith('sha256:'));
     assert.equal(row.rows[0].target_profile, 'postgres.atomic');
-    assert.equal(row.rows[0].status, 'consumed');
+    assert.equal(row.rows[0].status, 'sealed');
     assert.ok(row.rows[0].preimage && String(row.rows[0].preimage).startsWith('cr.gate.preimage.v1|'));
-    assert.equal(row.rows[0].attestation_ref, null); // seal is STEP 3
+    assert.ok(row.rows[0].attestation_ref, 'seal stores the signature on attestation_ref');
+    const registry = JSON.parse(require('node:fs').readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
+    const pub = crypto.createPublicKey(registry.keys[0].public_key_pem);
+    assert.equal(
+      crypto.verify(null, Buffer.from(row.rows[0].preimage, 'utf8'), pub, Buffer.from(row.rows[0].attestation_ref, 'base64url')),
+      true,
+      'sealed signature verifies against the published executor public key',
+    );
+    assert.equal(
+      crypto.verify(null, Buffer.from(`${row.rows[0].preimage}|tampered`, 'utf8'), pub, Buffer.from(row.rows[0].attestation_ref, 'base64url')),
+      false,
+      'a tampered preimage fails verify',
+    );
+    assert.equal(posted.json.atomic_execution_attestation.preimage, row.rows[0].preimage);
+    assert.equal(posted.json.atomic_execution_attestation.signature, row.rows[0].attestation_ref);
   });
   test('a refused replay leaves NO extra article (full rollback)', async (t) => {
     if (guard(t)) return;
     const body = JSON.stringify({ title: 'A3', body: 'rollback' });
     const { g } = await atomicGrant(body);
     await req('POST', '/articles', { body, grant: g });
-    const a = (await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c;
+    const a = (await pool.query("SELECT count(*)::int c FROM articles WHERE title='A3' AND body='rollback'")).rows[0].c;
     await req('POST', '/articles', { body, grant: g });
-    assert.equal((await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c, a);
+    assert.equal((await pool.query("SELECT count(*)::int c FROM articles WHERE title='A3' AND body='rollback'")).rows[0].c, a);
+    assert.equal(a, 1);
   });
 });
 
@@ -126,11 +143,10 @@ describe('concurrency (real parallel against pg)', () => {
     if (guard(t)) return;
     const body = JSON.stringify({ title: 'C', body: 'race' });
     const { g } = await atomicGrant(body);
-    const before = (await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c;
     const results = await Promise.all(Array.from({ length: 20 }, () => req('POST', '/articles', { body, grant: g })));
     assert.equal(results.filter((r) => r.code === 201).length, 1);
     assert.equal(results.filter((r) => r.code === 409).length, 19);
-    assert.equal((await pool.query('SELECT count(*)::int c FROM articles')).rows[0].c - before, 1);
+    assert.equal((await pool.query("SELECT count(*)::int c FROM articles WHERE title='C' AND body='race'")).rows[0].c, 1);
   });
 });
 

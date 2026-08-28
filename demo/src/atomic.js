@@ -1,21 +1,31 @@
 'use strict';
 
 /**
- * ATOMIC execute path — calls cr_execute_grant (SECURITY DEFINER) as cr_executor.
+ * ATOMIC execute path — session transaction held by the executor PROCESS.
  *
- * Consume + mutate live IN the function (demo/sql/gate.sql). This module does
- * NOT run those SQL statements. Signing is OUT of the DB (customer key) and
- * the attestation is returned on the HTTP response; persisting the seal is STEP 3.
+ *   BEGIN
+ *     SELECT cr_execute_grant(...)     -- consume + mutate + persist preimage (unsigned)
+ *     PROCESS signs those exact bytes  -- local executor key; never KMS; never inside SQL
+ *     SELECT cap_seal(jti, hash, sig)  -- bind signature to the persisted preimage
+ *   COMMIT
+ *
+ * The gate (demo/sql/gate.sql) does NOT sign. cap_seal (demo/sql/seal.sql) does
+ * NOT sign. A deferred constraint trigger forbids COMMIT while status='consumed'.
+ *
+ * The returned artifact is an atomic_execution_attestation: the executor
+ * authorized this exact transaction for commit. It is returned only AFTER
+ * COMMIT. It does not claim "this transaction committed."
  *
  * BEARER grants never enter — server.js refuses them before this is called.
  */
 
 const crypto = require('node:crypto');
-const { issueExecutionAttestation } = require('@coderifts/capability-express/src/attest');
 
 const PG_UNIQUE_VIOLATION = '23505';
+const ATOMIC_ATTEST_V = 'cr.atomic.execution.attestation.v1';
 
 const sha256hex = (s) => crypto.createHash('sha256').update(String(s), 'utf8').digest('hex');
+const preimageHashOf = (preimage) => `sha256:${sha256hex(preimage)}`;
 
 /** Executor-defined result bytes. Semantics are the executor's choice, per spec. */
 function resultDigestOf(row) {
@@ -23,62 +33,186 @@ function resultDigestOf(row) {
 }
 
 /**
+ * Sign the exact preimage bytes the gate returned. Same primitive as
+ * issueExecutionAttestation (crypto.sign(null, utf8, local KeyObject)) —
+ * different message: the canonical gate preimage, not crexecattest.v1|…
+ * Local key only. No KMS on this path.
+ */
+function signPreimage(privateKey, preimage) {
+  return crypto.sign(null, Buffer.from(String(preimage), 'utf8'), privateKey).toString('base64url');
+}
+
+function encodeAtomicExecutionAttestation({ executor_kid, preimage, signature }) {
+  return [
+    ATOMIC_ATTEST_V,
+    executor_kid,
+    Buffer.from(String(preimage), 'utf8').toString('base64url'),
+    signature,
+  ].join('|');
+}
+
+/**
+ * Offline verify of the sealed preimage signature against a caller-supplied
+ * public key. A tampered preimage fails. Does not claim the tx committed.
+ */
+function verifyAtomicExecutionAttestation(token, opts = {}) {
+  if (typeof token !== 'string' || token.length === 0) {
+    return { valid: false, status: 'ATTEST_MALFORMED', reason: 'malformed_structure' };
+  }
+  const seg = token.split('|');
+  if (seg.length !== 4 || seg[0] !== ATOMIC_ATTEST_V || seg.some((x) => !x)) {
+    return { valid: false, status: 'ATTEST_MALFORMED', reason: 'malformed_structure' };
+  }
+  let preimage;
+  try {
+    preimage = Buffer.from(seg[2], 'base64url').toString('utf8');
+  } catch (_) {
+    return { valid: false, status: 'ATTEST_MALFORMED', reason: 'bad_preimage' };
+  }
+  const publicKey = opts.publicKey;
+  if (!publicKey) return { valid: false, status: 'ATTEST_UNKNOWN_KEY', reason: 'unknown_kid' };
+  let ok = false;
+  try {
+    ok = crypto.verify(null, Buffer.from(preimage, 'utf8'), publicKey, Buffer.from(seg[3], 'base64url'));
+  } catch (_) {
+    return { valid: false, status: 'ATTEST_INVALID_SIGNATURE', reason: 'signature_error' };
+  }
+  if (!ok) return { valid: false, status: 'ATTEST_INVALID_SIGNATURE', reason: 'signature_mismatch' };
+  const grant = opts.intended && opts.intended.grant;
+  if (grant) {
+    const jti = String(grant.jti || '');
+    if (!preimage.startsWith(`cr.gate.preimage.v1|${jti}|`)) {
+      return { valid: false, status: 'ATTEST_UNBOUND', reason: 'grant_jti_mismatch' };
+    }
+  }
+  return {
+    valid: true,
+    status: 'ATTEST_VALID',
+    reason: null,
+    payload: { v: ATOMIC_ATTEST_V, executor_kid: seg[1], preimage, signature: seg[3] },
+  };
+}
+
+function verifyPreimageSignature(preimage, signatureB64url, publicKey) {
+  return crypto.verify(
+    null,
+    Buffer.from(String(preimage), 'utf8'),
+    publicKey,
+    Buffer.from(String(signatureB64url), 'base64url'),
+  );
+}
+
+/**
  * @param {object} o
- * @param {import('pg').Pool} o.pool      cr_executor pool (EXECUTE on the gate only)
+ * @param {import('pg').Pool} o.pool      cr_executor pool (EXECUTE on gate + cap_seal only)
  * @param {object} o.payload              verified grant payload (ATOMIC)
  * @param {string} o.targetId
  * @param {string} o.operation            publish | deploy
  * @param {string} [o.title]
  * @param {string} [o.body]
  * @param {object} o.executor             { privateKey, kid } — used AFTER the gate, not inside it
- * @returns {Promise<{ok:true,row:object,attestation:string,preimage:string}|{ok:false,status:string,reason:string,http:number}>}
+ * @param {boolean} [o.crashBeforeSeal]   TEST ONLY: throw between gate and seal
+ * @returns {Promise<{ok:true,row:object,attestation:string,atomic_execution_attestation:object,preimage:string}|{ok:false,status:string,reason:string,http:number}>}
  */
-async function atomicExecute({ pool, payload, targetId, operation, title, body, executor }) {
-  const r = await pool.query(
-    `SELECT ok, status, reason, http, article_id, article_title, article_body,
-            preimage, challenged_digest, current_digest_out
-       FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)`,
-    [
-      payload.jti,
-      payload.scope_hash,
-      payload.state_nonce,
-      targetId == null ? '' : String(targetId),
-      operation,
-      title == null ? '' : String(title),
-      body == null ? '' : String(body),
-    ],
-  );
-  const g = r.rows[0];
-  if (!g || g.ok !== true) {
-    const detail = g && g.status === 'STATE_DRIFT'
-      ? { challenged: g.challenged_digest, current: g.current_digest_out }
-      : undefined;
+async function atomicExecute({ pool, payload, targetId, operation, title, body, executor, crashBeforeSeal }) {
+  const client = await pool.connect();
+  let begun = false;
+  try {
+    await client.query('BEGIN');
+    begun = true;
+
+    const r = await client.query(
+      `SELECT ok, status, reason, http, article_id, article_title, article_body,
+              preimage, challenged_digest, current_digest_out
+         FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7)`,
+      [
+        payload.jti,
+        payload.scope_hash,
+        payload.state_nonce,
+        targetId == null ? '' : String(targetId),
+        operation,
+        title == null ? '' : String(title),
+        body == null ? '' : String(body),
+      ],
+    );
+    const g = r.rows[0];
+    if (!g || g.ok !== true) {
+      await client.query('ROLLBACK');
+      begun = false;
+      const detail = g && g.status === 'STATE_DRIFT'
+        ? { challenged: g.challenged_digest, current: g.current_digest_out }
+        : undefined;
+      return {
+        ok: false,
+        status: (g && g.status) || 'STATE_CHALLENGE_UNKNOWN',
+        reason: (g && g.reason) || 'gate_failed',
+        http: (g && g.http) || 403,
+        ...(detail ? { detail } : {}),
+      };
+    }
+
+    // PROCESS signs the exact bytes the gate returned. Function never signs.
+    if (crashBeforeSeal) {
+      throw new Error('simulated crash-before-seal');
+    }
+    const preimage = String(g.preimage);
+    const preimage_hash = preimageHashOf(preimage);
+    const signature = signPreimage(executor.privateKey, preimage);
+
+    await client.query(
+      `SELECT ok, status, reason, http, attestation_ref FROM cap_seal($1,$2,$3)`,
+      [payload.jti, preimage_hash, signature],
+    );
+
+    await client.query('COMMIT');
+    begun = false;
+
+    const row = g.article_id == null
+      ? { id: targetId, deleted: true }
+      : { id: g.article_id, title: g.article_title, body: g.article_body };
+
+    const atomic_execution_attestation = {
+      v: ATOMIC_ATTEST_V,
+      executor_kid: executor.kid,
+      jti: payload.jti,
+      preimage,
+      preimage_hash,
+      signature,
+    };
+    const attestation = encodeAtomicExecutionAttestation({
+      executor_kid: executor.kid,
+      preimage,
+      signature,
+    });
+
+    return { ok: true, row, attestation, atomic_execution_attestation, preimage };
+  } catch (err) {
+    if (begun) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* already aborted */ }
+    }
+    // Test hook must remain a throw. Everything else becomes a structured
+    // refusal — Express 4 does not forward rejected async handlers.
+    if (crashBeforeSeal) throw err;
     return {
       ok: false,
-      status: (g && g.status) || 'STATE_CHALLENGE_UNKNOWN',
-      reason: (g && g.reason) || 'gate_failed',
-      http: (g && g.http) || 403,
-      ...(detail ? { detail } : {}),
+      status: 'SEAL_FAILED',
+      reason: (err && err.message) || 'seal_failed',
+      http: 500,
     };
+  } finally {
+    client.release();
   }
-
-  const row = g.article_id == null
-    ? { id: targetId, deleted: true }
-    : { id: g.article_id, title: g.article_title, body: g.article_body };
-
-  // STEP 3 will persist the seal. HTTP still returns a signed attestation so
-  // existing callers keep seeing one — computed here, never inside the function.
-  const attestation = issueExecutionAttestation({
-    privateKey: executor.privateKey,
-    executor_kid: executor.kid,
-    grant_jti: payload.jti,
-    receipt_digest: payload.receipt_digest,
-    scope_hash: payload.scope_hash,
-    state_nonce: payload.state_nonce,
-    result_digest: resultDigestOf(row),
-  });
-
-  return { ok: true, row, attestation, preimage: g.preimage };
 }
 
-module.exports = { atomicExecute, resultDigestOf, PG_UNIQUE_VIOLATION, sha256hex };
+module.exports = {
+  atomicExecute,
+  resultDigestOf,
+  PG_UNIQUE_VIOLATION,
+  sha256hex,
+  preimageHashOf,
+  signPreimage,
+  encodeAtomicExecutionAttestation,
+  verifyAtomicExecutionAttestation,
+  verifyPreimageSignature,
+  ATOMIC_ATTEST_V,
+};

@@ -13,8 +13,9 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { verifyExecutionAttestation } = require('../packages/middleware/src/attest');
+const { verifyExecutionAttestation, resolveExecutorKey } = require('../packages/middleware/src/attest');
 const { parseGrantToken } = require('../packages/middleware/src/verify-grant');
+const { ATOMIC_ATTEST_V, verifyAtomicExecutionAttestation } = require('./src/atomic');
 
 function parseArgs(argv) {
   const a = {};
@@ -42,9 +43,19 @@ if (a.grant && a.grant !== true) {
   intended.grant = g.ok ? g.payload : null;   // null => ATTEST_UNBOUND grant_unparseable
 }
 
-const r = verifyExecutionAttestation(a.token, {
-  registry,
-  ...(Object.keys(intended).length ? { intended } : {}),
-});
+let r;
+if (String(a.token).startsWith(`${ATOMIC_ATTEST_V}|`)) {
+  const kid = String(a.token).split('|')[1];
+  const entry = resolveExecutorKey(registry, kid);
+  r = verifyAtomicExecutionAttestation(a.token, {
+    publicKey: entry && entry.publicKey,
+    ...(Object.keys(intended).length ? { intended } : {}),
+  });
+} else {
+  r = verifyExecutionAttestation(a.token, {
+    registry,
+    ...(Object.keys(intended).length ? { intended } : {}),
+  });
+}
 process.stdout.write(JSON.stringify({ valid: r.valid, status: r.status, reason: r.reason }, null, 2) + '\n');
 process.exit(r.valid ? 0 : 1);
