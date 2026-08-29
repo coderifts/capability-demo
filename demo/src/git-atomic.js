@@ -47,11 +47,12 @@
  *   git 2.50.1 against a bare repo with receive.denyDeletes=true: deleting
  *   refs/heads/probe was refused (`deletion prohibited`), and deleting
  *   refs/coderifts/consumed/<hash> SUCCEEDED. The setting guards branches, not
- *   arbitrary ref namespaces. Protecting the ledger requires an explicit
- *   `pre-receive`/`update` hook that refuses deletions under
- *   refs/coderifts/consumed/*; without one, a push can erase a claim. That hook
- *   is server configuration and is NOT shipped here — the honest state today is
- *   that the ledger is delete-able by anyone who can push.
+ *   arbitrary ref namespaces. The 1187 pre-receive hook (demo/src/ledger-hook.js)
+ *   refuses DELETE and OVERWRITE of refs/coderifts/consumed/* over push; it
+ *   protects nothing until installed on the bare that serves pushes, and a
+ *   writer with filesystem access bypasses receive-pack entirely. Reclaim MUST
+ *   NOT delete a consumed-ref — that would fight the hook and re-open replay.
+ *   See TTL RECLAIM INVARIANT below.
  *
  *   DOES NOT HOLD, and this is not the same guarantee as Postgres's
  *   (deployment_id, jti) primary key:
@@ -60,6 +61,33 @@
  *     · an actor with disk access can delete or forge a ledger ref;
  *     · `git pack-refs` / gc housekeeping is not audited here.
  *   Multi-remote sync and tamper-evidence are deferred, not solved.
+ *
+ * TTL RECLAIM INVARIANT (roadmap 1171, panel's third format-piece)
+ *   Deleting a consumed-ref before the grant's exp re-opens replay: a still-valid
+ *   grant becomes presentable again. A ledger entry may be reclaimed ONLY after
+ *   grant.exp + clock-skew has passed. The exp MUST be a signed field of the
+ *   grant — an unsigned exp would let a caller lie about expiry. A non-terminal
+ *   / INDETERMINATE entry is NEVER reclaimed.
+ *
+ *   Git-side reclaim is CHECKPOINT COMPACTION, never `git update-ref -d`. The
+ *   1187 hook refuses DELETE of refs/coderifts/consumed/*; a TTL that deleted
+ *   would fight that hook and re-open the same vector. The checkpoint is a
+ *   SIGNABLE object listing the reclaimed jti-hashes, their prior ledger-object
+ *   hashes, and the previous checkpoint digest (genesis parent is `-`). This
+ *   slice defines the shape; it does not write a git object and does not sign.
+ *   The claim, once a later slice signs and stores C, changes from "the repo
+ *   contains its entire consumption history" to "history before checkpoint C
+ *   is represented by signed compaction C." The hash-chain stays continuous.
+ *
+ *   THIS SLICE SHIPS THE RULE (eligibility guard + checkpoint manifest shape),
+ *   not a running cleanup. Running cleanup at zero traffic is pointless; it is
+ *   demand-gated. A real cleanup also needs terminal reconciliation + proof
+ *   retention — the GUARD itself is: not eligible until exp + skew < now, the
+ *   exp is signed, and the entry is terminal.
+ *
+ *   Postgres reclaim (row delete / partition drop) is the sibling mechanism —
+ *   same invariant, different mechanism — and is not built here. HTTP has no
+ *   ledger, so no reclaim applies.
  */
 
 const { execFile } = require('node:child_process');
@@ -81,6 +109,12 @@ const LEDGER_PREFIX = 'refs/coderifts/consumed';
 /** update-ref's "must not already exist" old-value. Measured: a second create fails
  *  with `reference already exists`, under the same ref lock the CAS uses. */
 const MUST_NOT_EXIST = '0'.repeat(40);
+/** ID104 verification leeway. Same 30s as verify-grant.js:36 (`exp + leeway < now`
+ *  → expired) and posture.js POSTURE_CLOCK_SKEW_LEEWAY_MS. Reused here so reclaim
+ *  cannot become eligible while a clock-skewed presenter can still use the grant. */
+const CLOCK_SKEW_LEEWAY_MS = 30_000;
+/** Signable checkpoint-compaction object. Reclaim writes this; it never deletes. */
+const CHECKPOINT_MANIFEST_V = 'cr.ledger.checkpoint.v1';
 
 const sha256hex = (s) => crypto.createHash('sha256').update(String(s), 'utf8').digest('hex');
 const preimageHashOf = (preimage) => `sha256:${sha256hex(preimage)}`;
@@ -104,6 +138,158 @@ const isSha = (s) => typeof s === 'string' && /^[0-9a-f]{40}$/i.test(s);
 function ledgerRefFor(jti) {
   const h = sha256hex(String(jti));
   return `${LEDGER_PREFIX}/${h.slice(0, 2)}/${h}`;
+}
+
+/**
+ * Parse the grant's SIGNED exp. An unsigned exp is a lie vector: a caller could
+ * claim any expiry and become reclaim-eligible while the grant is still live.
+ *
+ * This function does not verify a signature — the caller must attest that they
+ * passed a verified grant payload (`opts.expSigned === true` after
+ * verify-grant). Presence of `exp` alone is NOT proof it was signed. Any
+ * evidence it was unsigned (`expSigned: false`, `exp_signed: false`, a
+ * `signed_fields` list that omits `exp`) refuses. Side-channel fields
+ * (`unsigned_exp`) are ignored.
+ *
+ * Same Date.parse + Number.isFinite discipline as verify-grant.js:200-206.
+ */
+function signedExpMs(grant, opts = {}) {
+  if (!grant || typeof grant !== 'object') return null;
+  if (opts.expSigned === false || grant.exp_signed === false) return null;
+  if (Array.isArray(grant.signed_fields) && !grant.signed_fields.includes('exp')) return null;
+  const proven = opts.expSigned === true
+    || grant.exp_signed === true
+    || (Array.isArray(grant.signed_fields) && grant.signed_fields.includes('exp'));
+  if (!proven) return null;
+  if (grant.exp == null || grant.exp === '') return null;
+  const expMs = Date.parse(grant.exp);
+  return Number.isFinite(expMs) ? expMs : null;
+}
+
+/**
+ * Terminal = reconciliation produced a closed outcome. INDETERMINATE means we
+ * cannot say what happened; reclaiming that entry would erase the evidence of
+ * not being able to say.
+ *
+ * Fail-closed: omitted terminal/outcome is NOT terminal. Only an explicit
+ * `terminal: true` or `outcome: 'RECONCILED'` counts, and INDETERMINATE
+ * always wins over those.
+ */
+function isTerminalEntry(grant, opts = {}) {
+  if (opts.terminal === false || (grant && grant.terminal === false)) return false;
+  const outcome = opts.outcome || (grant && grant.outcome) || opts.status || (grant && grant.status);
+  if (outcome === 'INDETERMINATE') return false;
+  if (opts.terminal === true || (grant && grant.terminal === true)) return true;
+  return outcome === 'RECONCILED';
+}
+
+/**
+ * Reclaim-eligibility guard. Pure function. No git, no delete.
+ *
+ *   cleanupEligibleAt(grant) = grant.exp + max_clock_skew
+ *
+ * A consumed-ref is reclaim-eligible ONLY when ALL of:
+ *   1. grant.exp is a signed, parseable field
+ *   2. exp + clock-skew < now          (verify-grant.js:205 discipline)
+ *   3. the ledger entry is TERMINAL    (INDETERMINATE is NEVER reclaimed)
+ *
+ * Returns { eligible, eligibleAt, reason }.
+ *   eligibleAt — epoch ms of (signed exp + skew), or null if there is no signed exp
+ *   reason     — null when eligible; else exp_unsigned_or_missing | exp_not_elapsed | non_terminal
+ *
+ * A real cleanup also needs terminal reconciliation + proof retention. This
+ * guard does not perform them. It only answers whether reclaim is allowed to
+ * start. THIS SLICE DOES NOT RUN CLEANUP.
+ */
+function cleanupEligibleAt(grant, opts = {}) {
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  // The 30s constant IS the invariant (paired with verify-grant.js:205). A
+  // smaller override would make reclaim eligible while a skewed presenter can
+  // still use the grant. Larger-than-30s is allowed (stricter); smaller is not.
+  const requested = Number.isFinite(opts.clockSkewLeewayMs) ? opts.clockSkewLeewayMs : CLOCK_SKEW_LEEWAY_MS;
+  const leeway = requested > CLOCK_SKEW_LEEWAY_MS ? requested : CLOCK_SKEW_LEEWAY_MS;
+  const expMs = signedExpMs(grant, opts);
+  const eligibleAt = expMs == null ? null : expMs + leeway;
+
+  if (!isTerminalEntry(grant, opts)) {
+    return { eligible: false, eligibleAt, reason: 'non_terminal' };
+  }
+  if (expMs == null) {
+    return { eligible: false, eligibleAt: null, reason: 'exp_unsigned_or_missing' };
+  }
+  if (!(eligibleAt < now)) {
+    return { eligible: false, eligibleAt, reason: 'exp_not_elapsed' };
+  }
+  return { eligible: true, eligibleAt, reason: null };
+}
+
+/**
+ * Signable checkpoint-compaction manifest.
+ *
+ * Git-side reclaim is this object, never `git update-ref -d`. Each entry lists
+ * the jti-hash (consumed-ref suffix) and the prior ledger-object hash (the SHA
+ * the consumed-ref pointed at), so the hash-chain stays continuous: history
+ * before checkpoint C is represented by signed compaction C.
+ *
+ * THIS FUNCTION DEFINES THE SHAPE. It does not write a git object, does not
+ * compact, and cannot delete a consumed-ref — it never shells out to git.
+ * Running compaction is demand-gated and not shipped here.
+ */
+function checkpointManifest({ entries = [], compacted_at, kid, now, parent } = {}) {
+  const compactedAt = compacted_at != null
+    ? String(compacted_at)
+    : new Date(Number.isFinite(now) ? now : Date.now()).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  // Genesis has no prior checkpoint. Successive compactions pass the previous
+  // digest so C2 commits to C1 — that is the hash-chain the header claims.
+  const parentDigest = parent == null || parent === '' ? '-' : String(parent);
+
+  const refused = (reason) => ({ ok: false, reason, v: CHECKPOINT_MANIFEST_V });
+
+  const normalized = [];
+  for (const e of Array.isArray(entries) ? entries : []) {
+    const jti_hash = e && e.jti_hash != null ? String(e.jti_hash) : '';
+    const prior_object = e && e.prior_object != null ? String(e.prior_object) : '';
+    if (!/^[0-9a-f]{64}$/i.test(jti_hash)) return refused('jti_hash_not_sha256');
+    if (!isSha(prior_object)) return refused('prior_object_not_sha');
+    if (fieldHasDelimiter(jti_hash, prior_object) || jti_hash.includes(':') || prior_object.includes(':')) {
+      return refused('delimiter_in_field');
+    }
+    if (normalized.some((n) => n.jti_hash === jti_hash)) return refused('duplicate_jti_hash');
+    normalized.push({ jti_hash, prior_object });
+  }
+  const sorted = [...normalized].sort((a, b) => {
+    if (a.jti_hash < b.jti_hash) return -1;
+    if (a.jti_hash > b.jti_hash) return 1;
+    if (a.prior_object < b.prior_object) return -1;
+    if (a.prior_object > b.prior_object) return 1;
+    return 0;
+  });
+
+  if (fieldHasDelimiter(compactedAt, parentDigest, kid == null ? '' : String(kid))) {
+    return refused('delimiter_in_field');
+  }
+
+  const parts = [
+    CHECKPOINT_MANIFEST_V,
+    compactedAt,
+    parentDigest,
+    String(sorted.length),
+    ...sorted.map((e) => `${e.jti_hash}:${e.prior_object}`),
+  ];
+  if (kid != null) parts.push(`kid=${String(kid)}`);
+  const signing_input = parts.join('|');
+
+  const out = {
+    ok: true,
+    v: CHECKPOINT_MANIFEST_V,
+    compacted_at: compactedAt,
+    parent: parentDigest,
+    entries: sorted,
+    signing_input,
+    digest: `sha256:${sha256hex(signing_input)}`,
+  };
+  if (kid != null) out.kid = String(kid);
+  return out;
 }
 
 function git(repoDir, args) {
@@ -421,8 +607,12 @@ module.exports = {
   reconcileLedger,
   listConsumedLedger,
   ledgerRefFor,
+  cleanupEligibleAt,
+  checkpointManifest,
   LEDGER_PREFIX,
   MUST_NOT_EXIST,
+  CLOCK_SKEW_LEEWAY_MS,
+  CHECKPOINT_MANIFEST_V,
   readRef,
   gitTargetDescriptor,
   GIT_PROFILE,

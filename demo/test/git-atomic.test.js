@@ -582,3 +582,250 @@ describe('1187 — the pre-receive hook makes the ledger append-only over push',
       'regenerate with the installer rather than hand-editing demo/hooks/pre-receive');
   });
 });
+
+// ═══ TTL RECLAIM INVARIANT (roadmap 1171, panel's third format-piece) ═══════════
+//
+// Deleting a consumed-ref before grant.exp re-opens replay. Reclaim is therefore
+// a CHECKPOINT, never `git update-ref -d` (the 1187 hook refuses deletes). This
+// slice ships the RULE (eligibility + manifest shape), not a running cleanup.
+
+const {
+  cleanupEligibleAt, checkpointManifest, CLOCK_SKEW_LEEWAY_MS, CHECKPOINT_MANIFEST_V,
+} = require('../src/git-atomic');
+
+const utc = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+describe('github.exclusive — TTL reclaim invariant (roadmap 1171)', () => {
+  test('CLOCK_SKEW_LEEWAY_MS is the same 30s as verify-grant / ID104', () => {
+    assert.equal(CLOCK_SKEW_LEEWAY_MS, 30_000);
+  });
+
+  test('cleanupEligibleAt: exp in the past + skew elapsed → eligible', () => {
+    const now = Date.parse('2026-08-29T12:00:00Z');
+    const exp = utc(now - CLOCK_SKEW_LEEWAY_MS - 1_000);
+    // Production shape: verified cr.exec.v1 payload (has exp, no exp_signed field)
+    // plus caller proof that verify-grant already ran (opts.expSigned).
+    const r = cleanupEligibleAt({ jti: 'jti-past', exp }, { now, expSigned: true, terminal: true });
+    assert.equal(r.eligible, true, JSON.stringify(r));
+    assert.equal(r.eligibleAt, Date.parse(exp) + CLOCK_SKEW_LEEWAY_MS);
+    assert.equal(r.reason, null);
+  });
+
+  test('cleanupEligibleAt: exp in the future → NOT eligible', () => {
+    const now = Date.parse('2026-08-29T12:00:00Z');
+    const exp = utc(now + 60_000);
+    const r = cleanupEligibleAt({ exp }, { now, expSigned: true, terminal: true });
+    assert.equal(r.eligible, false);
+    assert.equal(r.reason, 'exp_not_elapsed');
+    assert.equal(r.eligibleAt, Date.parse(exp) + CLOCK_SKEW_LEEWAY_MS);
+  });
+
+  test('cleanupEligibleAt: exp in the past but skew has NOT elapsed → NOT eligible', () => {
+    const now = Date.parse('2026-08-29T12:00:00Z');
+    // Same discipline as verify-grant.js:205 — `exp + leeway < now`, not `<=`.
+    const exp = utc(now - CLOCK_SKEW_LEEWAY_MS);
+    const r = cleanupEligibleAt({ exp }, { now, expSigned: true, terminal: true });
+    assert.equal(r.eligible, false, 'exp + leeway === now is not yet elapsed');
+    assert.equal(r.reason, 'exp_not_elapsed');
+  });
+
+  test('cleanupEligibleAt: a smaller leeway override cannot undercut the 30s pairing', () => {
+    const now = Date.parse('2026-08-29T12:00:00Z');
+    const exp = utc(now - 1_000); // past, but inside the 30s window
+    const r = cleanupEligibleAt({ exp }, { now, expSigned: true, terminal: true, clockSkewLeewayMs: 0 });
+    assert.equal(r.eligible, false, 'leeway 0 would reclaim while verify-grant still accepts the grant');
+    assert.equal(r.reason, 'exp_not_elapsed');
+    assert.equal(r.eligibleAt, Date.parse(exp) + CLOCK_SKEW_LEEWAY_MS);
+  });
+
+  test('cleanupEligibleAt: exp missing → NOT eligible (refuse)', () => {
+    const now = Date.parse('2026-08-29T12:00:00Z');
+    const r = cleanupEligibleAt({ jti: 'jti-no-exp' }, { now, expSigned: true, terminal: true });
+    assert.equal(r.eligible, false);
+    assert.equal(r.reason, 'exp_unsigned_or_missing');
+    assert.equal(r.eligibleAt, null);
+  });
+
+  test('cleanupEligibleAt: unsigned exp → NOT eligible (refuse) — unsigned exp is a lie vector', () => {
+    const now = Date.parse('2026-08-29T12:00:00Z');
+    const past = utc(now - CLOCK_SKEW_LEEWAY_MS - 1_000);
+
+    const noProof = cleanupEligibleAt({ exp: past }, { now, terminal: true });
+    assert.equal(noProof.eligible, false, 'presence of exp without opts.expSigned is unsigned');
+    assert.equal(noProof.reason, 'exp_unsigned_or_missing');
+    assert.equal(noProof.eligibleAt, null, 'an unsigned exp must not produce an eligibility time');
+
+    const unsignedFlag = cleanupEligibleAt(
+      { exp: past, exp_signed: false },
+      { now, expSigned: true, terminal: true },
+    );
+    assert.equal(unsignedFlag.eligible, false, 'unsigned evidence wins over opts.expSigned');
+    assert.equal(unsignedFlag.reason, 'exp_unsigned_or_missing');
+    assert.equal(unsignedFlag.eligibleAt, null);
+
+    const omittedFromSignedFields = cleanupEligibleAt(
+      { exp: past, signed_fields: ['jti', 'iat'] },
+      { now, expSigned: true, terminal: true },
+    );
+    assert.equal(omittedFromSignedFields.eligible, false);
+    assert.equal(omittedFromSignedFields.reason, 'exp_unsigned_or_missing');
+
+    const sideChannel = cleanupEligibleAt(
+      { unsigned_exp: past },
+      { now, expSigned: true, terminal: true },
+    );
+    assert.equal(sideChannel.eligible, false);
+    assert.equal(sideChannel.reason, 'exp_unsigned_or_missing');
+
+    const unparseable = cleanupEligibleAt(
+      { exp: 'not-a-date' },
+      { now, expSigned: true, terminal: true },
+    );
+    assert.equal(unparseable.eligible, false);
+    assert.equal(unparseable.reason, 'exp_unsigned_or_missing');
+  });
+
+  test('INDETERMINATE / non-terminal entry → never eligible, even if exp passed', () => {
+    const now = Date.parse('2026-08-29T12:00:00Z');
+    const exp = utc(now - CLOCK_SKEW_LEEWAY_MS - 1_000);
+    const grant = { exp };
+
+    const byOutcome = cleanupEligibleAt(grant, { now, expSigned: true, outcome: 'INDETERMINATE' });
+    assert.equal(byOutcome.eligible, false);
+    assert.equal(byOutcome.reason, 'non_terminal');
+
+    const byFlag = cleanupEligibleAt(grant, { now, expSigned: true, terminal: false });
+    assert.equal(byFlag.eligible, false);
+    assert.equal(byFlag.reason, 'non_terminal');
+
+    const omitted = cleanupEligibleAt(grant, { now, expSigned: true });
+    assert.equal(omitted.eligible, false, 'omitted terminal is fail-closed, not assumed closed');
+    assert.equal(omitted.reason, 'non_terminal');
+
+    const onGrant = cleanupEligibleAt({ ...grant, outcome: 'INDETERMINATE' }, {
+      now, expSigned: true, terminal: true,
+    });
+    assert.equal(onGrant.eligible, false, 'INDETERMINATE on the entry wins over terminal: true');
+    assert.equal(onGrant.reason, 'non_terminal');
+  });
+
+  test('checkpoint manifest lists jti-hashes + prior object hashes and is signable', () => {
+    const a = { jti_hash: 'a'.repeat(64), prior_object: 'b'.repeat(40) };
+    const b = { jti_hash: 'c'.repeat(64), prior_object: 'd'.repeat(40) };
+    const m = checkpointManifest({
+      entries: [b, a],
+      compacted_at: '2026-08-29T12:00:00Z',
+      kid: 'git-exec-k1',
+    });
+    assert.equal(m.ok, true, JSON.stringify(m));
+    assert.equal(m.v, CHECKPOINT_MANIFEST_V);
+    assert.equal(m.v, 'cr.ledger.checkpoint.v1');
+    assert.equal(m.compacted_at, '2026-08-29T12:00:00Z');
+    assert.equal(m.parent, '-', 'genesis checkpoint has no parent');
+    assert.equal(m.entries.length, 2);
+    assert.deepEqual(m.entries[0], a, 'entries are sorted by jti_hash so the signing input is stable');
+    assert.deepEqual(m.entries[1], b);
+    assert.equal(typeof m.signing_input, 'string');
+    assert.ok(m.signing_input.startsWith('cr.ledger.checkpoint.v1|'), m.signing_input);
+    assert.ok(m.signing_input.includes('|-' + '|'), m.signing_input);
+    assert.ok(m.signing_input.includes(`${a.jti_hash}:${a.prior_object}`), 'prior object hash is in the signed bytes');
+    assert.ok(m.signing_input.includes(`${b.jti_hash}:${b.prior_object}`));
+    assert.match(m.digest, /^sha256:[0-9a-f]{64}$/);
+    assert.equal(m.digest, `sha256:${crypto.createHash('sha256').update(m.signing_input, 'utf8').digest('hex')}`,
+      'digest is of the canonical signing_input — that is what makes the shape signable');
+    // Same inputs → same bytes. Hash-chain continuity depends on this.
+    const again = checkpointManifest({
+      entries: [a, b],
+      compacted_at: '2026-08-29T12:00:00Z',
+      kid: 'git-exec-k1',
+    });
+    assert.equal(again.signing_input, m.signing_input);
+    assert.equal(again.digest, m.digest);
+
+    const child = checkpointManifest({
+      entries: [a],
+      compacted_at: '2026-08-29T13:00:00Z',
+      parent: m.digest,
+    });
+    assert.equal(child.ok, true);
+    assert.equal(child.parent, m.digest, 'C2 commits to C1');
+    assert.ok(child.signing_input.includes(m.digest), child.signing_input);
+    assert.notEqual(child.digest, m.digest);
+  });
+
+  test('checkpoint signing_input refuses delimiter injection (hash-chain must not collide)', () => {
+    const a = { jti_hash: 'a'.repeat(64), prior_object: 'b'.repeat(40) };
+    const honest = checkpointManifest({
+      entries: [a],
+      compacted_at: '2026-08-29T12:00:00Z',
+    });
+    assert.equal(honest.ok, true);
+
+    const pipedTime = checkpointManifest({
+      entries: [],
+      compacted_at: `2026-08-29T12:00:00Z|1|${a.jti_hash}:${a.prior_object}`,
+    });
+    assert.equal(pipedTime.ok, false);
+    assert.equal(pipedTime.reason, 'delimiter_in_field');
+    assert.equal(pipedTime.digest, undefined, 'a refused manifest must not be signable');
+
+    const pipedKid = checkpointManifest({
+      entries: [a],
+      compacted_at: '2026-08-29T12:00:00Z',
+      kid: 'k|1|extra',
+    });
+    assert.equal(pipedKid.ok, false);
+    assert.equal(pipedKid.reason, 'delimiter_in_field');
+  });
+
+  test('crash-before-seal + elapsed exp → NEVER eligible (INDETERMINATE is not reclaimed)', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const now = Date.parse('2026-08-29T12:00:00Z');
+    const exp = utc(now - CLOCK_SKEW_LEEWAY_MS - 1_000);
+    const g = grant({ exp });
+    await assert.rejects(
+      () => gitAtomicExecute({
+        repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+        operation: 'fast-forward', executor, deploymentId: DEPLOY, crashBeforeSeal: true,
+      }),
+      /simulated crash-before-seal/,
+    );
+    const rec = await reconcileRef({ repoDir, ref: REF, attestationsByJti: {} });
+    assert.equal(rec.outcome, 'INDETERMINATE');
+
+    const r = cleanupEligibleAt(g, { now, expSigned: true, outcome: rec.outcome, terminal: true });
+    assert.equal(r.eligible, false, 'a crash-before-seal entry must not be reclaimed after TTL');
+    assert.equal(r.reason, 'non_terminal');
+    assert.equal(sh(repoDir, ['rev-parse', '--verify', ledgerRefFor(g.jti)]), B,
+      'INDETERMINATE evidence stays on the ledger — reclaim is not a delete');
+  });
+
+  test('NO consumed-ref is deleted: reclaim is compaction, not deletion', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    const r = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const lref = ledgerRefFor(g.jti);
+    assert.equal(sh(repoDir, ['rev-parse', '--verify', lref]), B, 'the claim exists before the checkpoint');
+
+    const ledger = await listConsumedLedger({ repoDir });
+    assert.ok(ledger.some((e) => e.ref === lref));
+    const manifest = checkpointManifest({
+      entries: ledger.map((e) => ({ jti_hash: e.jti_hash, prior_object: e.object })),
+      compacted_at: '2026-08-29T12:00:00Z',
+    });
+    assert.equal(manifest.ok, true, JSON.stringify(manifest));
+    assert.ok(manifest.entries.some((e) => e.jti_hash === ledgerRefFor(g.jti).split('/').pop()));
+    assert.ok(manifest.entries.some((e) => e.prior_object === B), 'prior ledger-object hash is recorded');
+
+    // THE INVARIANT: building the checkpoint must not delete the consumed-ref.
+    // `git update-ref -d` is the 1187 vector; reclaim is compaction, not deletion.
+    assert.equal(sh(repoDir, ['rev-parse', '--verify', lref]), B, 'consumed-ref still exists after checkpoint shape is built');
+    const after = await listConsumedLedger({ repoDir });
+    assert.equal(after.length, ledger.length);
+    assert.deepEqual(after.map((e) => e.ref).sort(), ledger.map((e) => e.ref).sort());
+  });
+});
