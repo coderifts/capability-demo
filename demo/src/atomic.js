@@ -83,11 +83,16 @@ function verifyAtomicExecutionAttestation(token, opts = {}) {
     const jti = String(grant.jti || '');
     const did = grant.deployment_id != null && String(grant.deployment_id).length > 0
       ? String(grant.deployment_id) : '';
-    const prefix = did
-      ? `cr.gate.preimage.v1|${jti}|${did}|`
-      : `cr.gate.preimage.v1|${jti}|`;
-    if (!preimage.startsWith(prefix)) {
-      return { valid: false, status: 'ATTEST_UNBOUND', reason: did ? 'deployment_id_mismatch' : 'grant_jti_mismatch' };
+    // Producer (gate.sql:146) always emits magic|jti|did|… — did is '' when absent.
+    // Full-field equality: startsWith is only safe while jti/did are delimiter-free.
+    const fields = String(preimage).split('|');
+    if (fields.length < 3
+        || fields[0] !== 'cr.gate.preimage.v1'
+        || fields[1] !== jti) {
+      return { valid: false, status: 'ATTEST_UNBOUND', reason: 'grant_jti_mismatch' };
+    }
+    if (fields[2] !== did) {
+      return { valid: false, status: 'ATTEST_UNBOUND', reason: 'deployment_id_mismatch' };
     }
   }
   return {
