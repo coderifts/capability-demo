@@ -15,6 +15,15 @@
  *   · cr.atomic.execution.attestation.v1, byte-identical envelope (atomic.js:45-52)
  *   · STATE_DRIFT carries { challenged, current } (atomic.js:166-168)
  *
+ * CAS PIN IS CALLER-SUPPLIED (AUDIT P0, HIBA-1)
+ *   expected_old_sha is mandatory: a concrete 40-hex pin, or the explicit
+ *   `absent:<ref>` create-only sentinel. There is no fallback to a runtime
+ *   rev-parse. A CAS token read at execution time cannot bind to the state
+ *   authorize verified — that is the TOCTOU the auditor reproduced (a ref
+ *   move succeeding with no expected_old_sha, pinning to whatever `before`
+ *   happened to be). `absent:<ref>` is authorize-time intent ("require the
+ *   ref not exist"); it is not a silent read of the current ref.
+ *
  * WHAT IS NOT, AND THIS IS THE HONEST CORE OF THIS ADAPTER
  *   Postgres wraps consume + mutate + seal in ONE transaction, and a deferred
  *   constraint trigger REFUSES to commit a consumed-but-unsigned row. Git has no
@@ -331,6 +340,16 @@ function fieldHasDelimiter(...values) {
 }
 
 /**
+ * A CAS pin the CALLER supplied: 40-hex sha, or the explicit `absent:<ref>`
+ * create-only sentinel. Null / undefined / empty is not a pin — that used to
+ * fall back to a runtime-read ref and is the TOCTOU this closes.
+ */
+function isCallerSuppliedPin(expectedOldSha) {
+  if (typeof expectedOldSha !== 'string' || expectedOldSha.length === 0) return false;
+  return isSha(expectedOldSha) || expectedOldSha.startsWith('absent:');
+}
+
+/**
  * The ref transition, as the target descriptor.
  *
  * The grammar is NOT extended: the Postgres form is
@@ -357,7 +376,11 @@ async function reflogMarkers(repoDir, ref) {
  * @param {string} o.repoDir            working tree / bare repo to operate on
  * @param {string} o.ref                e.g. 'refs/heads/main'
  * @param {object} o.payload            verified grant payload (must carry deployment_id, jti)
- * @param {string} o.expectedOldSha     the CAS pin; or `absent:<ref>` to require the ref not exist
+ * @param {string} o.expectedOldSha     REQUIRED CAS pin: 40-hex sha, or `absent:<ref>`
+ *                                      to require the ref not exist. Never omitted —
+ *                                      a missing pin used to fall back to a runtime
+ *                                      rev-parse (TOCTOU: authorize verified X, CAS
+ *                                      pinned to whatever the ref was at execute).
  * @param {string} o.newSha             the commit the ref must end up at
  * @param {string} o.operation          descriptive; recorded, not interpreted
  * @param {object} o.executor           { privateKey, kid } — used AFTER the CAS, never before
@@ -383,6 +406,12 @@ async function gitAtomicExecute({
   }
   if (!isSha(newSha)) {
     return { ok: false, status: 'STATE_CHALLENGE_UNKNOWN', reason: 'new_sha_not_40_hex', http: 403 };
+  }
+  // The pin must come from the caller (authorize), never from an execution-time
+  // rev-parse. `absent:<ref>` is an explicit create-only sentinel; null/empty
+  // is not. Closing that fallback is AUDIT P0 HIBA-1 (T2→commit TOCTOU).
+  if (!isCallerSuppliedPin(expectedOldSha)) {
+    return { ok: false, status: 'STATE_CHALLENGE_UNKNOWN', reason: 'missing_expected_old_sha', http: 403 };
   }
   // See fieldHasDelimiter: a `|` here would shift a preimage field boundary.
   if (fieldHasDelimiter(ref, jti, configured, expectedOldSha, newSha)) {
@@ -424,8 +453,9 @@ async function gitAtomicExecute({
     };
   }
 
-  const before = await readRef(repoDir, ref);
-  const pin = expectedOldSha == null ? before : String(expectedOldSha);
+  // Pin is the caller's. Never `readRef` here: an execution-time sha cannot
+  // bind to the state authorize verified (HIBA-1). `before` is gone.
+  const pin = String(expectedOldSha);
 
   // (3) THE CAS. update-ref moves the ref only if it still points at `pin`.
   //     The reflog message is written in the SAME lock (measured), so the marker

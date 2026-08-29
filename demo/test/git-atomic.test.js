@@ -22,7 +22,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const {
-  gitAtomicExecute, reconcileRef, readRef, GIT_PROFILE, REFLOG_MARKER,
+  gitAtomicExecute, reconcileRef, readRef, GIT_PROFILE, REFLOG_MARKER, listConsumedLedger,
 } = require('../src/git-atomic');
 const { verifyAtomicExecutionAttestation } = require('../src/atomic');
 
@@ -185,6 +185,33 @@ describe('github.exclusive — ref CAS', () => {
     });
     assert.equal(again.status, 'STATE_DRIFT', 'it exists now; "must not exist" must refuse');
   });
+
+  test('missing expectedOldSha (null/undefined/empty, not absent:) REJECTS before any side effect', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    // The auditor's reproduction: a ref move SUCCEEDED with no expected_old_sha
+    // because pin fell back to a runtime-read `before`. That path is closed.
+    const cases = [
+      { expectedOldSha: null },
+      { expectedOldSha: undefined },
+      { expectedOldSha: '' },
+      {}, // omitted
+    ];
+    for (const over of cases) {
+      const g = grant();
+      const r = await gitAtomicExecute({
+        repoDir, ref: REF, payload: g, newSha: B,
+        operation: 'fast-forward', executor, deploymentId: DEPLOY,
+        ...over,
+      });
+      assert.equal(r.ok, false, JSON.stringify({ over, r }));
+      assert.equal(r.status, 'STATE_CHALLENGE_UNKNOWN');
+      assert.equal(r.reason, 'missing_expected_old_sha');
+      assert.equal(r.http, 403);
+      assert.equal(await readRef(repoDir, REF), A, 'ref must not have moved');
+      const ledger = await listConsumedLedger({ repoDir });
+      assert.equal(ledger.length, 0, 'no consume — rejected before update-ref / ledger claim');
+    }
+  });
 });
 
 describe('github.exclusive — the crash case is INDETERMINATE, not prevented', () => {
@@ -247,7 +274,7 @@ describe('github.exclusive — the crash case is INDETERMINATE, not prevented', 
 // case its own comment named as open: the same jti against a DIFFERENT ref.
 
 const {
-  reconcileLedger, listConsumedLedger, ledgerRefFor, LEDGER_PREFIX,
+  reconcileLedger, ledgerRefFor, LEDGER_PREFIX,
 } = require('../src/git-atomic');
 
 const REF_B = 'refs/heads/second';
