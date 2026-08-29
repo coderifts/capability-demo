@@ -28,14 +28,20 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const { reconcile, OUTCOME, SEVERITY } = require('./src/reconcile');
-const { makePool, executorUrl, configuredDeploymentId } = require('./src/db');
+const { makePool, bootstrapUrl, configuredDeploymentId } = require('./src/db');
 
 /**
  * Config is MIRRORED, not invented:
  *   · git repo dir   — server.js:62  (CODERIFTS_GIT_REPO_DIR)
  *   · http base url  — server.js:65  (CODERIFTS_HTTP_BASE_URL)
- *   · postgres pool  — prove.js:121  (makePool(executorUrl()))
+ *   · postgres pool  — prove.js:103  (makePool(bootstrapUrl()))
  *   · deployment id  — prove.js:87   (configuredDeploymentId())
+ *
+ * The postgres pool is the BOOTSTRAP pool, not the executor's. MEASURED:
+ * reconcilePostgres reads `attestations`, which is owner-only — gate.sql
+ * REVOKEs ALL from cr_executor and cr_host has no grant either, so both login
+ * roles get 42501 on it. prove.js reconciles through its bootstrap pool for
+ * exactly this reason. Recovery is an operator action, not an executor one.
  */
 const gitRepoDir = () => process.env.CODERIFTS_GIT_REPO_DIR || null;
 const httpBaseUrl = () => process.env.CODERIFTS_HTTP_BASE_URL || null;
@@ -178,10 +184,10 @@ async function main() {
   const wantsPg = doc.postgres && Array.isArray(doc.postgres.jtis) && doc.postgres.jtis.length > 0;
   if (wantsPg) {
     try {
-      pool = makePool(executorUrl());
+      pool = makePool(bootstrapUrl());
       await pool.query('SELECT 1');
     } catch (err) {
-      process.stderr.write(`postgres unreachable at ${executorUrl()}: ${err && err.message}\n`);
+      process.stderr.write(`postgres unreachable at ${bootstrapUrl()}: ${err && err.message}\n`);
       if (pool) { try { await pool.end(); } catch (_) { /* */ } }
       pool = null;
     }

@@ -255,6 +255,75 @@ ALTER FUNCTION cap_persist_attestation(text, text, text) OWNER TO cr_owner;
 REVOKE ALL ON FUNCTION cap_persist_attestation(text, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION cap_persist_attestation(text, text, text) TO cr_executor;
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- STEP 3c — read the evidence back for an audit window.
+--
+-- SECURITY DEFINER for the same reason the persist is: `attestations` is
+-- owner-only (gate.sql REVOKEs ALL from cr_executor, roles.sql owns it as
+-- cr_owner) and the posture drift baseline pins both login roles at the empty
+-- set on that table. Granting SELECT to make an export possible would widen the
+-- pinned ACL; this function reads with owner rights and leaves it untouched.
+--
+-- EXECUTE goes to cr_host, the read-side role — NOT to cr_executor, whose
+-- documented profile is EXECUTE on the gate only (db.js:15). The tokens are
+-- public evidence by design (kid, preimage and signature, verifiable offline by
+-- anyone holding the executor pubkey), so reading them back is an audit surface
+-- rather than a disclosure.
+--
+-- WINDOW SEMANTICS, stated because they are not what a reader assumes.
+-- created_at defaults to now(), which in PostgreSQL is transaction_timestamp()
+-- — the transaction's START, not its commit. cap_persist_attestation runs
+-- inside the consuming transaction, so a row is STAMPED at BEGIN and becomes
+-- VISIBLE at COMMIT. A transaction in flight when this function runs will
+-- therefore appear LATER carrying a created_at that falls inside a window
+-- already exported. The same is true of id: BIGSERIAL takes its value at INSERT
+-- time, inside the transaction. Neither column is a commit-order watermark, and
+-- this function does not pretend otherwise: it returns what was VISIBLE, and
+-- the caller reports that as its completeness claim.
+DROP FUNCTION IF EXISTS cap_export_attestations(text, timestamptz, timestamptz, integer);
+
+CREATE OR REPLACE FUNCTION cap_export_attestations(
+  p_deployment_id text,
+  p_since         timestamptz,
+  p_until         timestamptz,
+  p_limit         integer
+) RETURNS TABLE (
+  id          bigint,
+  grant_jti   text,
+  token       text,
+  created_at  timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+BEGIN
+  IF p_deployment_id IS NULL OR p_deployment_id = '' THEN
+    RAISE EXCEPTION 'cap_export_attestations: missing_deployment_id'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF p_limit IS NULL OR p_limit <= 0 THEN
+    RAISE EXCEPTION 'cap_export_attestations: bad_limit'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- NULL bounds are open, not "now": an unbounded window is stated by the
+  -- caller's manifest, never silently narrowed here.
+  RETURN QUERY
+    SELECT a.id, a.grant_jti, a.token, a.created_at
+      FROM public.attestations a
+     WHERE a.deployment_id = p_deployment_id
+       AND (p_since IS NULL OR a.created_at >= p_since)
+       AND (p_until IS NULL OR a.created_at <  p_until)
+     ORDER BY a.created_at, a.id
+     LIMIT p_limit;
+END;
+$$;
+
+ALTER FUNCTION cap_export_attestations(text, timestamptz, timestamptz, integer) OWNER TO cr_owner;
+REVOKE ALL ON FUNCTION cap_export_attestations(text, timestamptz, timestamptz, integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION cap_export_attestations(text, timestamptz, timestamptz, integer) TO cr_host;
+
 -- Constraint triggers must be owned by the table owner (cr_owner).
 -- migrate() RESET ROLE in finally so a failed SET ROLE cannot poison the pool.
 SET ROLE cr_owner;
