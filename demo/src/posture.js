@@ -176,6 +176,57 @@ function searchPathOf(config) {
   return hit ? String(hit).slice('search_path='.length) : '';
 }
 
+/**
+ * RESERVED BODY FIELDS — structure now, content when it exists.
+ *
+ * The full credential-boundary claim needs five more fields beside the two this
+ * receipt signs today: executor_id, adapter_id, target_uri, policy_hash,
+ * expires_at. They are declared here as OPTIONAL and are ABSENT from the signed
+ * body until they carry real content.
+ *
+ * WHY ABSENT AND NOT EMPTY. Today this demo has ONE adapter (postgres), ONE
+ * target, no separate policy artifact, and no executor identity distinct from
+ * the signing key id. Signing `adapter_id: ""` or `policy_hash: null` would put
+ * a value in the signed bytes that asserts nothing — a false zero a reader could
+ * mistake for a checked fact. An absent field is honestly absent; an empty one
+ * claims to have been considered.
+ *
+ * MEASURED CONSEQUENCE (canonicalJson below iterates Object.keys): a key that is
+ * not on the object never reaches the preimage, so adding these five changes no
+ * byte of today's signature. A key present as `undefined` would be WORSE than a
+ * false zero — canonicalJson emits `"k":undefined`, which is not valid JSON and
+ * would make the verifier's JSON.parse fail. Hence: omitted, never undefined.
+ *
+ * VERIFIED WHEN PRESENT. @coderifts/agent-guard 14.1.0's posture verifier already
+ * uses the present-and-non-empty pattern (posture-receipt.ts:195-196, :201-202),
+ * so a reserved field is ignored and a populated one is checked, with no guard
+ * change required.
+ *
+ * BECOMES MANDATORY when the field carries real content — data plane phase 2.
+ * Until then, adding one to a receipt is a claim about something that exists.
+ */
+const RESERVED_BODY_FIELDS = Object.freeze([
+  'executor_id',   // reserved: mandatory when an executor identity distinct from executor_kid exists
+  'adapter_id',    // reserved: mandatory when more than one adapter can produce this receipt
+  'target_uri',    // reserved: mandatory when more than one target is reachable
+  'policy_hash',   // reserved: mandatory when a policy artifact exists to hash
+  'expires_at',    // reserved: mandatory when the receipt carries its own expiry
+]);
+
+/**
+ * Keep only reserved fields that carry REAL content. A non-empty string is
+ * content; anything else (absent, null, '', a non-string) is not, and is dropped
+ * rather than signed as a placeholder.
+ */
+function presentReservedFields(source = {}) {
+  const out = {};
+  for (const k of RESERVED_BODY_FIELDS) {
+    const v = source[k];
+    if (typeof v === 'string' && v.length > 0) out[k] = v;
+  }
+  return out;
+}
+
 function canonicalJson(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
@@ -416,7 +467,7 @@ function verifyPostureReceipt(token, { publicKey } = {}) {
  * Read catalog, diff against baseline, sign a posture_receipt with the local
  * executor key. FAIL is a signed drift artifact, not an unsigned complaint.
  */
-async function issuePostureReceipt({ client, executor, deploymentId, now } = {}) {
+async function issuePostureReceipt({ client, executor, deploymentId, now, reserved } = {}) {
   if (!client) throw new Error('issuePostureReceipt: client is required');
   if (!executor || !executor.privateKey || !executor.kid) {
     throw new Error('issuePostureReceipt: executor { privateKey, kid } is required');
@@ -432,6 +483,10 @@ async function issuePostureReceipt({ client, executor, deploymentId, now } = {})
     verdict,
     facts,
     drift,
+    // Spread LAST and only for fields with real content — see RESERVED_BODY_FIELDS.
+    // With none supplied this spread contributes no keys, so the preimage is
+    // byte-identical to the pre-reservation receipt.
+    ...presentReservedFields(reserved),
   };
   const preimage = canonicalJson(body);
   const signature = signPreimage(executor.privateKey, preimage);
@@ -462,6 +517,8 @@ async function issuePostureReceipt({ client, executor, deploymentId, now } = {})
 }
 
 module.exports = {
+  RESERVED_BODY_FIELDS,
+  presentReservedFields,
   POSTURE_V,
   BASELINE,
   SQL,

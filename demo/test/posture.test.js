@@ -318,3 +318,83 @@ describe('STEP 5 — posture vs 42501 contrast', () => {
     assert.equal(restored.ok, true, JSON.stringify(restored.drift));
   });
 });
+
+// ═══ RESERVED BODY FIELDS (data plane phase 2 structure-prep) ═════════════════
+//
+// The five reserved fields are STRUCTURE, not content. These tests pin the two
+// properties that make that honest: today's signature does not move, and a field
+// with no real content never reaches the signed bytes.
+
+const {
+  RESERVED_BODY_FIELDS, presentReservedFields,
+} = require('../src/posture');
+
+/** canonicalJson as posture.js:179-183 defines it — the signed-byte shape. */
+function canonicalJson(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(',')}}`;
+}
+
+const baseBody = () => ({
+  v: 'cr.posture.receipt.v1',
+  executor_kid: 'k1',
+  deployment_id: 'dep-1',
+  measured_at: '2026-08-29T12:00:00.000Z',
+  verdict: 'PASS',
+  facts: { a: 1 },
+  drift: [],
+});
+
+/** The preimage measured BEFORE the five fields were added. */
+const BASELINE_PREIMAGE = '{"deployment_id":"dep-1","drift":[],"executor_kid":"k1",'
+  + '"facts":{"a":1},"measured_at":"2026-08-29T12:00:00.000Z",'
+  + '"v":"cr.posture.receipt.v1","verdict":"PASS"}';
+
+describe('posture receipt — reserved fields are structure, not content', () => {
+  test('REGRESSION: with no reserved field, the preimage is byte-identical', () => {
+    const body = { ...baseBody(), ...presentReservedFields(undefined) };
+    assert.equal(canonicalJson(body), BASELINE_PREIMAGE,
+      'adding the five reserved fields must not move a byte of today\'s signature');
+    assert.deepEqual(Object.keys(body).sort(),
+      ['deployment_id', 'drift', 'executor_kid', 'facts', 'measured_at', 'v', 'verdict']);
+  });
+
+  test('a reserved field with REAL content is signed and appears in the preimage', () => {
+    const body = { ...baseBody(), ...presentReservedFields({ executor_id: 'exec-a' }) };
+    const pre = canonicalJson(body);
+    assert.notEqual(pre, BASELINE_PREIMAGE);
+    assert.match(pre, /"executor_id":"exec-a"/);
+    assert.equal(JSON.parse(pre).executor_id, 'exec-a', 'and it survives the verifier\'s parse');
+  });
+
+  test('NO FALSE ZEROS: empty string, null and undefined are dropped, not signed', () => {
+    const body = {
+      ...baseBody(),
+      ...presentReservedFields({
+        adapter_id: '', policy_hash: null, target_uri: undefined, expires_at: 0,
+      }),
+    };
+    assert.equal(canonicalJson(body), BASELINE_PREIMAGE,
+      'a placeholder value would assert something was considered when it was not');
+    for (const f of RESERVED_BODY_FIELDS) {
+      assert.equal(Object.prototype.hasOwnProperty.call(body, f), false, `${f} must be absent`);
+    }
+  });
+
+  test('an absent field is never present-as-undefined (that would be invalid JSON)', () => {
+    // canonicalJson emits `"k":undefined` for a key held as undefined — not valid
+    // JSON, and the verifier's JSON.parse would fail. Absence must mean no key.
+    const wrong = canonicalJson({ ...baseBody(), adapter_id: undefined });
+    assert.match(wrong, /"adapter_id":undefined/);
+    assert.throws(() => JSON.parse(wrong), 'this is exactly what presentReservedFields prevents');
+
+    const right = canonicalJson({ ...baseBody(), ...presentReservedFields({ adapter_id: undefined }) });
+    assert.doesNotThrow(() => JSON.parse(right));
+  });
+
+  test('all five are declared, in the phase-2 set', () => {
+    assert.deepEqual([...RESERVED_BODY_FIELDS],
+      ['executor_id', 'adapter_id', 'target_uri', 'policy_hash', 'expires_at']);
+  });
+});
