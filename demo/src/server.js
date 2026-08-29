@@ -28,6 +28,7 @@ const {
 } = require('./db');
 const { atomicExecute } = require('./atomic');
 const { gitAtomicExecute, GIT_PROFILE } = require('./git-atomic');
+const { httpAtomicExecute, HTTP_PROFILE } = require('./http-atomic');
 
 const KEYS_DIR = process.env.CODERIFTS_KEYS_DIR || path.join(__dirname, '..', 'keys');
 const KEYS_FILE = process.env.CODERIFTS_KEYS_FILE || path.join(KEYS_DIR, 'coderifts-keys.json');
@@ -42,6 +43,8 @@ const OPERATION_MAP = {
   // github.exclusive (1176). The grant must be bound to this operation exactly as
   // the Postgres operations are — the git target gets no weaker binding.
   'POST /git/ref-update': 'ref-update',
+  // http.exclusive. Grant bound to this operation and to resource_path as target_id.
+  'POST /http/resource-update': 'resource-update',
 };
 
 function loadExecutor() {
@@ -57,6 +60,9 @@ function buildApp({
   // client-supplied repository path would let a grant for one repo move a ref in
   // another, which is the whole boundary this adapter exists to hold.
   gitRepoDir = process.env.CODERIFTS_GIT_REPO_DIR || null,
+  // http.exclusive origin. SERVER-CONFIGURED, never taken from the request: a
+  // client-supplied base URL would let a grant for one origin mutate another.
+  httpBaseUrl = process.env.CODERIFTS_HTTP_BASE_URL || null,
 } = {}) {
   const app = express();
   const executor = loadExecutor();
@@ -75,6 +81,7 @@ function buildApp({
     targetId: (req) => {
       if (req.params && req.params.id != null) return String(req.params.id);
       if (req.body && typeof req.body.ref === 'string') return req.body.ref;
+      if (req.body && typeof req.body.resource_path === 'string') return req.body.resource_path;
       return '';
     },
   });
@@ -115,6 +122,16 @@ function buildApp({
           + 'deferred constraint either: a crash after the ref moved leaves it '
           + 'moved with no attestation, and a missing ledger entry is '
           + 'INDETERMINATE — never proof a grant was unconsumed',
+      },
+      {
+        profile: HTTP_PROFILE,
+        target: 'http.exclusive',
+        available: httpBaseUrl != null,
+        holds: 'single-writer on ONE resource via If-Match / ETag compare-and-swap, '
+          + 'IF the origin honors If-Match (412 on mismatch)',
+        does_not_hold: 'HTTP has no reflog-lock: the ETag CAS and the attestation are '
+          + 'separate round-trips; a crash after 2xx is INDETERMINATE. No cross-resource '
+          + 'single-use. A server that ignores If-Match is not a single-writer CAS',
       },
     ],
   }));
@@ -217,6 +234,24 @@ function buildApp({
         expectedOldSha: req.body && req.body.expected_old_sha,
         newSha: req.body && req.body.new_sha,
         operation: payload.operation,
+        executor: ex,
+        deploymentId,
+      }),
+    ));
+  }
+
+  // http.exclusive. Mounted only when a baseUrl is configured, so an unconfigured
+  // server has no half-wired HTTP surface to probe. baseUrl is the SERVER's.
+  if (httpBaseUrl != null) {
+    app.post('/http/resource-update', captureRawBody(), guard, handle(
+      (req) => (req.body && typeof req.body.resource_path === 'string' ? req.body.resource_path : ''),
+      ({ req, payload, targetId, executor: ex, deploymentId }) => httpAtomicExecute({
+        baseUrl: httpBaseUrl,
+        resourcePath: targetId,
+        payload,
+        ifMatchEtag: req.body && req.body.if_match,
+        method: req.body && req.body.method,
+        body: req.body && req.body.body,
         executor: ex,
         deploymentId,
       }),
