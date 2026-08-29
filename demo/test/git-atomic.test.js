@@ -433,3 +433,152 @@ describe('github.exclusive — the ledger scope is stated, not implied', () => {
     fs.rmSync(bare, { recursive: true, force: true });
   });
 });
+
+// ═══ PRE-RECEIVE HOOK: the ledger namespace is append-only (roadmap 1187) ═════
+//
+// The MEASURED LIMIT test above pins the honest before-state: receive.denyDeletes
+// leaves the ledger deletable. These pin what the hook changes, and — just as
+// importantly — what it does not.
+
+const { installLedgerHook, ledgerHookInstalled, PRE_RECEIVE_HOOK } = require('../src/ledger-hook');
+
+/** A bare repo that serves pushes, with denyDeletes on so branches are covered too. */
+function makeBare() {
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-git-hooked-'));
+  execFileSync('git', ['init', '-q', '--bare', bare]);
+  execFileSync('git', ['-C', bare, 'config', 'receive.denyDeletes', 'true']);
+  return bare;
+}
+
+/** Push, returning whether the remote refused. Never throws. */
+function tryPush(from, to, refspec) {
+  try {
+    execFileSync('git', ['-C', from, 'push', to, refspec], { stdio: 'pipe' });
+    return { refused: false };
+  } catch (e) {
+    return { refused: true, stderr: String((e.stderr && e.stderr.toString()) || '') };
+  }
+}
+
+describe('1187 — the pre-receive hook makes the ledger append-only over push', () => {
+  test('installer writes an executable hook, and does not clobber a foreign one', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const bare = makeBare();
+    const r = installLedgerHook(bare);
+    assert.equal(r.installed, true);
+    assert.equal(ledgerHookInstalled(bare), true);
+    assert.ok((fs.statSync(r.path).mode & 0o111) !== 0, 'the hook must be executable or git ignores it');
+
+    // Re-install is idempotent, not a second write.
+    assert.equal(installLedgerHook(bare).reason, 'already_current');
+
+    // An operator's own hook is never overwritten silently.
+    fs.writeFileSync(r.path, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    assert.equal(installLedgerHook(bare).reason, 'existing_hook_differs');
+    assert.equal(installLedgerHook(bare, { force: true }).installed, true, '--force is the explicit way');
+    fs.rmSync(bare, { recursive: true, force: true });
+  });
+
+  test('DELETE of a consumed ref is REFUSED with the hook installed', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const bare = makeBare();
+    installLedgerHook(bare);
+    const g = grant();
+    await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    const lref = ledgerRefFor(g.jti);
+    assert.equal(tryPush(repoDir, bare, `${lref}:${lref}`).refused, false, 'CREATE must be permitted');
+
+    const del = tryPush(repoDir, bare, `:${lref}`);
+    assert.equal(del.refused, true, 'this is the vector the hook exists to close');
+    assert.match(del.stderr, /deleting a consumed-grant claim would re-open replay/);
+    assert.equal(
+      execFileSync('git', ['-C', bare, 'rev-parse', '--verify', lref], { encoding: 'utf8' }).trim(),
+      B, 'the claim must still be there afterwards',
+    );
+    fs.rmSync(bare, { recursive: true, force: true });
+  });
+
+  test('OVERWRITE of an existing consumed ref is REFUSED (a claim is create-only)', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const bare = makeBare();
+    installLedgerHook(bare);
+    const g = grant();
+    await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    const lref = ledgerRefFor(g.jti);
+    tryPush(repoDir, bare, `${lref}:${lref}`);
+
+    // Repoint the local claim at a different object, then try to push it over.
+    sh(repoDir, ['update-ref', lref, C]);
+    const over = tryPush(repoDir, bare, `+${lref}:${lref}`);
+    assert.equal(over.refused, true, 'laundering a claim must be refused like deleting one');
+    assert.match(over.stderr, /create-only/);
+    assert.equal(
+      execFileSync('git', ['-C', bare, 'rev-parse', '--verify', lref], { encoding: 'utf8' }).trim(),
+      B, 'the original claim survives',
+    );
+    fs.rmSync(bare, { recursive: true, force: true });
+  });
+
+  test('CREATE of a NEW consumed ref is PERMITTED (the normal consume path)', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const bare = makeBare();
+    installLedgerHook(bare);
+    for (const _ of [1, 2, 3]) {
+      sh(repoDir, ['update-ref', REF, A]);
+      const g = grant();
+      await gitAtomicExecute({
+        repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+        operation: 'fast-forward', executor, deploymentId: DEPLOY,
+      });
+      const lref = ledgerRefFor(g.jti);
+      assert.equal(tryPush(repoDir, bare, `${lref}:${lref}`).refused, false,
+        'a hook that blocked new claims would break the adapter it protects');
+    }
+    fs.rmSync(bare, { recursive: true, force: true });
+  });
+
+  test('normal BRANCH pushes are unaffected — the hook only knows one namespace', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const bare = makeBare();
+    installLedgerHook(bare);
+    sh(repoDir, ['update-ref', REF, A]);
+    assert.equal(tryPush(repoDir, bare, `${REF}:refs/heads/probe`).refused, false,
+      'branch create must still work');
+    sh(repoDir, ['update-ref', REF, C]);
+    assert.equal(tryPush(repoDir, bare, `+${REF}:refs/heads/probe`).refused, false,
+      'branch update must still work');
+    // Branch DELETION is still governed by receive.denyDeletes, not by this hook.
+    assert.equal(tryPush(repoDir, bare, ':refs/heads/probe').refused, true,
+      'refused by denyDeletes, which is the repo config — unchanged by us');
+    fs.rmSync(bare, { recursive: true, force: true });
+  });
+
+  test('BASELINE PRESERVED: without the hook, the ledger delete still passes', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const bare = makeBare();                    // deliberately NOT installing the hook
+    assert.equal(ledgerHookInstalled(bare), false);
+    const g = grant();
+    await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    const lref = ledgerRefFor(g.jti);
+    tryPush(repoDir, bare, `${lref}:${lref}`);
+    assert.equal(tryPush(repoDir, bare, `:${lref}`).refused, false,
+      'an UNINSTALLED hook protects nothing — the /health wording says exactly this');
+    fs.rmSync(bare, { recursive: true, force: true });
+  });
+
+  test('the checked-in demo/hooks/pre-receive matches the module (no second copy to drift)', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const onDisk = fs.readFileSync(path.join(__dirname, '..', 'hooks', 'pre-receive'), 'utf8');
+    assert.equal(onDisk, PRE_RECEIVE_HOOK,
+      'regenerate with the installer rather than hand-editing demo/hooks/pre-receive');
+  });
+});
