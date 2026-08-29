@@ -20,7 +20,10 @@ const {
 const { loadExecutor } = require('../src/server');
 const {
   issuePostureReceipt, verifyPostureReceipt, POSTURE_V, BASELINE,
+  encodePostureReceipt, canonicalJson: postureCanonicalJson,
+  POSTURE_CLOCK_SKEW_LEEWAY_MS, checkKeyWindow,
 } = require('../src/posture');
+const { signPreimage } = require('../src/atomic');
 
 const KEYS = path.join(__dirname, '..', 'keys');
 let bootstrap, hostPool, executorPool, reachable = false;
@@ -396,5 +399,171 @@ describe('posture receipt — reserved fields are structure, not content', () =>
   test('all five are declared, in the phase-2 set', () => {
     assert.deepEqual([...RESERVED_BODY_FIELDS],
       ['executor_id', 'adapter_id', 'target_uri', 'policy_hash', 'expires_at']);
+  });
+});
+
+// ═══ KEY VALIDITY WINDOW (roadmap 1171 slice 2) ════════════════════════════════
+//
+// The window lives in the manifest, not the signed body. These tests do not
+// need Postgres: they sign a frozen body and verify against a constructed
+// manifest. Live catalog tests above still use { publicKey } only.
+
+describe('posture receipt — key validity window', () => {
+  const KID = 'window-k1';
+  let kp;
+  let publicKey;
+  let privateKey;
+
+  const T_IN = '2024-06-01T00:00:00.000Z';
+  const T_BEFORE = '2019-01-01T00:00:00.000Z';
+  const T_AFTER = '2027-01-01T00:00:00.000Z';
+  const FROM = '2020-01-01T00:00:00.000Z';
+  const UNTIL = '2025-12-31T23:59:59.000Z';
+
+  function frozenBody(measured_at) {
+    return {
+      v: POSTURE_V,
+      executor_kid: KID,
+      deployment_id: 'dep-1',
+      measured_at,
+      verdict: 'PASS',
+      facts: { a: 1 },
+      drift: [],
+    };
+  }
+
+  function mint(measured_at, signKey = null) {
+    const preimage = postureCanonicalJson(frozenBody(measured_at));
+    const signature = signPreimage(signKey || privateKey, preimage);
+    return encodePostureReceipt({ executor_kid: KID, preimage, signature });
+  }
+
+  function manifest(over = {}) {
+    return {
+      keys: [{
+        kid: KID,
+        publicKey,
+        valid_from: FROM,
+        valid_until: UNTIL,
+        status: 'active',
+        ...over,
+      }],
+    };
+  }
+
+  before(() => {
+    kp = crypto.generateKeyPairSync('ed25519');
+    privateKey = kp.privateKey;
+    publicKey = kp.publicKey;
+  });
+
+  test('CONFIRMED: active key, T within window → verifies', () => {
+    const token = mint(T_IN);
+    const v = verifyPostureReceipt(token, { keyManifest: manifest({ status: 'active' }) });
+    assert.equal(v.valid, true, JSON.stringify(v));
+    assert.equal(v.status, 'POSTURE_PASS');
+  });
+
+  test('retired key, past T within its window → STILL verifies (retirement not retroactive)', () => {
+    const token = mint(T_IN);
+    const v = verifyPostureReceipt(token, { keyManifest: manifest({ status: 'retired' }) });
+    assert.equal(v.valid, true, JSON.stringify(v));
+    assert.equal(v.status, 'POSTURE_PASS');
+  });
+
+  test('retired key, signing a NEW receipt → throws (active-only)', async () => {
+    await assert.rejects(
+      () => issuePostureReceipt({
+        executor: { privateKey, kid: KID },
+        keyManifest: manifest({ status: 'retired' }),
+        client: { query: async () => { throw new Error('must not read catalog'); } },
+      }),
+      /retired key must never sign a new artifact/,
+    );
+  });
+
+  test('T outside the key\'s window → POSTURE_KEY_WINDOW refuse', () => {
+    const after = verifyPostureReceipt(mint(T_AFTER), { keyManifest: manifest() });
+    assert.equal(after.valid, false);
+    assert.equal(after.status, 'POSTURE_KEY_WINDOW');
+    assert.equal(after.reason, 'outside_key_window');
+
+    const before = verifyPostureReceipt(mint(T_BEFORE), { keyManifest: manifest() });
+    assert.equal(before.valid, false);
+    assert.equal(before.status, 'POSTURE_KEY_WINDOW');
+    assert.equal(before.reason, 'outside_key_window');
+  });
+
+  test('NaN/non-finite T or window bound → refuse (no bypass)', () => {
+    const badT = verifyPostureReceipt(mint('not-a-date'), { keyManifest: manifest() });
+    assert.equal(badT.valid, false);
+    assert.equal(badT.status, 'POSTURE_KEY_WINDOW');
+    assert.equal(badT.reason, 'non_finite_key_window');
+
+    const badFrom = verifyPostureReceipt(mint(T_IN), {
+      keyManifest: manifest({ valid_from: 'nope' }),
+    });
+    assert.equal(badFrom.valid, false);
+    assert.equal(badFrom.status, 'POSTURE_KEY_WINDOW');
+    assert.equal(badFrom.reason, 'non_finite_key_window');
+
+    const nanCheck = checkKeyWindow(T_IN, {
+      valid_from: FROM, valid_until: Number.NaN,
+    });
+    assert.equal(nanCheck.ok, false);
+    assert.equal(nanCheck.status, 'POSTURE_KEY_WINDOW');
+
+    assert.equal(Number.isFinite(POSTURE_CLOCK_SKEW_LEEWAY_MS), true);
+    assert.equal(POSTURE_CLOCK_SKEW_LEEWAY_MS, 30_000);
+  });
+
+  test('byte-stability: window is not in the signed body; single-key path is unchanged', () => {
+    const body = frozenBody(T_IN);
+    const pre = postureCanonicalJson(body);
+    const expected = '{"deployment_id":"dep-1","drift":[],"executor_kid":"window-k1",'
+      + '"facts":{"a":1},"measured_at":"2024-06-01T00:00:00.000Z",'
+      + '"v":"cr.posture.receipt.v1","verdict":"PASS"}';
+    assert.equal(pre, expected, 'window fields must not appear in the signed body');
+    assert.deepEqual(Object.keys(JSON.parse(pre)).sort(),
+      ['deployment_id', 'drift', 'executor_kid', 'facts', 'measured_at', 'v', 'verdict']);
+    assert.equal(Object.prototype.hasOwnProperty.call(JSON.parse(pre), 'valid_from'), false);
+    assert.equal(Object.prototype.hasOwnProperty.call(JSON.parse(pre), 'valid_until'), false);
+
+    const tokenNoManifest = mint(T_IN);
+    const tokenWithManifestIgnoredOnSign = mint(T_IN);
+    assert.equal(tokenNoManifest, tokenWithManifestIgnoredOnSign,
+      'signing does not fold the window into the token');
+
+    // Verify without a manifest still works (window not exercised) — today's path.
+    const v = verifyPostureReceipt(tokenNoManifest, { publicKey });
+    assert.equal(v.valid, true);
+    assert.equal(v.status, 'POSTURE_PASS');
+  });
+
+  test('live REGRESSION: active-manifest issuePostureReceipt matches no-manifest bytes', async (t) => {
+    if (guard(t)) return;
+    const now = '2026-08-29T12:00:00.000Z';
+    const client = await bootstrap.connect();
+    try {
+      const without = await issuePostureReceipt({
+        client, executor, deploymentId: DID, now,
+      });
+      const withM = await issuePostureReceipt({
+        client, executor, deploymentId: DID, now,
+        keyManifest: {
+          keys: [{
+            kid: executor.kid,
+            publicKey: loadExecutorPub(),
+            valid_from: '2000-01-01T00:00:00.000Z',
+            valid_until: '2099-01-01T00:00:00.000Z',
+            status: 'active',
+          }],
+        },
+      });
+      assert.equal(withM.preimage, without.preimage, 'manifest must not move a signed byte');
+      assert.equal(withM.token, without.token);
+    } finally {
+      client.release();
+    }
   });
 });

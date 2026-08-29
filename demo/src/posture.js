@@ -9,8 +9,21 @@
  * enforcement claim + a signed drift artifact.
  *
  * Signing reuses STEP 3 signPreimage (local executor key, never KMS, never SQL).
+ *
+ * KEY VALIDITY WINDOW (roadmap 1171 slice 2). The kid is already in every signed
+ * artifact (`executor_kid`). The window is NOT: it lives in a server-configured
+ * key manifest `{ kid → publicKey, valid_from, valid_until, status }`, not in
+ * the receipt body. A rotated key's PAST receipt verifies against THAT key's
+ * window; a retired key NEVER signs a new one. Retirement is not retroactive.
+ *
+ * WHAT THE WINDOW DOES NOT HOLD. After a key COMPROMISE, offline verification
+ * cannot tell an old legitimate artifact from a newly forged one backdated
+ * inside the compromised key's window. That needs an external trusted timestamp
+ * or a transparency log, which is NOT shipped. The window is rotation honesty
+ * (past stays valid, future is refused). It is not retroactive-compromise safety.
  */
 
+const { createPublicKey } = require('node:crypto');
 const { signPreimage, verifyPreimageSignature, sha256hex } = require('./atomic');
 const { configuredDeploymentId, OWNER_ROLE } = require('./db');
 
@@ -418,6 +431,89 @@ function diffFacts(live, baseline = BASELINE) {
   return raw.map((d) => ({ ...d, name: driftName(d) }));
 }
 
+/** ID104 / grant-verifier leeway. `bound + leeway` comparisons; NaN is a refuse. */
+const POSTURE_CLOCK_SKEW_LEEWAY_MS = 30_000;
+
+/**
+ * Key-manifest entry. Server-configured (like today's pinned publicKey), never
+ * from the request. `status: 'retired'` is rotation, not retroactive revocation.
+ *
+ * @typedef {{
+ *   kid: string,
+ *   publicKey?: import('node:crypto').KeyObject,
+ *   public_key_pem?: string,
+ *   valid_from: string,
+ *   valid_until: string,
+ *   status: 'active' | 'retired',
+ * }} KeyManifestEntry
+ */
+
+function resolveKeyManifest(manifest, kid) {
+  if (!manifest || !Array.isArray(manifest.keys) || typeof kid !== 'string' || kid.length === 0) {
+    return null;
+  }
+  const matches = manifest.keys.filter((k) => k && k.kid === kid);
+  return matches.length === 0 ? null : matches[0];
+}
+
+function publicKeyFromEntry(entry) {
+  if (!entry) return null;
+  if (entry.publicKey) return entry.publicKey;
+  if (typeof entry.public_key_pem === 'string' && entry.public_key_pem.trim().length > 0) {
+    return createPublicKey(entry.public_key_pem);
+  }
+  return null;
+}
+
+/**
+ * Signing-side guard. A retired (or unknown) kid must NEVER produce a new
+ * receipt. No-op when no manifest is supplied — today's single-key path.
+ */
+function assertSigningKeyActive(kid, keyManifest) {
+  if (!keyManifest) return;
+  const entry = resolveKeyManifest(keyManifest, kid);
+  if (!entry) {
+    throw new Error(`issuePostureReceipt: kid ${JSON.stringify(kid)} is not in the key manifest`);
+  }
+  if (entry.status !== 'active') {
+    throw new Error(
+      'issuePostureReceipt: kid is retired; a retired key must never sign a new artifact',
+    );
+  }
+}
+
+/**
+ * Verify-side window. T is the signed `measured_at`. Finite, parseable, leeway
+ * (mirrors packages/middleware/src/verify-grant.js:35, :198-209).
+ *
+ * Inclusive: valid_from ≤ T ≤ valid_until, ± POSTURE_CLOCK_SKEW_LEEWAY_MS.
+ * A now-retired key STILL verifies when T is inside its window.
+ */
+function checkKeyWindow(measuredAt, entry, leewayMs = POSTURE_CLOCK_SKEW_LEEWAY_MS) {
+  const leeway = Number.isFinite(leewayMs) ? leewayMs : POSTURE_CLOCK_SKEW_LEEWAY_MS;
+  const tMs = Date.parse(String(measuredAt));
+  const fromMs = Date.parse(String(entry && entry.valid_from));
+  const untilMs = Date.parse(String(entry && entry.valid_until));
+  if (!Number.isFinite(tMs) || !Number.isFinite(fromMs) || !Number.isFinite(untilMs)) {
+    return {
+      ok: false,
+      status: 'POSTURE_KEY_WINDOW',
+      reason: 'non_finite_key_window',
+    };
+  }
+  // T + leeway < from → too early; T - leeway > until → too late. NaN compares
+  // are already excluded above (Number.isFinite), so they cannot no-op into PASS.
+  if (tMs + leeway < fromMs || tMs - leeway > untilMs) {
+    return {
+      ok: false,
+      status: 'POSTURE_KEY_WINDOW',
+      reason: 'outside_key_window',
+      t_ms: tMs,
+    };
+  }
+  return { ok: true };
+}
+
 function encodePostureReceipt({ executor_kid, preimage, signature }) {
   return [
     POSTURE_V,
@@ -427,7 +523,7 @@ function encodePostureReceipt({ executor_kid, preimage, signature }) {
   ].join('|');
 }
 
-function verifyPostureReceipt(token, { publicKey } = {}) {
+function verifyPostureReceipt(token, { publicKey, keyManifest, clockSkewLeewayMs } = {}) {
   if (typeof token !== 'string' || token.length === 0) {
     return { valid: false, status: 'POSTURE_MALFORMED', reason: 'malformed_structure' };
   }
@@ -441,10 +537,22 @@ function verifyPostureReceipt(token, { publicKey } = {}) {
   } catch (_) {
     return { valid: false, status: 'POSTURE_MALFORMED', reason: 'bad_preimage' };
   }
-  if (!publicKey) return { valid: false, status: 'POSTURE_UNKNOWN_KEY', reason: 'unknown_kid' };
+
+  const envelopeKid = seg[1];
+  let verifyKey = publicKey;
+  let windowEntry = null;
+  if (keyManifest) {
+    windowEntry = resolveKeyManifest(keyManifest, envelopeKid);
+    if (!windowEntry) {
+      return { valid: false, status: 'POSTURE_UNKNOWN_KEY', reason: 'unknown_kid' };
+    }
+    verifyKey = publicKeyFromEntry(windowEntry);
+  }
+  if (!verifyKey) return { valid: false, status: 'POSTURE_UNKNOWN_KEY', reason: 'unknown_kid' };
+
   let ok = false;
   try {
-    ok = verifyPreimageSignature(preimage, seg[3], publicKey);
+    ok = verifyPreimageSignature(preimage, seg[3], verifyKey);
   } catch (_) {
     return { valid: false, status: 'POSTURE_INVALID_SIGNATURE', reason: 'signature_error' };
   }
@@ -455,6 +563,16 @@ function verifyPostureReceipt(token, { publicKey } = {}) {
   } catch (_) {
     return { valid: false, status: 'POSTURE_MALFORMED', reason: 'bad_json' };
   }
+
+  // Window is verify-side only and runs AFTER the signature holds, so T is the
+  // signed measured_at, not an attacker-supplied clock. No-op when no manifest.
+  if (windowEntry) {
+    const win = checkKeyWindow(payload && payload.measured_at, windowEntry, clockSkewLeewayMs);
+    if (!win.ok) {
+      return { valid: false, status: win.status, reason: win.reason, payload };
+    }
+  }
+
   return {
     valid: true,
     status: payload && payload.verdict === 'PASS' ? 'POSTURE_PASS' : 'POSTURE_FAIL',
@@ -467,11 +585,13 @@ function verifyPostureReceipt(token, { publicKey } = {}) {
  * Read catalog, diff against baseline, sign a posture_receipt with the local
  * executor key. FAIL is a signed drift artifact, not an unsigned complaint.
  */
-async function issuePostureReceipt({ client, executor, deploymentId, now, reserved } = {}) {
-  if (!client) throw new Error('issuePostureReceipt: client is required');
+async function issuePostureReceipt({ client, executor, deploymentId, now, reserved, keyManifest } = {}) {
   if (!executor || !executor.privateKey || !executor.kid) {
     throw new Error('issuePostureReceipt: executor { privateKey, kid } is required');
   }
+  // Active-only BEFORE any catalog read: a retired kid must never sign.
+  assertSigningKeyActive(executor.kid, keyManifest);
+  if (!client) throw new Error('issuePostureReceipt: client is required');
   const facts = await readCatalogFacts(client);
   const drift = diffFacts(facts);
   const verdict = drift.length === 0 ? 'PASS' : 'FAIL';
@@ -520,6 +640,10 @@ module.exports = {
   RESERVED_BODY_FIELDS,
   presentReservedFields,
   POSTURE_V,
+  POSTURE_CLOCK_SKEW_LEEWAY_MS,
+  resolveKeyManifest,
+  checkKeyWindow,
+  assertSigningKeyActive,
   BASELINE,
   SQL,
   TABLES,
