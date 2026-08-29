@@ -40,6 +40,7 @@ function startResourceServer({
   redirectOnStaleGet = false,
   staleGetStatus = null,
   getStatus = null,
+  exists = true,
 } = {}) {
   const honorGet = honorIfMatchGet == null ? honorIfMatch : honorIfMatchGet;
   const honorPut = honorIfMatchPut == null ? honorIfMatch : honorIfMatchPut;
@@ -49,13 +50,20 @@ function startResourceServer({
     writes: 0,
     requests: 0,
     lastIfMatch: null,
+    lastIfNoneMatch: null,
     methods: [],
+    exists,
   };
   const server = http.createServer((req, res) => {
     state.requests += 1;
     state.methods.push(req.method);
     const inm = req.headers['if-match'] == null ? null : String(req.headers['if-match']);
     if (req.method === 'GET' || req.method === 'HEAD') {
+      if (!state.exists) {
+        res.statusCode = 404;
+        res.end();
+        return;
+      }
       // Safe methods: If-Match is evaluated without mutating. The canary
       // probe is GET + stale If-Match; 412 here is how an honoring origin
       // proves it without a write.
@@ -89,10 +97,19 @@ function startResourceServer({
     }
     if (req.method === 'PUT' || req.method === 'PATCH') {
       state.lastIfMatch = inm;
+      const innm = req.headers['if-none-match'] == null ? null : String(req.headers['if-none-match']);
+      state.lastIfNoneMatch = innm;
       const chunks = [];
       req.on('data', (c) => chunks.push(c));
       req.on('end', () => {
-        if (honorPut && inm && inm !== state.etag) {
+        if (innm === '*') {
+          if (honorPut && state.exists) {
+            res.statusCode = 412;
+            if (sendEtag && state.etag) res.setHeader('ETag', state.etag);
+            res.end();
+            return;
+          }
+        } else if (honorPut && inm && inm !== state.etag) {
           res.statusCode = 412;
           if (sendEtag) res.setHeader('ETag', state.etag);
           res.end();
@@ -101,6 +118,7 @@ function startResourceServer({
         let parsed = {};
         try { parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { parsed = {}; }
         state.body = parsed;
+        state.exists = true;
         state.writes += 1;
         const next = `"v${state.writes + 1}"`;
         state.etag = next;
@@ -243,6 +261,88 @@ describe('http.exclusive — If-Match CAS', () => {
     );
     assert.equal(s.state.writes, 1,
       'HTTP has no deferred constraint: the 2xx already landed');
+  });
+
+  test('UPDATE-intent + no ETag on pre-mutation GET → fail-closed BEFORE PUT (HIBA-3)', async () => {
+    const s = await startResourceServer({ honorIfMatch: true, sendEtag: false, initialEtag: '"v1"' });
+    live.push(s);
+    const r = await httpAtomicExecute({
+      baseUrl: s.baseUrl, resourcePath: PATH, payload: grant(),
+      ifMatchEtag: '"v1"', method: 'PUT', body: { n: 99 },
+      executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.ok, false, 'auditor reproduction: missing ETag must not attest');
+    assert.equal(r.status, 'ETAG_UNVERIFIABLE');
+    assert.equal(r.reason, 'missing_strong_etag');
+    assert.equal(r.mutation_applied, false);
+    assert.equal(r.attestation, undefined);
+    assert.equal(s.state.writes, 0, 'no PUT — fail-closed before the mutation');
+    assert.ok(!s.state.methods.includes('PUT'), `methods: ${s.state.methods}`);
+    assert.ok(!s.state.methods.includes('PATCH'));
+    assert.match(r.detail.note, /UNKNOWN current state/i);
+  });
+
+  test('UPDATE-intent + weak ETag → fail-closed (weak is not a strong CAS pin)', async () => {
+    const s = await startResourceServer({ honorIfMatch: true, initialEtag: 'W/"v1"' });
+    live.push(s);
+    const weakPin = await httpAtomicExecute({
+      baseUrl: s.baseUrl, resourcePath: PATH, payload: grant(),
+      ifMatchEtag: 'W/"v1"', method: 'PUT', body: { n: 99 },
+      executor, deploymentId: DEPLOY,
+    });
+    assert.equal(weakPin.status, 'ETAG_UNVERIFIABLE');
+    assert.equal(weakPin.reason, 'missing_strong_etag');
+    assert.equal(s.state.requests, 0, 'weak caller pin is refused before any HTTP');
+    assert.equal(s.state.writes, 0);
+
+    const strongPinWeakObserve = await httpAtomicExecute({
+      baseUrl: s.baseUrl, resourcePath: PATH, payload: grant(),
+      ifMatchEtag: '"v1"', method: 'PUT', body: { n: 99 },
+      executor, deploymentId: DEPLOY,
+    });
+    assert.equal(strongPinWeakObserve.status, 'ETAG_UNVERIFIABLE');
+    assert.equal(strongPinWeakObserve.reason, 'missing_strong_etag');
+    assert.equal(s.state.writes, 0);
+    assert.ok(!s.state.methods.includes('PUT'), `methods: ${s.state.methods}`);
+  });
+
+  test('explicit create-only (absent:<path>) still works — must-not-exist is authorize-time intent', async () => {
+    const s = await startResourceServer({ honorIfMatch: true, exists: false });
+    live.push(s);
+    const r = await httpAtomicExecute({
+      baseUrl: s.baseUrl, resourcePath: PATH, payload: grant(),
+      ifMatchEtag: `absent:${PATH}`, method: 'PUT', body: { n: 1 },
+      executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(s.state.writes, 1);
+    assert.equal(s.state.lastIfNoneMatch, '*', 'create-only is If-None-Match: * on the wire');
+    assert.equal(s.state.lastIfMatch, null, 'the absent: sentinel is never sent as If-Match');
+    assert.equal(r.attestation != null, true);
+    const v = verifyAtomicExecutionAttestation(r.attestation, { publicKey });
+    assert.equal(v.valid, true, JSON.stringify(v));
+
+    const again = await httpAtomicExecute({
+      baseUrl: s.baseUrl, resourcePath: PATH, payload: grant(),
+      ifMatchEtag: `absent:${PATH}`, method: 'PUT', body: { n: 2 },
+      executor, deploymentId: DEPLOY,
+    });
+    assert.equal(again.status, 'STATE_DRIFT', 'it exists now; create-only must refuse');
+    assert.equal(again.mutation_applied, false);
+  });
+
+  test('UPDATE-intent with a strong ETag still CASes as before', async () => {
+    const s = await startResourceServer({ honorIfMatch: true, initialEtag: '"v1"' });
+    live.push(s);
+    const r = await httpAtomicExecute({
+      baseUrl: s.baseUrl, resourcePath: PATH, payload: grant(),
+      ifMatchEtag: '"v1"', method: 'PUT', body: { n: 2 },
+      executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(s.state.writes, 1);
+    assert.equal(s.state.lastIfMatch, '"v1"');
+    assert.equal(r.row.if_match, '"v1"');
   });
 });
 

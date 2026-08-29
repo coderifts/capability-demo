@@ -30,6 +30,23 @@
  *   (observed current ETag ≠ If-Match) is IF_MATCH_NOT_HONORED, never a
  *   success. Do not treat "we sent If-Match" as "the server honored it."
  *
+ * MISSING / WEAK ETAG IS FAIL-CLOSED (AUDIT P0, HIBA-3)
+ *   A missing ETag is UNKNOWN current state, not "safe to create." The
+ *   auditor reproduced: pre-mutation GET with no ETag → PUT 2xx → ok:true
+ *   + attestation — a CONFIRMED CAS with no precondition proof. That
+ *   fallback (treat null as absent:<path>) is closed on the MAIN path,
+ *   not only when the opt-in canary runs.
+ *
+ *   UPDATE-intent (caller passed a strong If-Match pin): the observe GET
+ *   MUST return a strong ETag (RFC 9110 opaque-tag, not W/"…") BEFORE
+ *   any PUT. Missing, weak, or 404 → ETAG_UNVERIFIABLE / missing_strong_etag,
+ *   mutation_applied: false. No PUT, no attestation.
+ *
+ *   CREATE-intent is explicit, same sentinel as git: ifMatchEtag
+ *   `absent:<path>`. That is authorize-time "must not exist", sent on the
+ *   wire as If-None-Match: *. A missing ETag on an UPDATE is not this.
+ *   A 2xx after a PUT with no precondition proof is not a verified CAS.
+ *
  * PROVIDER CANARY (roadmap 1189)
  *   The 412/IF_MATCH_NOT_HONORED paths above are PASSIVE: they fire during
  *   the real CAS. A matching 2xx still records if_match_honored:
@@ -105,6 +122,26 @@ function fieldHasDelimiter(...values) {
 }
 
 /**
+ * RFC 9110 strong validator: opaque-tag = DQUOTE *etagc DQUOTE, no W/ prefix.
+ * Weak tags (W/"…") never match for If-Match strong comparison — they are
+ * not a CAS pin. Unquoted / empty / "*" are not strong either.
+ */
+function isStrongEtag(etag) {
+  if (typeof etag !== 'string' || etag.length === 0) return false;
+  if (/^W\//i.test(etag)) return false;
+  return /^"[^"]+"$/.test(etag);
+}
+
+/**
+ * Explicit create-only pin, same sentinel as git-atomic's `absent:<ref>`.
+ * Authorize-time intent that the resource MUST NOT exist — not a runtime
+ * inference from a missing ETag.
+ */
+function isCreateIntentPin(ifMatchEtag) {
+  return typeof ifMatchEtag === 'string' && ifMatchEtag.startsWith('absent:');
+}
+
+/**
  * Join the server-configured origin with a path. resourcePath must be a path
  * beginning with `/`, never an absolute URL (that would pick the origin).
  */
@@ -137,7 +174,9 @@ async function httpRequest({ url, method, headers, body }) {
 
 /**
  * Observe current ETag (GET). Failure to observe is not a CAS pin — it is
- * unknown current state. Callers treat a missing ETag as `absent:<path>`.
+ * UNKNOWN current state. A missing ETag is NOT `absent:<path>` and MUST
+ * NOT fall through to a create-only PUT (AUDIT P0, HIBA-3). Create-only
+ * is an explicit caller pin (`absent:<path>`), never an inferred null.
  */
 async function observeEtag({ url }) {
   const r = await httpRequest({ url, method: 'GET' });
@@ -313,7 +352,9 @@ function canaryGateRefusal(canaryResult) {
  * @param {string} o.baseUrl            SERVER-configured origin (never from the request)
  * @param {string} o.resourcePath       e.g. '/articles/1' — becomes preimage target_id
  * @param {object} o.payload            verified grant payload (must carry deployment_id, jti)
- * @param {string} o.ifMatchEtag        the CAS pin sent as If-Match
+ * @param {string} o.ifMatchEtag        UPDATE: a strong ETag (If-Match).
+ *                                      CREATE: `absent:<path>` (If-None-Match: *).
+ *                                      Missing/weak on UPDATE is refused before PUT.
  * @param {string} [o.method]           PUT (default) or PATCH
  * @param {unknown} [o.body]            representation to write (JSON-encoded)
  * @param {object} o.executor           { privateKey, kid } — used AFTER the CAS, never before
@@ -343,6 +384,16 @@ async function httpAtomicExecute({
   }
   if (typeof ifMatchEtag !== 'string' || ifMatchEtag.length === 0) {
     return { ok: false, status: 'STATE_CHALLENGE_UNKNOWN', reason: 'missing_if_match', http: 403 };
+  }
+  const createIntent = isCreateIntentPin(ifMatchEtag);
+  // UPDATE-intent requires a strong ETag pin from the caller. A weak tag is
+  // not a CAS token (RFC 9110 If-Match uses strong comparison). Create-intent
+  // uses the absent: sentinel, not an ETag.
+  if (!createIntent && !isStrongEtag(ifMatchEtag)) {
+    return {
+      ok: false, status: 'ETAG_UNVERIFIABLE', reason: 'missing_strong_etag', http: 409,
+      mutation_applied: false,
+    };
   }
   if (verb !== 'PUT' && verb !== 'PATCH') {
     return { ok: false, status: 'STATE_CHALLENGE_UNKNOWN', reason: 'method_not_cas', http: 403 };
@@ -398,16 +449,56 @@ async function httpAtomicExecute({
     };
   }
 
+  // MAIN-PATH FAIL-CLOSED (HIBA-3). A missing/weak observed ETag is UNKNOWN,
+  // not create-only. Only an explicit absent:<path> pin is create-intent.
+  if (!createIntent) {
+    if (observed.status === 404 || !isStrongEtag(observed.etag)) {
+      return {
+        ok: false,
+        status: 'ETAG_UNVERIFIABLE',
+        reason: 'missing_strong_etag',
+        http: 409,
+        mutation_applied: false,
+        cas_proven: false,
+        ...honesty,
+        detail: {
+          observed_etag: observed.etag,
+          observed_status: observed.status,
+          note: 'a missing or weak ETag is UNKNOWN current state, not safe to create. '
+            + 'UPDATE-intent requires a strong ETag before the mutation. A 2xx after a '
+            + 'PUT with no precondition proof is not a verified CAS.',
+        },
+      };
+    }
+  } else if (observed.status !== 404) {
+    // Create-only: the resource MUST NOT exist. A 2xx observe means it does.
+    return {
+      ok: false,
+      status: 'STATE_DRIFT',
+      reason: 'state_changed_since_challenge',
+      http: 409,
+      mutation_applied: false,
+      ...honesty,
+      detail: {
+        challenged: ifMatchEtag,
+        current: observed.etag || `present:${resourcePath}`,
+      },
+    };
+  }
+
   const wireBody = JSON.stringify(body === undefined ? {} : body);
   let cas;
   try {
+    // UPDATE: If-Match with the caller's strong pin.
+    // CREATE (absent:<path>): If-None-Match: * — must not exist. Never send
+    // the sentinel on the wire; it is not an HTTP entity-tag.
+    const headers = { 'content-type': 'application/json' };
+    if (createIntent) headers['if-none-match'] = '*';
+    else headers['if-match'] = ifMatchEtag;
     cas = await httpRequest({
       url: dest.url,
       method: verb,
-      headers: {
-        'content-type': 'application/json',
-        'if-match': ifMatchEtag,
-      },
+      headers,
       body: wireBody,
     });
   } catch (err) {
