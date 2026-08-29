@@ -23,6 +23,13 @@
  *
  *   There is no cross-resource single-use ledger. A jti spent on /a can still
  *   be presented for /b; that is a Postgres/git-ledger property, not HTTP's.
+ *   That limit is MACHINE-READABLE on every execute result:
+ *     same_resource_cas          = ENFORCING_EXCLUSIVE_HTTP_CAS  (If-Match on ONE path)
+ *     cross_resource_single_use  = INDETERMINATE_HTTP_CAS        (NOT ENFORCING_ATOMIC)
+ *   A consumer must not have to read this comment. Git/pg declare their
+ *   level on `row.profile` (ENFORCING_EXCLUSIVE_REF_CAS / ENFORCING_ATOMIC);
+ *   HTTP keeps that field as the same-resource CAS it can actually do, and
+ *   names the missing property beside it. Downgrade, not a new ledger.
  *
  *   A server that IGNORES If-Match gives no single-writer guarantee. A 2xx
  *   after a matching If-Match does not prove the origin checked the
@@ -101,6 +108,17 @@ const {
 } = require('./atomic');
 
 const HTTP_PROFILE = 'ENFORCING_EXCLUSIVE_HTTP_CAS';
+/** Cross-resource single-use is a Postgres/git-ledger property, not HTTP's.
+ *  Named on the result so a consumer does not have to read the comment.
+ *  NOT ENFORCING_ATOMIC — that is the pg one-transaction profile. */
+const HTTP_CROSS_RESOURCE = 'INDETERMINATE_HTTP_CAS';
+
+function httpAssurance() {
+  return {
+    same_resource_cas: HTTP_PROFILE,
+    cross_resource_single_use: HTTP_CROSS_RESOURCE,
+  };
+}
 /** Same versioned grammar the Postgres gate builds (demo/sql/gate.sql:146-148). */
 const GATE_PREIMAGE_V = 'cr.gate.preimage.v1';
 /** Canary classifications. UNKNOWN is never HONORS — do not green-light it. */
@@ -393,6 +411,7 @@ async function httpAtomicExecute({
     return {
       ok: false, status: 'ETAG_UNVERIFIABLE', reason: 'missing_strong_etag', http: 409,
       mutation_applied: false,
+      ...httpAssurance(),
     };
   }
   if (verb !== 'PUT' && verb !== 'PATCH') {
@@ -413,6 +432,7 @@ async function httpAtomicExecute({
       + 'the ETag CAS and the attestation are SEPARATE round-trips; a crash between them is '
       + 'INDETERMINATE. Single-writer holds only if the origin honors If-Match; a server that '
       + 'ignores If-Match gives no guarantee. No cross-resource single-use.',
+    ...httpAssurance(),
   };
 
   // Upfront canary gate — BEFORE the mutating request. A DOES_NOT_HONOR or
@@ -609,6 +629,7 @@ module.exports = {
   resourceUrl,
   observeEtag,
   HTTP_PROFILE,
+  HTTP_CROSS_RESOURCE,
   GATE_PREIMAGE_V,
   CANARY_HONORS,
   CANARY_DOES_NOT_HONOR,

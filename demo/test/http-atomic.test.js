@@ -14,7 +14,7 @@ const crypto = require('node:crypto');
 const http = require('node:http');
 
 const {
-  httpAtomicExecute, providerCanary, HTTP_PROFILE,
+  httpAtomicExecute, providerCanary, HTTP_PROFILE, HTTP_CROSS_RESOURCE,
   CANARY_HONORS, CANARY_DOES_NOT_HONOR, CANARY_UNKNOWN, CANARY_STALE_IF_MATCH,
 } = require('../src/http-atomic');
 const { verifyAtomicExecutionAttestation } = require('../src/atomic');
@@ -169,6 +169,12 @@ describe('http.exclusive — If-Match CAS', () => {
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.equal(s.state.writes, 1, 'the write must actually have landed');
     assert.equal(r.row.profile, HTTP_PROFILE);
+    assert.equal(r.same_resource_cas, HTTP_PROFILE,
+      'same-resource ETag CAS keeps its real level');
+    assert.equal(r.cross_resource_single_use, HTTP_CROSS_RESOURCE);
+    assert.equal(r.cross_resource_single_use, 'INDETERMINATE_HTTP_CAS');
+    assert.notEqual(r.row.profile, 'ENFORCING_ATOMIC');
+    assert.notEqual(r.cross_resource_single_use, 'ENFORCING_ATOMIC');
     assert.equal(r.row.if_match, '"v1"');
     assert.equal(r.mutation_attestation_binding, 'SEPARATE_ROUND_TRIPS');
     assert.match(r.does_not_hold, /INDETERMINATE/);
@@ -263,6 +269,24 @@ describe('http.exclusive — If-Match CAS', () => {
       'HTTP has no deferred constraint: the 2xx already landed');
   });
 
+  test('cross-resource single-use is INDETERMINATE_HTTP_CAS, machine-readable, not ENFORCING_ATOMIC', async () => {
+    const s = await startResourceServer({ honorIfMatch: true });
+    live.push(s);
+    const r = await httpAtomicExecute({
+      baseUrl: s.baseUrl, resourcePath: PATH, payload: grant(),
+      ifMatchEtag: '"v1"', method: 'PUT', body: { n: 2 },
+      executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.ok, true);
+    // A consumer reads this field. They must not have to open the source comment.
+    assert.equal(r.cross_resource_single_use, 'INDETERMINATE_HTTP_CAS');
+    assert.equal(typeof r.cross_resource_single_use, 'string');
+    assert.notEqual(r.cross_resource_single_use, HTTP_PROFILE);
+    assert.notEqual(r.cross_resource_single_use, 'ENFORCING_ATOMIC');
+    assert.equal(r.same_resource_cas, 'ENFORCING_EXCLUSIVE_HTTP_CAS');
+    assert.equal(r.row.profile, HTTP_PROFILE, 'the downgrade is scoped; same-resource CAS is unchanged');
+  });
+
   test('UPDATE-intent + no ETag on pre-mutation GET → fail-closed BEFORE PUT (HIBA-3)', async () => {
     const s = await startResourceServer({ honorIfMatch: true, sendEtag: false, initialEtag: '"v1"' });
     live.push(s);
@@ -275,6 +299,8 @@ describe('http.exclusive — If-Match CAS', () => {
     assert.equal(r.status, 'ETAG_UNVERIFIABLE');
     assert.equal(r.reason, 'missing_strong_etag');
     assert.equal(r.mutation_applied, false);
+    assert.equal(r.cross_resource_single_use, 'INDETERMINATE_HTTP_CAS');
+    assert.notEqual(r.same_resource_cas, 'ENFORCING_ATOMIC');
     assert.equal(r.attestation, undefined);
     assert.equal(s.state.writes, 0, 'no PUT — fail-closed before the mutation');
     assert.ok(!s.state.methods.includes('PUT'), `methods: ${s.state.methods}`);
