@@ -13,13 +13,25 @@
  *      avoids.
  *   3. A metric is NOT proof. A dropped or missing metric never changes a
  *      signed fact. Missing telemetry is UNKNOWN, not "it didn't happen."
+ *   4. canary_refused_* count writes REFUSED UPFRONT (no mutation issued).
+ *      if_match_not_honored counts a write that already LANDED on an origin
+ *      that ignored If-Match. They are NEVER merged — same discipline as
+ *      INDETERMINATE. The canary counters are point-in-time observability,
+ *      not proof the origin is bad forever (http-atomic.js canary ceiling).
  *
  *   GET /metrics is NOT authenticated in this demo. That is an operator
  *   concern for production; this module does not pretend it is access-controlled.
  *
  * Labels reuse the adapters' EXISTING status strings (DEPLOYMENT_MISMATCH,
- * STATE_DRIFT, IF_MATCH_NOT_HONORED, GRANT_CONSUMED, BEARER_NOT_PERMITTED, …).
- * No parallel taxonomy.
+ * STATE_DRIFT, IF_MATCH_NOT_HONORED, IF_MATCH_CANARY_REFUSED, GRANT_CONSUMED,
+ * BEARER_NOT_PERMITTED, …). No parallel taxonomy.
+ *
+ * RECONCILE does not flow through handle() / observeHandle. git/http/pg
+ * reconcile outcomes (INDETERMINATE, CONFIRMED) are the reconcile-cli's
+ * surface (non-zero exit on INDETERMINATE). This module does not synthesize
+ * a handle path for them. If an adapter ever returns status INDETERMINATE
+ * on the handle path, the existing `indeterminate` counter records it —
+ * still never folded into authorized or refused.
  */
 
 const COUNTERS = Object.freeze([
@@ -29,26 +41,43 @@ const COUNTERS = Object.freeze([
   'refused_deployment_mismatch',
   'state_drift',
   'if_match_not_honored',
+  'canary_refused_does_not_honor',
+  'canary_refused_unknown',
   'grant_consumed',
   'state_challenge_unknown',
   'indeterminate',
   'internal_error',
 ]);
 
-/** Adapter / handle status → named counter. Unmapped statuses are recorded under their exact string. */
+/**
+ * Adapter / handle status → named counter. Unmapped statuses are recorded
+ * under their exact string.
+ *
+ * Measured (http-atomic.js:277-296):
+ *   IF_MATCH_CANARY_REFUSED + reason canary_does_not_honor  → canary_refused_does_not_honor
+ *   STATE_CHALLENGE_UNKNOWN + reason canary_unknown         → canary_refused_unknown
+ *     (reason is the discriminator: STATE_CHALLENGE_UNKNOWN is also missing_jti,
+ *      observe_failed, … — those stay on state_challenge_unknown)
+ *   IF_MATCH_NOT_HONORED                                    → if_match_not_honored
+ * The two canary counters MUST NOT share if_match_not_honored.
+ */
 const STATUS_TO_COUNTER = Object.freeze({
   BEARER_NOT_PERMITTED: 'refused_bearer',
   PROFILE_NOT_PERMITTED: 'refused_profile',
   DEPLOYMENT_MISMATCH: 'refused_deployment_mismatch',
   STATE_DRIFT: 'state_drift',
   IF_MATCH_NOT_HONORED: 'if_match_not_honored',
+  IF_MATCH_CANARY_REFUSED: 'canary_refused_does_not_honor',
   GRANT_CONSUMED: 'grant_consumed',
   STATE_CHALLENGE_UNKNOWN: 'state_challenge_unknown',
   INDETERMINATE: 'indeterminate',
   SEAL_FAILED: 'internal_error',
 });
 
-const METRICS_HONESTY = 'operational counters, NOT cryptographic evidence; a metric is not a proof; missing telemetry is UNKNOWN';
+/** Measured reason that splits canary-UNKNOWN off STATE_CHALLENGE_UNKNOWN (http-atomic.js:296). */
+const CANARY_UNKNOWN_REASON = 'canary_unknown';
+
+const METRICS_HONESTY = 'operational counters, NOT cryptographic evidence; a metric is not a proof; missing telemetry is UNKNOWN; canary_refused_* are point-in-time, not a lasting verdict on the origin';
 
 function emptyCounts() {
   const c = Object.create(null);
@@ -113,7 +142,14 @@ function createMetrics({ sink } = {}) {
         outcome = 'consume_authorized';
       } else {
         outcome = out && out.status ? String(out.status) : 'STATE_CHALLENGE_UNKNOWN';
-        event = STATUS_TO_COUNTER[outcome] || outcome;
+        const reason = out && out.reason != null ? String(out.reason) : '';
+        // Canary UNKNOWN reuses status STATE_CHALLENGE_UNKNOWN (measured). The
+        // reason is the split — not a new status, not a fold into if_match_not_honored.
+        if (outcome === 'STATE_CHALLENGE_UNKNOWN' && reason === CANARY_UNKNOWN_REASON) {
+          event = 'canary_refused_unknown';
+        } else {
+          event = STATUS_TO_COUNTER[outcome] || outcome;
+        }
       }
       const labels = { outcome };
       const target = enforcementProfile || profile;
@@ -133,6 +169,7 @@ const defaultMetrics = createMetrics();
 module.exports = {
   COUNTERS,
   STATUS_TO_COUNTER,
+  CANARY_UNKNOWN_REASON,
   METRICS_HONESTY,
   createMetrics,
   recordEvent: (...a) => defaultMetrics.recordEvent(...a),

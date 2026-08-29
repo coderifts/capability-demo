@@ -12,7 +12,7 @@ const http = require('node:http');
 const path = require('node:path');
 
 const {
-  createMetrics, COUNTERS, METRICS_HONESTY, STATUS_TO_COUNTER,
+  createMetrics, COUNTERS, METRICS_HONESTY, STATUS_TO_COUNTER, CANARY_UNKNOWN_REASON,
 } = require('../src/metrics');
 const { buildApp } = require('../src/server');
 const { issue } = require('../issue-grant');
@@ -69,6 +69,83 @@ describe('metrics.js — counters, snapshot, INDETERMINATE is first-class', () =
     assert.equal(snap.refused_bearer, 1);
     assert.equal(STATUS_TO_COUNTER.STATE_DRIFT, 'state_drift');
     assert.equal(STATUS_TO_COUNTER.IF_MATCH_NOT_HONORED, 'if_match_not_honored');
+  });
+
+  test('canary DOES_NOT_HONOR increments canary_refused_does_not_honor, NOT if_match_not_honored', () => {
+    const m = createMetrics({ sink: () => {} });
+    // Measured http-atomic.js:277-278 — write refused BEFORE it happened.
+    m.observeHandle({
+      profile: 'ATOMIC',
+      out: { ok: false, status: 'IF_MATCH_CANARY_REFUSED', reason: 'canary_does_not_honor' },
+    });
+    const snap = m.snapshot();
+    assert.equal(snap.canary_refused_does_not_honor, 1);
+    assert.equal(snap.if_match_not_honored, 0, 'a write that never landed must not share the landed-write counter');
+    assert.equal(snap.canary_refused_unknown, 0);
+    assert.equal(STATUS_TO_COUNTER.IF_MATCH_CANARY_REFUSED, 'canary_refused_does_not_honor');
+    assert.notEqual(STATUS_TO_COUNTER.IF_MATCH_CANARY_REFUSED, STATUS_TO_COUNTER.IF_MATCH_NOT_HONORED);
+  });
+
+  test('canary UNKNOWN increments canary_refused_unknown, not state_challenge_unknown', () => {
+    const m = createMetrics({ sink: () => {} });
+    // Measured http-atomic.js:295-296 — same STATUS as missing_jti, distinct reason.
+    m.observeHandle({
+      profile: 'ATOMIC',
+      out: { ok: false, status: 'STATE_CHALLENGE_UNKNOWN', reason: CANARY_UNKNOWN_REASON },
+    });
+    const snap = m.snapshot();
+    assert.equal(CANARY_UNKNOWN_REASON, 'canary_unknown');
+    assert.equal(snap.canary_refused_unknown, 1);
+    assert.equal(snap.state_challenge_unknown, 0, 'canary UNKNOWN must not fold into the generic unknown bucket');
+    assert.equal(snap.canary_refused_does_not_honor, 0);
+    assert.equal(snap.if_match_not_honored, 0);
+  });
+
+  test('canary_refused_* stay separate from each other and from if_match_not_honored', () => {
+    const m = createMetrics({ sink: () => {} });
+    m.observeHandle({
+      profile: 'ATOMIC',
+      out: { ok: false, status: 'IF_MATCH_CANARY_REFUSED', reason: 'canary_does_not_honor' },
+    });
+    m.observeHandle({
+      profile: 'ATOMIC',
+      out: { ok: false, status: 'STATE_CHALLENGE_UNKNOWN', reason: 'canary_unknown' },
+    });
+    m.observeHandle({
+      profile: 'ATOMIC',
+      out: { ok: false, status: 'IF_MATCH_NOT_HONORED', reason: 'origin_ignored_if_match' },
+    });
+    m.observeHandle({
+      profile: 'ATOMIC',
+      out: { ok: false, status: 'STATE_CHALLENGE_UNKNOWN', reason: 'missing_jti' },
+    });
+    const snap = m.snapshot();
+    assert.equal(snap.canary_refused_does_not_honor, 1);
+    assert.equal(snap.canary_refused_unknown, 1);
+    assert.equal(snap.if_match_not_honored, 1);
+    assert.equal(snap.state_challenge_unknown, 1, 'non-canary STATE_CHALLENGE_UNKNOWN stays on its own counter');
+    assert.equal(snap.indeterminate, 0);
+    assert.ok(COUNTERS.includes('canary_refused_does_not_honor'));
+    assert.ok(COUNTERS.includes('canary_refused_unknown'));
+  });
+
+  test('INDETERMINATE stays first-class and is never a canary or if_match counter', () => {
+    const m = createMetrics({ sink: () => {} });
+    m.observeHandle({ profile: 'ATOMIC', out: { ok: false, status: 'INDETERMINATE' } });
+    const snap = m.snapshot();
+    assert.equal(snap.indeterminate, 1);
+    assert.equal(snap.canary_refused_does_not_honor, 0);
+    assert.equal(snap.canary_refused_unknown, 0);
+    assert.equal(snap.if_match_not_honored, 0);
+    assert.equal(snap.consume_authorized, 0);
+  });
+
+  test('reconcile does not flow through handle — no synthesized reconcile_* counters', () => {
+    assert.equal(COUNTERS.includes('reconcile_indeterminate'), false);
+    assert.equal(COUNTERS.includes('reconcile_confirmed'), false);
+    assert.equal(STATUS_TO_COUNTER.CONFIRMED, undefined);
+    // If an adapter ever returned INDETERMINATE on this path, it uses the existing counter.
+    assert.equal(STATUS_TO_COUNTER.INDETERMINATE, 'indeterminate');
   });
 
   test('recordEvent swallows sink errors', () => {
@@ -176,6 +253,8 @@ describe('metrics through handle() + GET /metrics', () => {
     assert.equal(typeof j.counters, 'object');
     assert.equal(typeof j.counters.consume_authorized, 'number');
     assert.equal(typeof j.counters.indeterminate, 'number');
+    assert.equal(typeof j.counters.canary_refused_does_not_honor, 'number');
+    assert.equal(typeof j.counters.canary_refused_unknown, 'number');
     assert.equal(j.counters.indeterminate, 0);
     assert.match(j.honesty, /not cryptographic evidence/i);
     assert.match(j.note, /UNKNOWN/);
