@@ -24,7 +24,12 @@ const {
 
 const KEYS = path.join(__dirname, '..', 'keys');
 let bootstrap, hostPool, executorPool, reachable = false;
-let executor, pub, DID;
+let executor, DID;
+
+function loadExecutorPub() {
+  const registry = JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
+  return crypto.createPublicKey(registry.keys[0].public_key_pem);
+}
 
 before(async () => {
   bootstrap = makePool(bootstrapUrl());
@@ -34,8 +39,6 @@ before(async () => {
   executorPool = makePool(executorUrl());
   executor = loadExecutor();
   DID = configuredDeploymentId();
-  const registry = JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
-  pub = crypto.createPublicKey(registry.keys[0].public_key_pem);
 });
 after(async () => {
   if (hostPool) await hostPool.end();
@@ -61,6 +64,7 @@ async function posture() {
 describe('STEP 5 — clean catalog matches baseline; receipt verifies offline', () => {
   test('wired state: posture PASS, token verifies against the published executor key', async (t) => {
     if (guard(t)) return;
+    const pub = loadExecutorPub();
     const out = await posture();
     assert.equal(out.ok, true, JSON.stringify(out.drift));
     assert.equal(out.verdict, 'PASS');
@@ -93,6 +97,7 @@ describe('STEP 5 — clean catalog matches baseline; receipt verifies offline', 
 describe('STEP 5 — host GRANT INSERT is drift, then REVOKE restores PASS', () => {
   test('GRANT INSERT ON articles TO cr_host → FAIL naming host_role gained INSERT; REVOKE → PASS', async (t) => {
     if (guard(t)) return;
+    const pub = loadExecutorPub();
     try {
       await bootstrap.query('GRANT INSERT ON articles TO cr_host');
       const failed = await posture();

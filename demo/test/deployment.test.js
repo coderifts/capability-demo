@@ -22,7 +22,12 @@ const { atomicExecute, signPreimage, preimageHashOf, verifyPreimageSignature } =
 const KEYS = path.join(__dirname, '..', 'keys');
 const KEYOPTS = { key: path.join(KEYS, 'demo-private.pem'), keys: path.join(KEYS, 'coderifts-keys.json') };
 let bootstrap, hostPool, executorPool, server, base, reachable = false;
-let executor, pub, DID;
+let executor, DID;
+
+function loadExecutorPub() {
+  const registry = JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
+  return crypto.createPublicKey(registry.keys[0].public_key_pem);
+}
 
 async function req(method, p, { body, grant } = {}) {
   const headers = { 'Content-Type': 'application/json' };
@@ -56,8 +61,6 @@ before(async () => {
   executorPool = makePool(executorUrl());
   executor = loadExecutor();
   DID = configuredDeploymentId();
-  const registry = JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
-  pub = crypto.createPublicKey(registry.keys[0].public_key_pem);
   const app = buildApp({ pool: hostPool, executorPool, keysFile: KEYOPTS.keys });
   await new Promise((r) => { server = app.listen(0, r); });
   base = `http://127.0.0.1:${server.address().port}`;
@@ -80,6 +83,7 @@ const guard = (t) => {
 describe('STEP 4 — matching deployment_id is bound into the signed preimage', () => {
   test('happy path: sealed preimage contains deployment_id and verifies offline', async (t) => {
     if (guard(t)) return;
+    const pub = loadExecutorPub();
     const body = JSON.stringify({ title: 'DID-happy', body: 'ok' });
     const ch = await req('POST', '/state-challenge', { body: JSON.stringify({ target_id: '' }) });
     const g = issue({ ...KEYOPTS, operation: 'publish', target_id: '', body, state_nonce: ch.json.state_nonce });
@@ -198,6 +202,7 @@ describe('STEP 4 — PK is (deployment_id, jti); one-use is per pair', () => {
 describe('STEP 4 — tampered deployment_id fails offline verify', () => {
   test('replacing the deployment_id slot invalidates the seal signature', async (t) => {
     if (guard(t)) return;
+    const pub = loadExecutorPub();
     const nonce = await sqlChallenge('');
     const jti = `jti-tamper-did-${Date.now()}`;
     const out = await atomicExecute({

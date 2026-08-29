@@ -22,7 +22,12 @@ const {
 
 const KEYS = path.join(__dirname, '..', 'keys');
 let bootstrap, hostPool, executorPool, reachable = false;
-let executor, pub;
+let executor;
+
+function loadExecutorPub() {
+  const registry = JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
+  return crypto.createPublicKey(registry.keys[0].public_key_pem);
+}
 
 async function challenge(targetId = '') {
   const state_nonce = `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -48,8 +53,6 @@ before(async () => {
   hostPool = makePool(hostUrl());
   executorPool = makePool(executorUrl());
   executor = loadExecutor();
-  const registry = JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
-  pub = crypto.createPublicKey(registry.keys[0].public_key_pem);
 });
 after(async () => {
   if (hostPool) await hostPool.end();
@@ -88,6 +91,7 @@ describe('STEP 3 — cap_seal privileges', () => {
 describe('STEP 3 — happy path: gate → process-sign → seal → COMMIT', () => {
   test('row ends status=sealed; signature verifies; artifact returned only after COMMIT', async (t) => {
     if (guard(t)) return;
+    const pub = loadExecutorPub();
     const nonce = await challenge('');
     const jti = `jti-seal-happy-${Date.now()}`;
     const out = await atomicExecute({
