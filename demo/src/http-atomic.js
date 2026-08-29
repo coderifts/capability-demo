@@ -30,6 +30,46 @@
  *   (observed current ETag ≠ If-Match) is IF_MATCH_NOT_HONORED, never a
  *   success. Do not treat "we sent If-Match" as "the server honored it."
  *
+ * PROVIDER CANARY (roadmap 1189)
+ *   The 412/IF_MATCH_NOT_HONORED paths above are PASSIVE: they fire during
+ *   the real CAS. A matching 2xx still records if_match_honored:
+ *   'unproven_on_matching_2xx'. The active canary (providerCanary) probes
+ *   BEFORE trusting an origin: GET the resource (observeEtag), then GET
+ *   again with a DELIBERATELY STALE If-Match, using the same httpRequest
+ *   path as the CAS — no second HTTP client, no PUT/PATCH.
+ *
+ *   Classification:
+ *     412 on the stale If-Match → HONORS_IF_MATCH
+ *     2xx on the stale If-Match → DOES_NOT_HONOR (never trust its CAS)
+ *     cannot determine (network / no ETag / unexpected status) → UNKNOWN
+ *   UNKNOWN is never HONORS. A DOES_NOT_HONOR / UNKNOWN result is an
+ *   upfront gate on httpAtomicExecute (canary: true to probe, or pass a
+ *   prior result): the mutating CAS is not issued. The passive write-time
+ *   check (origin_ignored_if_match — measured at http-atomic.js:209 on
+ *   HEAD c3a6205) STAYS as the runtime backstop on a mismatched 2xx. A
+ *   canary HONORS does not skip it.
+ *
+ *   The canary is OPT-IN (canary: true | result). Omitted canary does not
+ *   probe; a matching If-Match against an ignoring origin still attests
+ *   as unproven_on_matching_2xx. That case is what the canary uniquely
+ *   closes. Do not read "we sent If-Match" as "the origin honored it,"
+ *   and do not read "we skipped the canary" as "the origin was probed."
+ *
+ *   HONESTY CEILING, and this is the whole point of a safe probe:
+ *     · POINT-IN-TIME, not a guarantee. An origin that 412s now can stop
+ *       later, or route the write to a different hop that ignores If-Match.
+ *     · The probe is GET (safe, non-mutating). A 412 on THIS url (redirects
+ *       are UNKNOWN, never HONORS) proves this origin evaluated If-Match
+ *       on GET at this moment. It does not prove PUT If-Match, other
+ *       paths, or the next request. A safe probe cannot issue a
+ *       conditional write to find that out — we do not fake that
+ *       certainty by mutating.
+ *     · 2xx on the GET probe is DOES_NOT_HONOR: we refuse to green-light.
+ *       That can be a false negative against origins that only evaluate
+ *       If-Match on unsafe methods; those origins still have the
+ *       origin_ignored_if_match PUT backstop if the caller skips the
+ *       canary gate.
+ *
  * baseUrl is SERVER-CONFIGURED (same lesson as gitAtomicExecute.repoDir). It
  * is never taken from the grant or the resourcePath. An absolute URL in
  * resourcePath is refused — that would let a request pick the origin.
@@ -46,6 +86,12 @@ const {
 const HTTP_PROFILE = 'ENFORCING_EXCLUSIVE_HTTP_CAS';
 /** Same versioned grammar the Postgres gate builds (demo/sql/gate.sql:146-148). */
 const GATE_PREIMAGE_V = 'cr.gate.preimage.v1';
+/** Canary classifications. UNKNOWN is never HONORS — do not green-light it. */
+const CANARY_HONORS = 'HONORS_IF_MATCH';
+const CANARY_DOES_NOT_HONOR = 'DOES_NOT_HONOR';
+const CANARY_UNKNOWN = 'UNKNOWN';
+/** Deliberately stale If-Match used by the safe probe. Never sent as a write pin. */
+const CANARY_STALE_IF_MATCH = '"cr.http.canary.stale"';
 
 const sha256hex = (s) => crypto.createHash('sha256').update(String(s), 'utf8').digest('hex');
 const preimageHashOf = (preimage) => `sha256:${sha256hex(preimage)}`;
@@ -74,7 +120,9 @@ function resourceUrl(baseUrl, resourcePath) {
 }
 
 async function httpRequest({ url, method, headers, body }) {
-  const init = { method, headers: headers || {} };
+  // redirect: 'manual' — a followed 412 on another hop is not a measurement
+  // of THIS origin. 3xx is classified UNKNOWN by the canary, never HONORS.
+  const init = { method, headers: headers || {}, redirect: 'manual' };
   if (body !== undefined) init.body = body;
   const r = await fetch(url, init);
   const etag = r.headers.get('etag');
@@ -99,6 +147,166 @@ async function observeEtag({ url }) {
 }
 
 /**
+ * Active provider-canary: probe whether an origin honors If-Match BEFORE the
+ * real CAS is trusted.
+ *
+ * SAFE: GET to learn the current ETag, then GET with a deliberately stale
+ * If-Match. Never PUT/PATCH. Reuses httpRequest / observeEtag — the same
+ * client as the CAS.
+ *
+ * Returns { honored: HONORS_IF_MATCH | DOES_NOT_HONOR | UNKNOWN, ... }.
+ * UNKNOWN and DOES_NOT_HONOR have green_light: false. HONORS_IF_MATCH means
+ * the mutating CAS MAY be attempted; it is not a guarantee the origin will
+ * honor If-Match on the write (point-in-time; :209 remains the backstop).
+ */
+function canaryHonesty() {
+  return {
+    point_in_time: true,
+    mutating: false,
+    ceiling: 'GET with a stale If-Match returning 412 proves this origin evaluated '
+      + 'If-Match on a safe method at this moment. It does not prove PUT If-Match, '
+      + 'other routes, or the next request. A 2xx is DOES_NOT_HONOR — never a '
+      + 'green-light. UNKNOWN (no ETag / network / unexpected status) is never '
+      + 'HONORS. A safe probe cannot issue a conditional write; we do not.',
+  };
+}
+
+function canaryUnknown(reason, extra = {}) {
+  return {
+    ...canaryHonesty(),
+    ...extra,
+    // Classification last: extra must not overwrite UNKNOWN into HONORS.
+    ok: false,
+    honored: CANARY_UNKNOWN,
+    reason,
+    green_light: false,
+    mutating: false,
+    point_in_time: true,
+  };
+}
+
+function isRedirectStatus(status) {
+  return Number.isFinite(status) && status >= 300 && status < 400;
+}
+
+async function providerCanary({ baseUrl, resourcePath }) {
+  const dest = resourceUrl(baseUrl, resourcePath);
+  if (!dest.ok) return canaryUnknown(dest.reason);
+
+  let observed;
+  try {
+    observed = await observeEtag({ url: dest.url });
+  } catch (err) {
+    return canaryUnknown('observe_failed', { detail: { error: err && err.message } });
+  }
+  if (isRedirectStatus(observed.status)) {
+    return canaryUnknown('redirect', { probe_status: observed.status, observed_etag: observed.etag });
+  }
+  if (!observed.ok) {
+    return canaryUnknown('observe_failed', { probe_status: observed.status, observed_etag: observed.etag });
+  }
+  if (observed.etag == null || observed.etag === '') {
+    return canaryUnknown('no_etag', { probe_status: observed.status, observed_etag: observed.etag });
+  }
+
+  let stale = CANARY_STALE_IF_MATCH;
+  if (stale === observed.etag) stale = '"cr.http.canary.stale.2"';
+
+  let probe;
+  try {
+    // Same httpRequest as the CAS. GET, no body — not a write.
+    probe = await httpRequest({
+      url: dest.url,
+      method: 'GET',
+      headers: {
+        'if-match': stale,
+        'cache-control': 'no-cache',
+      },
+    });
+  } catch (err) {
+    return canaryUnknown('probe_failed', {
+      observed_etag: observed.etag,
+      stale_if_match: stale,
+      detail: { error: err && err.message },
+    });
+  }
+
+  const base = {
+    observed_etag: observed.etag,
+    stale_if_match: stale,
+    probe_method: 'GET',
+    probe_status: probe.status,
+    ...canaryHonesty(),
+  };
+
+  if (isRedirectStatus(probe.status)) {
+    return canaryUnknown('redirect', base);
+  }
+  if (probe.status === 412) {
+    return {
+      ok: true,
+      honored: CANARY_HONORS,
+      reason: 'stale_if_match_412',
+      green_light: true, // may attempt CAS; not a guarantee — origin_ignored_if_match still runs
+      ...base,
+    };
+  }
+  if (probe.status >= 200 && probe.status < 300) {
+    return {
+      ok: false,
+      honored: CANARY_DOES_NOT_HONOR,
+      reason: 'stale_if_match_2xx',
+      green_light: false,
+      ...base,
+    };
+  }
+  return canaryUnknown('unexpected_probe_status', base);
+}
+
+/**
+ * Upfront gate. DOES_NOT_HONOR and UNKNOWN refuse before the mutating CAS.
+ * HONORS_IF_MATCH returns null (proceed). A missing/empty canary also
+ * proceeds — the passive IF_MATCH_NOT_HONORED path is the backstop then.
+ */
+function canaryGateRefusal(canaryResult) {
+  if (!canaryResult || typeof canaryResult !== 'object') return null;
+  if (canaryResult.honored === CANARY_HONORS) return null;
+  if (canaryResult.honored === CANARY_DOES_NOT_HONOR) {
+    return {
+      ok: false,
+      status: 'IF_MATCH_CANARY_REFUSED',
+      reason: 'canary_does_not_honor',
+      http: 409,
+      mutation_applied: false,
+      cas_proven: false,
+      canary: canaryResult,
+      detail: {
+        honored: CANARY_DOES_NOT_HONOR,
+        note: 'provider canary: origin returned 2xx for a deliberately stale If-Match '
+          + 'on a safe GET. ENFORCING_EXCLUSIVE_HTTP_CAS will not issue the mutating '
+          + 'CAS. Distinct from origin_ignored_if_match (that status means a write '
+          + 'landed). Point-in-time; the write-time backstop remains.',
+      },
+    };
+  }
+  // UNKNOWN, missing honored, anything else — never green-light.
+  return {
+    ok: false,
+    status: 'STATE_CHALLENGE_UNKNOWN',
+    reason: 'canary_unknown',
+    http: 403,
+    mutation_applied: false,
+    cas_proven: false,
+    canary: canaryResult,
+    detail: {
+      honored: canaryResult.honored || CANARY_UNKNOWN,
+      note: 'provider canary could not determine whether the origin honors If-Match. '
+        + 'UNKNOWN is never HONORS; the mutating CAS is not issued.',
+    },
+  };
+}
+
+/**
  * Mirror of gitAtomicExecute for an HTTP resource target.
  *
  * @param {object} o
@@ -111,10 +319,13 @@ async function observeEtag({ url }) {
  * @param {object} o.executor           { privateKey, kid } — used AFTER the CAS, never before
  * @param {string} o.deploymentId       sidecar's configured deployment_id (exactly one)
  * @param {boolean} [o.crashBeforeSeal] TEST ONLY: throw AFTER 2xx, before signing
+ * @param {boolean|object} [o.canary]   true → run providerCanary first; or pass a
+ *                                      prior canary result. Omitted → no upfront
+ *                                      probe (passive IF_MATCH_NOT_HONORED stays).
  */
 async function httpAtomicExecute({
   baseUrl, resourcePath, payload, ifMatchEtag, method, body,
-  executor, deploymentId, crashBeforeSeal,
+  executor, deploymentId, crashBeforeSeal, canary,
 }) {
   const configured = deploymentId == null ? '' : String(deploymentId);
   const grantDid = payload && payload.deployment_id != null ? String(payload.deployment_id) : '';
@@ -153,8 +364,22 @@ async function httpAtomicExecute({
       + 'ignores If-Match gives no guarantee. No cross-resource single-use.',
   };
 
+  // Upfront canary gate — BEFORE the mutating request. A DOES_NOT_HONOR or
+  // UNKNOWN origin is flagged here; HONORS proceeds to the CAS. The passive
+  // IF_MATCH_NOT_HONORED path below still runs on the write. Point-in-time.
+  let canaryResult = null;
+  if (canary === true) {
+    canaryResult = await providerCanary({ baseUrl, resourcePath });
+  } else if (canary && typeof canary === 'object') {
+    canaryResult = canary;
+  }
+  const blocked = canaryGateRefusal(canaryResult);
+  if (blocked) return { ...blocked, ...honesty };
+
   // Observe current ETag BEFORE the mutate. Needed to detect If-Match ignore:
   // a 2xx after observed-etag ≠ If-Match means the origin did not check.
+  // A failed observe is not a missing pin we can skip — without a pin the
+  // origin_ignored_if_match backstop cannot fire, so we refuse rather than PUT.
   let observed = null;
   try {
     observed = await observeEtag({ url: dest.url });
@@ -163,6 +388,13 @@ async function httpAtomicExecute({
       ok: false, status: 'STATE_CHALLENGE_UNKNOWN', reason: 'observe_failed', http: 503,
       ...honesty,
       detail: { error: err && err.message },
+    };
+  }
+  if (!observed.ok || isRedirectStatus(observed.status)) {
+    return {
+      ok: false, status: 'STATE_CHALLENGE_UNKNOWN', reason: 'observe_failed', http: 503,
+      ...honesty,
+      detail: { status: observed.status, etag: observed.etag },
     };
   }
 
@@ -265,6 +497,7 @@ async function httpAtomicExecute({
       atomic_execution_attestation,
       preimage,
       if_match_honored: 'unproven_on_matching_2xx',
+      ...(canaryResult ? { canary: canaryResult } : {}),
       ...honesty,
     };
   }
@@ -281,8 +514,13 @@ async function httpAtomicExecute({
 
 module.exports = {
   httpAtomicExecute,
+  providerCanary,
   resourceUrl,
   observeEtag,
   HTTP_PROFILE,
   GATE_PREIMAGE_V,
+  CANARY_HONORS,
+  CANARY_DOES_NOT_HONOR,
+  CANARY_UNKNOWN,
+  CANARY_STALE_IF_MATCH,
 };
