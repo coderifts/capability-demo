@@ -26,6 +26,7 @@ const {
   atomicExecute, verifyAtomicExecutionAttestation, signPreimage, sha256hex,
 } = require('./src/atomic');
 const { issuePostureReceipt, verifyPostureReceipt, canonicalJson } = require('./src/posture');
+const { reconcile, OUTCOME } = require('./src/reconcile');
 const { parseGrantToken } = require('../packages/middleware/src/verify-grant');
 
 const PROVE_V = 'cr.prove.transcript.v1';
@@ -317,7 +318,82 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
     say('');
     (driftOk ? pass : fail)('drift', 'DRIFT BASELINE', driftEvidence);
 
-    const allPass = sections.length === 6 && sections.every((s) => s.verdict === 'PASS');
+    // ── (R) RECOVERY ───────────────────────────────────────────────────────
+    // NOT a proof section. It carries the recovery vocabulary
+    // (CONFIRMED / REJECTED / RELEASED / INDETERMINATE), not PASS/FAIL, and it
+    // does not decide the transcript verdict — see `proofSections` below.
+    //
+    // PROVES: the reconcile outcome, per adapter, for the grants this run
+    //         exercised, as the durable state read it at `measured_at`.
+    // DOES NOT PROVE: anything after that instant. This is a point-in-time
+    //         read; a crash one second later changes nothing already signed.
+    //
+    // An INDETERMINATE here is a true outcome, not a proof failure, and it is
+    // signed exactly as reconcile reported it. Outcomes are carried through
+    // verbatim — there is no translation step in which an INDETERMINATE grant
+    // could be re-labelled CONFIRMED.
+    say('── (R) RECOVERY ──');
+    const recoveryJtis = sections
+      .map((s) => s.evidence && s.evidence.jti)
+      .filter((j) => typeof j === 'string' && j.length > 0);
+    let recovery;
+    if (recoveryJtis.length === 0) {
+      // Nothing to reconcile is stated, never implied by an empty CONFIRMED.
+      recovery = {
+        outcome: 'NOT_EXAMINED',
+        counts: null,
+        needs_attention: null,
+        grants: [],
+        note: 'this run exercised no grant, so there was nothing to reconcile',
+      };
+    } else {
+      try {
+        const r = await reconcile({
+          adapters: {
+            postgres: {
+              query: (sql, params) => bootstrap.query(sql, params),
+              deploymentId: deployment_id,
+              jtis: recoveryJtis,
+            },
+          },
+        });
+        recovery = {
+          outcome: r.outcome,
+          counts: r.counts,
+          needs_attention: r.needs_attention,
+          grants: r.grants,
+        };
+      } catch (err) {
+        // Fail-closed: evidence we could not read is INDETERMINATE, never clean.
+        recovery = {
+          outcome: OUTCOME.INDETERMINATE,
+          counts: null,
+          needs_attention: recoveryJtis.length,
+          grants: recoveryJtis.map((jti) => ({
+            adapter: 'postgres',
+            jti,
+            outcome: OUTCOME.INDETERMINATE,
+            evidence: { reason: `reconcile could not read the evidence: ${(err && err.message) || err}` },
+          })),
+        };
+      }
+    }
+    for (const g of recovery.grants) say(`  ${g.outcome}  ${g.adapter}  ${g.jti}`);
+    say(`  outcome=${recovery.outcome}  needs_attention=${recovery.needs_attention}`);
+    say('');
+    sections.push({
+      id: 'recovery',
+      name: 'RECOVERY',
+      kind: 'recovery',
+      verdict: recovery.outcome,
+      evidence: recovery,
+    });
+
+    // The transcript verdict is the PROOF verdict. RECOVERY is signed alongside
+    // it but never decides it: an INDETERMINATE recovery is a true outcome,
+    // not a failed proof.
+    const proofSections = sections.filter((s) => s.kind !== 'recovery');
+    const allPass = proofSections.length === 6 && proofSections.every((s) => s.verdict === 'PASS');
     const summary = {
       v: PROVE_V,
       executor_kid: executor.kid,
@@ -326,6 +402,7 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
       verdict: allPass ? 'PASS' : 'FAIL',
       sections: sections.map((s) => ({
         id: s.id, name: s.name, verdict: s.verdict,
+        ...(s.kind ? { kind: s.kind } : {}),
         evidence: s.id === 'authorized'
           ? { http: s.evidence.http, sealed: s.evidence.sealed, with_grant: s.evidence.with_grant, without_grant: s.evidence.without_grant, jti: s.evidence.jti }
           : s.id === 'posture'
@@ -343,7 +420,7 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
       Buffer.from(signature, 'base64url'),
     );
 
-    say(`═══ VERDICT: ${allPass ? 'PASS' : 'FAIL'} (${sections.filter((s) => s.verdict === 'PASS').length}/6) ═══`);
+    say(`═══ VERDICT: ${allPass ? 'PASS' : 'FAIL'} (${proofSections.filter((s) => s.verdict === 'PASS').length}/6) ═══`);
     say(`signed summary: ${token.slice(0, 72)}…`);
     say(`summary verifies offline: ${sumOk}`);
     return {
