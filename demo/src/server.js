@@ -27,6 +27,7 @@ const {
   configuredDeploymentId,
 } = require('./db');
 const { atomicExecute } = require('./atomic');
+const { gitAtomicExecute, GIT_PROFILE } = require('./git-atomic');
 
 const KEYS_DIR = process.env.CODERIFTS_KEYS_DIR || path.join(__dirname, '..', 'keys');
 const KEYS_FILE = process.env.CODERIFTS_KEYS_FILE || path.join(KEYS_DIR, 'coderifts-keys.json');
@@ -38,6 +39,9 @@ const CHALLENGE_TTL_MS = Number(process.env.CHALLENGE_TTL_MS || 120_000);
 const OPERATION_MAP = {
   'POST /articles': 'publish',
   'DELETE /articles/:id': 'deploy',
+  // github.exclusive (1176). The grant must be bound to this operation exactly as
+  // the Postgres operations are — the git target gets no weaker binding.
+  'POST /git/ref-update': 'ref-update',
 };
 
 function loadExecutor() {
@@ -49,6 +53,10 @@ function loadExecutor() {
 function buildApp({
   pool, executorPool, keysFile = KEYS_FILE, audience = process.env.CODERIFTS_AUDIENCE || '',
   deploymentId = configuredDeploymentId(),
+  // github.exclusive target. SERVER-CONFIGURED, never taken from the request: a
+  // client-supplied repository path would let a grant for one repo move a ref in
+  // another, which is the whole boundary this adapter exists to hold.
+  gitRepoDir = process.env.CODERIFTS_GIT_REPO_DIR || null,
 } = {}) {
   const app = express();
   const executor = loadExecutor();
@@ -62,10 +70,46 @@ function buildApp({
     keysFile,
     audience,
     operationMap: OPERATION_MAP,
-    targetId: (req) => (req.params && req.params.id != null ? String(req.params.id) : ''),
+    // The git target is the REF. Same binding surface as the Postgres target id:
+    // the grant is bound to it, so a grant for refs/heads/a cannot move refs/heads/b.
+    targetId: (req) => {
+      if (req.params && req.params.id != null) return String(req.params.id);
+      if (req.body && typeof req.body.ref === 'string') return req.body.ref;
+      return '';
+    },
   });
 
-  app.get('/health', (_q, r) => r.json({ status: 'ok', guard: 'offline-grant-verification', profiles: ['ATOMIC'] }));
+  // `profiles` lists GRANT profiles this server accepts — unchanged.
+  // `enforcement_profiles` is the separate question of which adapters are WIRED,
+  // and each entry states what it holds rather than how mature it is. AVAILABLE
+  // means "reachable", never "production-hardened": github.exclusive refuses a
+  // replay on the SAME ref via its reflog marker, has no cross-ref ledger, and
+  // a crash after the ref moved is INDETERMINATE, not prevented. Saying less
+  // than that here would make /health the place the honesty leaks out.
+  app.get('/health', (_q, r) => r.json({
+    status: 'ok',
+    guard: 'offline-grant-verification',
+    profiles: ['ATOMIC'],
+    enforcement_profiles: [
+      {
+        profile: 'ENFORCING_ATOMIC',
+        target: 'postgres',
+        available: true,
+        holds: 'consume + mutate + seal in one transaction; a deferred constraint '
+          + 'refuses to commit a consumed grant with no attestation',
+      },
+      {
+        profile: GIT_PROFILE,
+        target: 'github.exclusive',
+        available: gitRepoDir != null,
+        holds: 'ref-level compare-and-swap via git update-ref; same-ref replay '
+          + 'refused by the reflog marker',
+        does_not_hold: 'no cross-ref grant ledger, and git has no deferred '
+          + 'constraint: a crash after the ref moved leaves it moved with no '
+          + 'attestation, which reconciles as INDETERMINATE rather than being prevented',
+      },
+    ],
+  }));
 
   app.get('/articles/count', async (_q, r) => {
     const x = await pool.query('SELECT count(*)::int AS n FROM articles');
@@ -91,34 +135,42 @@ function buildApp({
   });
 
   /** Shared handler: routes the request by grant PROFILE. Mutation is in cr_execute_grant. */
-  const handle = (targetOf) => async (req, res, next) => {
+  const handle = (targetOf, runAdapter) => async (req, res, next) => {
     const payload = req.coderifts.payload;
     const profile = grantProfile(payload);
     const targetId = targetOf(req);
 
     try {
-      if (profile === 'BEARER') {
+      // STRICT, not merely anti-BEARER. `grantProfile` returns only ATOMIC|BEARER
+      // today (verify-grant.js:95-98), so this is belt-and-braces — but a future
+      // third value must REFUSE rather than fall through to an adapter nobody
+      // asked for. Silent defaulting is how a weaker grant gets a stronger path.
+      if (profile !== 'ATOMIC') {
         // Closed: a grant with no state_nonce used to mutate with no ledger and no
         // attestation — a second, unguarded data plane. Refuse; never take a client
         // from the pool. ATOMIC is the only write path (atomic.js).
         return res.status(403).json({
           error: 'execution_refused',
-          profile: 'BEARER',
-          status: 'BEARER_NOT_PERMITTED',
-          reason: 'execution_grant_bearer_unsupported',
+          profile,
+          status: profile === 'BEARER' ? 'BEARER_NOT_PERMITTED' : 'PROFILE_NOT_PERMITTED',
+          reason: profile === 'BEARER'
+            ? 'execution_grant_bearer_unsupported'
+            : 'execution_grant_profile_unsupported',
         });
       }
 
-      const out = await atomicExecute({
-        pool: executorPool,
-        payload,
-        targetId,
-        executor,
-        deploymentId: deployment_id,
-        operation: payload.operation,
-        title: req.body && req.body.title,
-        body: req.body && req.body.body,
-      });
+      const out = runAdapter
+        ? await runAdapter({ req, payload, targetId, executor, deploymentId: deployment_id })
+        : await atomicExecute({
+          pool: executorPool,
+          payload,
+          targetId,
+          executor,
+          deploymentId: deployment_id,
+          operation: payload.operation,
+          title: req.body && req.body.title,
+          body: req.body && req.body.body,
+        });
       if (!out.ok) {
         return res.status(out.http).json({
           error: 'execution_refused', profile, status: out.status, reason: out.reason,
@@ -128,8 +180,13 @@ function buildApp({
       // Artifact is returned only AFTER COMMIT (atomicExecute commits first).
       // It asserts the executor authorized this exact transaction for commit —
       // not that the transaction committed.
+      // `profile` stays the GRANT profile (ATOMIC — the grant carries a nonce).
+      // `enforcement_profile` is a DIFFERENT fact: which adapter held the
+      // boundary. Collapsing the two would let a reader take a grant property
+      // for an enforcement property.
       return res.status(req.method === 'POST' ? 201 : 200).json({
         ok: true, profile, row: out.row,
+        ...(out.row && out.row.profile ? { enforcement_profile: out.row.profile } : {}),
         attestation: out.attestation,
         atomic_execution_attestation: out.atomic_execution_attestation,
         authorized_by: { jti: payload.jti, operation: payload.operation, state_nonce: payload.state_nonce },
@@ -138,6 +195,25 @@ function buildApp({
       return next(err);
     }
   };
+
+  // github.exclusive (1176). Mounted only when a repository is configured, so an
+  // unconfigured server has no half-wired git surface to probe.
+  if (gitRepoDir != null) {
+    app.post('/git/ref-update', captureRawBody(), guard, handle(
+      (req) => (req.body && typeof req.body.ref === 'string' ? req.body.ref : ''),
+      ({ req, payload, targetId, executor: ex, deploymentId }) => gitAtomicExecute({
+        // repoDir is the SERVER's, never the request's.
+        repoDir: gitRepoDir,
+        ref: targetId,
+        payload,
+        expectedOldSha: req.body && req.body.expected_old_sha,
+        newSha: req.body && req.body.new_sha,
+        operation: payload.operation,
+        executor: ex,
+        deploymentId,
+      }),
+    ));
+  }
 
   app.post('/articles', captureRawBody(), guard, handle(
     (req) => (req.params && req.params.id != null ? String(req.params.id) : ''),
