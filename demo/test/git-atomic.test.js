@@ -107,7 +107,11 @@ describe('github.exclusive — ref CAS', () => {
     assert.equal(r.ok, false);
     assert.equal(r.status, 'STATE_DRIFT');
     assert.equal(r.reason, 'state_changed_since_challenge');
-    assert.deepEqual(r.detail, { challenged: A, current: C });
+    // `detail` gained ledger_ref + note when the cross-ref ledger landed; the two
+    // measured values it always carried are asserted individually rather than by
+    // deepEqual, so a future additive field does not fail a drift test again.
+    assert.equal(r.detail.challenged, A);
+    assert.equal(r.detail.current, C);
     assert.equal(await readRef(repoDir, REF), C, 'a refused CAS must leave the ref alone');
   });
 
@@ -234,5 +238,198 @@ describe('github.exclusive — the crash case is INDETERMINATE, not prevented', 
     });
     const log = sh(repoDir, ['reflog', 'show', REF, '--format=%gs']);
     assert.ok(log.includes(`${REFLOG_MARKER} jti=${g.jti}`), log);
+  });
+});
+
+// ═══ CROSS-REF LEDGER (panel decision) ════════════════════════════════════════
+//
+// The kernel's reflog marker refuses a replay on the SAME ref. These cover the
+// case its own comment named as open: the same jti against a DIFFERENT ref.
+
+const {
+  reconcileLedger, listConsumedLedger, ledgerRefFor, LEDGER_PREFIX,
+} = require('../src/git-atomic');
+
+const REF_B = 'refs/heads/second';
+
+describe('github.exclusive — cross-ref single-use', () => {
+  test('the SAME jti on a DIFFERENT ref → GRANT_CONSUMED, ref B not moved', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    sh(repoDir, ['update-ref', REF_B, A]);
+    const g = grant();
+    const first = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(first.ok, true, JSON.stringify(first));
+
+    const second = await gitAtomicExecute({
+      repoDir, ref: REF_B, payload: g, expectedOldSha: A, newSha: C,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(second.status, 'GRANT_CONSUMED');
+    assert.equal(second.reason, 'grant_already_consumed_cross_ref',
+      'distinguishable from the per-ref path: the grant was spent SOMEWHERE ELSE');
+    assert.equal(await readRef(repoDir, REF_B), A, 'ref B must not have moved');
+  });
+
+  test('per-ref replay still refuses via the reflog (regression)', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    sh(repoDir, ['update-ref', REF, A]);
+    const again = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(again.status, 'GRANT_CONSUMED');
+    assert.equal(again.reason, 'grant_already_consumed',
+      'the reflog path runs first and still owns the same-ref case');
+  });
+
+  test('concurrent cross-ref: exactly ONE of N refs wins the same jti', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const refs = Array.from({ length: 8 }, (_, i) => `refs/heads/race-${i}`);
+    for (const r of refs) sh(repoDir, ['update-ref', r, A]);
+    const g = grant();
+    const out = await Promise.all(refs.map((r) => gitAtomicExecute({
+      repoDir, ref: r, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    })));
+    const won = out.filter((r) => r.ok);
+    assert.equal(won.length, 1, `exactly one may consume the jti, got ${won.length}`);
+    assert.equal(
+      out.filter((r) => r.reason === 'grant_already_consumed_cross_ref').length,
+      refs.length - 1,
+      'the create-only ledger CAS serialises the rest',
+    );
+    const moved = refs.filter((r) => sh(repoDir, ['rev-parse', r]) === B);
+    assert.equal(moved.length, 1, 'exactly one ref may have moved');
+  });
+
+  test('ledger claimed but CAS refused → grant_spent, target unmoved, no rollback', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    sh(repoDir, ['update-ref', REF, C]);              // drift the target first
+    const g = grant();
+    const r = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.status, 'STATE_DRIFT');
+    assert.equal(r.grant_spent, true, 'the ledger claim landed before the CAS refused');
+    assert.equal(await readRef(repoDir, REF), C, 'the target did not move');
+    assert.match(r.detail.note, /Mint a new grant/);
+
+    // NOT rolled back: rolling back would reopen the replay window this closes.
+    const ledger = await listConsumedLedger({ repoDir });
+    assert.ok(ledger.some((e) => e.ref === ledgerRefFor(g.jti)),
+      'the claim must survive a failed CAS');
+
+    // And the spent grant is genuinely unusable afterwards.
+    sh(repoDir, ['update-ref', REF, A]);
+    const retry = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(retry.reason, 'grant_already_consumed_cross_ref');
+  });
+});
+
+describe('github.exclusive — offline ledger enumeration', () => {
+  test('for-each-ref lists the consumed entries under the sharded namespace', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    const r = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    const ledger = await listConsumedLedger({ repoDir });
+    assert.equal(ledger.length, 1);
+    assert.ok(ledger[0].ref.startsWith(`${LEDGER_PREFIX}/`));
+    assert.equal(ledger[0].ref, ledgerRefFor(g.jti));
+    assert.equal(ledger[0].object, B, 'the entry points at the commit the grant authorised');
+    assert.equal(ledger[0].ref.split('/')[3].length, 2, 'two-hex shard');
+    // The jti is NOT in the ref name — it is hashed.
+    assert.ok(!ledger[0].ref.includes(g.jti));
+
+    const rec = await reconcileLedger({
+      repoDir, refs: [REF], attestationsByJti: { [g.jti]: r.attestation },
+    });
+    assert.equal(rec.outcome, 'RECONCILED');
+    assert.deepEqual(rec.missing_ledger, []);
+  });
+
+  test('a DELETED ledger entry whose reflog marker survives → INDETERMINATE', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    const r = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    sh(repoDir, ['update-ref', '-d', ledgerRefFor(g.jti)]);   // the tamper
+    const rec = await reconcileLedger({
+      repoDir, refs: [REF], attestationsByJti: { [g.jti]: r.attestation },
+    });
+    assert.equal(rec.outcome, 'INDETERMINATE',
+      'absence of a ledger entry is never proof the grant was unconsumed');
+    assert.equal(rec.missing_ledger.length, 1);
+    assert.equal(rec.missing_ledger[0].jti, g.jti);
+    assert.match(rec.reason, /Absence is not proof/);
+  });
+
+  test('a ledger entry with no ref move in scope is reported, not dropped', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    sh(repoDir, ['update-ref', REF, C]);
+    const g = grant();
+    await gitAtomicExecute({          // spends the grant, CAS refuses
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    const rec = await reconcileLedger({ repoDir, refs: [REF] });
+    assert.equal(rec.ledger_without_move.length, 1,
+      'a grant spent on a failed CAS leaves a ledger entry with no move — surfaced');
+  });
+});
+
+describe('github.exclusive — the ledger scope is stated, not implied', () => {
+  test('MEASURED LIMIT: receive.denyDeletes does NOT protect the ledger namespace', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-git-bare-'));
+    execFileSync('git', ['init', '-q', '--bare', bare]);
+    execFileSync('git', ['-C', bare, 'config', 'receive.denyDeletes', 'true']);
+    const g = grant();
+    await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    const lref = ledgerRefFor(g.jti);
+    sh(repoDir, ['push', '-q', bare, `${lref}:${lref}`]);
+    assert.equal(
+      execFileSync('git', ['-C', bare, 'rev-parse', '--verify', lref], { encoding: 'utf8' }).trim(),
+      B, 'the ledger ref is push-carried',
+    );
+
+    // The panel's scope statement assumed receive.denyDeletes would protect this
+    // namespace. It does not: measured on git 2.50.1, the setting guards branches
+    // only. This test PINS the real behaviour so the honesty claim in the header
+    // cannot drift back to the assumption.
+    let ledgerDeleteRefused = false;
+    try { execFileSync('git', ['-C', repoDir, 'push', bare, `:${lref}`], { stdio: 'pipe' }); }
+    catch { ledgerDeleteRefused = true; }
+    assert.equal(ledgerDeleteRefused, false,
+      'if this ever becomes true, git changed and the header scope can be strengthened');
+
+    // The contrast, in the same repo and the same setting: a BRANCH is protected.
+    sh(repoDir, ['push', '-q', bare, `${REF}:refs/heads/probe`]);
+    let branchDeleteRefused = false;
+    try { execFileSync('git', ['-C', repoDir, 'push', bare, ':refs/heads/probe'], { stdio: 'pipe' }); }
+    catch { branchDeleteRefused = true; }
+    assert.equal(branchDeleteRefused, true,
+      'denyDeletes works — just not for refs outside refs/heads');
+
+    fs.rmSync(bare, { recursive: true, force: true });
   });
 });

@@ -103,10 +103,18 @@ function buildApp({
         target: 'github.exclusive',
         available: gitRepoDir != null,
         holds: 'ref-level compare-and-swap via git update-ref; same-ref replay '
-          + 'refused by the reflog marker',
-        does_not_hold: 'no cross-ref grant ledger, and git has no deferred '
-          + 'constraint: a crash after the ref moved leaves it moved with no '
-          + 'attestation, which reconciles as INDETERMINATE rather than being prevented',
+          + 'refused by the reflog marker; cross-ref replay refused by a '
+          + 'create-only consumed-grant ledger ref, on a single serialising '
+          + 'repository with trusted git storage',
+        does_not_hold: 'the ledger is not equivalent to a database primary key: '
+          + 'distributed clones can each claim a jti before anyone pushes, and a '
+          + 'disk-level actor can delete or forge a ledger ref. receive.denyDeletes '
+          + 'does NOT cover this namespace (measured: it guards refs/heads only), '
+          + 'so protecting the ledger needs a pre-receive hook that is not shipped '
+          + 'here. Git has no '
+          + 'deferred constraint either: a crash after the ref moved leaves it '
+          + 'moved with no attestation, and a missing ledger entry is '
+          + 'INDETERMINATE — never proof a grant was unconsumed',
       },
     ],
   }));

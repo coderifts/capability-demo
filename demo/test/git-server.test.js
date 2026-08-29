@@ -123,8 +123,10 @@ describe('1176 — POST /git/ref-update', () => {
     const r = await req('POST', '/git/ref-update', { body, grant: gitGrant(body) });
     assert.equal(r.code, 409);
     assert.equal(r.json.status, 'STATE_DRIFT');
-    assert.deepEqual(r.json.detail, { challenged: A, current: C },
-      'the kernel detail must survive the route layer unchanged');
+    // Field-wise, not deepEqual: `detail` gained ledger_ref + note with the
+    // cross-ref ledger. What must survive the route layer is the measured pair.
+    assert.equal(r.json.detail.challenged, A, 'the kernel detail must survive the route layer');
+    assert.equal(r.json.detail.current, C);
     assert.equal(await readRef(repoDir, REF), C, 'a refused CAS leaves the ref alone');
   });
 
@@ -186,8 +188,12 @@ describe('1176 — /health is available-not-hardened', () => {
     assert.equal(git.available, true);
     assert.equal(git.target, 'github.exclusive');
     // The honesty constraint, asserted rather than trusted to review.
-    assert.match(git.does_not_hold, /no cross-ref grant ledger/);
-    assert.match(git.does_not_hold, /INDETERMINATE rather than being prevented/);
+    // The cross-ref ledger now EXISTS, so /health may no longer say it does not.
+    assert.match(git.holds, /create-only consumed-grant ledger ref/);
+    assert.match(git.does_not_hold, /not equivalent to a database primary key/);
+    // The measured denyDeletes limit must be stated, not implied.
+    assert.match(git.does_not_hold, /receive\.denyDeletes does NOT cover this namespace/);
+    assert.match(git.does_not_hold, /INDETERMINATE/);
     assert.doesNotMatch(JSON.stringify(git), /hardened|production-ready|guaranteed/i,
       'available must never read as hardened');
   });

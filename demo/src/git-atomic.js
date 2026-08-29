@@ -33,6 +33,33 @@
  *   signed. Reporting that as AUTHORIZED_COMMITTED would be the overclaim this
  *   whole codebase exists to remove; reporting it as REFUSED would be a lie in
  *   the other direction, because the ref really did move.
+ *
+ * CROSS-REF SINGLE-USE, AND EXACTLY HOW FAR IT REACHES
+ *   Each consumed jti is claimed as the EXISTENCE of a ref under
+ *   refs/coderifts/consumed/<hash[0:2]>/<hash>, created with the all-zeros
+ *   old-value so a second claim fails under git's own ref lock.
+ *
+ *   HOLDS: on a SINGLE SERIALISING repository — the bare server every writer
+ *   pushes through — with the git storage itself trusted AND a server-side hook
+ *   protecting the namespace (see the next paragraph).
+ *
+ *   `receive.denyDeletes` DOES NOT PROTECT THIS NAMESPACE. Measured 2026-08-29 on
+ *   git 2.50.1 against a bare repo with receive.denyDeletes=true: deleting
+ *   refs/heads/probe was refused (`deletion prohibited`), and deleting
+ *   refs/coderifts/consumed/<hash> SUCCEEDED. The setting guards branches, not
+ *   arbitrary ref namespaces. Protecting the ledger requires an explicit
+ *   `pre-receive`/`update` hook that refuses deletions under
+ *   refs/coderifts/consumed/*; without one, a push can erase a claim. That hook
+ *   is server configuration and is NOT shipped here — the honest state today is
+ *   that the ledger is delete-able by anyone who can push.
+ *
+ *   DOES NOT HOLD, and this is not the same guarantee as Postgres's
+ *   (deployment_id, jti) primary key:
+ *     · distributed clones can each claim the same jti locally before anyone
+ *       pushes; the conflict surfaces at push time, not at consume time;
+ *     · an actor with disk access can delete or forge a ledger ref;
+ *     · `git pack-refs` / gc housekeeping is not audited here.
+ *   Multi-remote sync and tamper-evidence are deferred, not solved.
  */
 
 const { execFile } = require('node:child_process');
@@ -49,10 +76,35 @@ const GIT_PROFILE = 'ENFORCING_EXCLUSIVE_REF_CAS';
 const GATE_PREIMAGE_V = 'cr.gate.preimage.v1';
 /** Reflog marker prefix. Written in the same lock as the ref move. */
 const REFLOG_MARKER = 'cr.exclusive.v1';
+/** Cross-ref consumed-grant ledger namespace. Sharded to keep packed-refs shallow. */
+const LEDGER_PREFIX = 'refs/coderifts/consumed';
+/** update-ref's "must not already exist" old-value. Measured: a second create fails
+ *  with `reference already exists`, under the same ref lock the CAS uses. */
+const MUST_NOT_EXIST = '0'.repeat(40);
 
 const sha256hex = (s) => crypto.createHash('sha256').update(String(s), 'utf8').digest('hex');
 const preimageHashOf = (preimage) => `sha256:${sha256hex(preimage)}`;
 const isSha = (s) => typeof s === 'string' && /^[0-9a-f]{40}$/i.test(s);
+
+/**
+ * Ledger ref for a jti. The jti is HASHED rather than embedded.
+ *
+ * MEASURED: the demo mints `jti: crypto.randomUUID()` (issue-grant.js:102), which
+ * is already ref-legal. But the jti arrives inside a SIGNED GRANT, and a grant
+ * from a different issuer may carry any string. The kernel's existing guard only
+ * rejects `|` (it protects the preimage, not a ref name), and `git
+ * check-ref-format`'s rules are long and version-dependent. Hashing removes the
+ * question entirely: sha256 hex is always ref-legal, always the same length, and
+ * shards evenly. It also keeps the grant id out of a ref name that gets pushed.
+ *
+ * The cost is that `for-each-ref` alone cannot name which jti a ledger entry is
+ * for — reconciliation recovers that by hashing the jtis it reads from the
+ * reflog markers, which is where the jti is recorded in the clear anyway.
+ */
+function ledgerRefFor(jti) {
+  const h = sha256hex(String(jti));
+  return `${LEDGER_PREFIX}/${h.slice(0, 2)}/${h}`;
+}
 
 function git(repoDir, args) {
   return new Promise((resolve) => {
@@ -161,6 +213,31 @@ async function gitAtomicExecute({
     return { ok: false, status: 'GRANT_CONSUMED', reason: 'grant_already_consumed', http: 409 };
   }
 
+  // (2b) CROSS-REF consume. Claims the jti globally BEFORE the target ref moves,
+  //      so a grant already spent on ANOTHER ref is refused with no side effect
+  //      on this one. The create-only old-value makes the second claim fail under
+  //      git's own ref lock — the same serialisation the CAS below relies on.
+  //
+  //      THE OBJECT IS `newSha`, and the choice is forced by the ordering. The
+  //      panel suggested a tag carrying the attestation, but the attestation does
+  //      not exist yet: it is signed AFTER the CAS, and the claim must land
+  //      BEFORE it. `newSha` is the commit this grant authorises, it already
+  //      exists, it is carried by any push that carries the branch, and being a
+  //      ref target keeps it from gc. No new object, no extra git call.
+  const ledgerRef = ledgerRefFor(jti);
+  const claim = await git(repoDir, ['update-ref', ledgerRef, newSha, MUST_NOT_EXIST]);
+  if (!claim.ok) {
+    return {
+      ok: false,
+      status: 'GRANT_CONSUMED',
+      // Distinguishable from the per-ref path on purpose: an operator seeing this
+      // learns the grant was spent SOMEWHERE ELSE, which is a different fact.
+      reason: 'grant_already_consumed_cross_ref',
+      http: 409,
+      detail: { ledger_ref: ledgerRef },
+    };
+  }
+
   const before = await readRef(repoDir, ref);
   const pin = expectedOldSha == null ? before : String(expectedOldSha);
 
@@ -180,12 +257,35 @@ async function gitAtomicExecute({
     // Re-READ rather than parse the error text: the observed value is a
     // measurement, the message is prose that git may reword.
     const current = await readRef(repoDir, ref);
+
+    // THE GRANT IS SPENT AND THE MUTATION DID NOT HAPPEN.
+    //
+    // The ledger claim landed above; the target then refused to move. This is a
+    // real state, not an edge case to smooth over, and it is NOT a clean refusal:
+    // a clean refusal leaves the grant reusable, and this one does not.
+    //
+    // WE DO NOT ROLL THE LEDGER BACK. Deleting the claim would restore the exact
+    // replay window this whole step exists to close — a racer who can force a
+    // STATE_DRIFT could farm rollbacks and reuse the grant. Spending a grant on a
+    // failed attempt is the cheaper loss, and it is the one the holder can see.
+    //
+    // The honest outcome is therefore SPENT, not REFUSED: the caller must mint a
+    // new grant rather than retry this one, and `grant_spent: true` says so
+    // without pretending the mutation occurred.
     return {
       ok: false,
       status: 'STATE_DRIFT',
       reason: 'state_changed_since_challenge',
       http: 409,
-      detail: { challenged: pin, current },
+      grant_spent: true,
+      detail: {
+        challenged: pin,
+        current,
+        ledger_ref: ledgerRef,
+        note: 'the cross-ref ledger claim landed before the CAS refused; this grant '
+          + 'is consumed and the target did not move. Mint a new grant — retrying '
+          + 'this one returns grant_already_consumed_cross_ref.',
+      },
     };
   }
 
@@ -247,9 +347,82 @@ async function reconcileRef({ repoDir, ref, attestationsByJti = {} }) {
   };
 }
 
+/**
+ * Offline enumeration of the cross-ref ledger.
+ *
+ * Returns the ledger ENTRIES, not the jtis: the ref name carries a hash, and a
+ * hash does not invert. Pair it with reconcileLedger below, which recovers the
+ * jtis from the reflog markers and hashes them to match.
+ */
+async function listConsumedLedger({ repoDir }) {
+  const r = await git(repoDir, ['for-each-ref', '--format=%(refname) %(objectname)', LEDGER_PREFIX]);
+  if (!r.ok) return [];
+  return r.stdout.split('\n').map((l) => l.trim()).filter(Boolean).map((line) => {
+    const [refname, objectname] = line.split(' ');
+    return { ref: refname, object: objectname, jti_hash: String(refname).split('/').pop() };
+  });
+}
+
+/**
+ * Cross-check the reflog markers on the named refs against the ledger.
+ *
+ * THE RULE THIS ENFORCES, and it is the whole point: a MISSING ledger entry is
+ * never evidence that a grant was not consumed. If a reflog marker names a jti
+ * whose ledger ref is absent, either it was deleted or the ledger was pruned —
+ * both mean we cannot say, and "cannot say" is INDETERMINATE, never AUTHORIZED.
+ * Reading absence as "not consumed" would turn a deletion into a replay licence.
+ */
+async function reconcileLedger({ repoDir, refs = [], attestationsByJti = {} }) {
+  const ledger = await listConsumedLedger({ repoDir });
+  const haveHash = new Set(ledger.map((e) => e.jti_hash));
+
+  const moves = [];
+  for (const ref of refs) {
+    for (const m of await reflogMarkers(repoDir, ref)) {
+      if (!m.startsWith(`${REFLOG_MARKER} jti=`)) continue;
+      moves.push({ ref, jti: m.slice(`${REFLOG_MARKER} jti=`.length) });
+    }
+  }
+
+  const missingLedger = moves.filter((mv) => !haveHash.has(sha256hex(mv.jti)));
+  const unattested = moves.filter((mv) => !attestationsByJti[mv.jti]);
+  // A ledger entry with no reflog move anywhere we were asked to look: either the
+  // grant was spent on a ref outside `refs`, or spent on a CAS that then failed
+  // (the grant_spent case). Reported, never silently dropped.
+  const seenHashes = new Set(moves.map((mv) => sha256hex(mv.jti)));
+  const ledgerWithoutMove = ledger.filter((e) => !seenHashes.has(e.jti_hash));
+
+  const problems = missingLedger.length + unattested.length;
+  return {
+    refs,
+    ledger_entries: ledger.length,
+    moves,
+    missing_ledger: missingLedger,
+    unattested,
+    ledger_without_move: ledgerWithoutMove,
+    outcome: problems === 0 ? 'RECONCILED' : 'INDETERMINATE',
+    reason: problems === 0
+      ? null
+      : [
+        missingLedger.length
+          ? `${missingLedger.length} ref move(s) name a jti with NO ledger entry — deleted or `
+            + 'pruned. Absence is not proof the grant was unconsumed.'
+          : null,
+        unattested.length
+          ? `${unattested.length} ref move(s) carry a grant marker with no attestation.`
+          : null,
+      ].filter(Boolean).join(' '),
+  };
+}
+
 module.exports = {
   gitAtomicExecute,
   reconcileRef,
+  reconcileLedger,
+  listConsumedLedger,
+  ledgerRefFor,
+  LEDGER_PREFIX,
+  MUST_NOT_EXIST,
   readRef,
   gitTargetDescriptor,
   GIT_PROFILE,
