@@ -15,14 +15,24 @@ const { runProve, verifyProveTranscript, PROVE_V } = require('../prove');
 
 const KEYS = path.join(__dirname, '..', 'keys');
 let reachable = false;
-let pub;
+
+/**
+ * Read the demo key LAZILY, after the postgres-skip guard — same reason as
+ * 71bc54a, which fixed deployment/posture/seal.test.js and missed this file.
+ * In before() the read is unconditional, so a clean checkout with no Postgres
+ * AND no keys/ throws there and the suite ABORTS with cancelled tests and exit
+ * 1, instead of skipping cleanly. An environment that cannot run these tests
+ * must skip, not fail.
+ */
+function loadExecutorPub() {
+  const registry = JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
+  return crypto.createPublicKey(registry.keys[0].public_key_pem);
+}
 
 before(async () => {
   const pool = makePool(bootstrapUrl());
   try { await pool.query('SELECT 1'); reachable = true; } catch (_) { /* */ }
   await pool.end();
-  const registry = JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
-  pub = crypto.createPublicKey(registry.keys[0].public_key_pem);
 });
 
 const guard = (t) => {
@@ -41,7 +51,7 @@ describe('STEP 6 — prove transcript', () => {
     assert.equal(out.sections.length, 6);
     assert.ok(out.sections.every((s) => s.verdict === 'PASS'), JSON.stringify(out.sections.map((s) => [s.id, s.verdict])));
     assert.ok(out.token.startsWith(`${PROVE_V}|`));
-    const v = verifyProveTranscript(out.token, { publicKey: pub });
+    const v = verifyProveTranscript(out.token, { publicKey: loadExecutorPub() });
     assert.equal(v.valid, true);
     assert.equal(v.payload.verdict, 'PASS');
     const auth = out.sections.find((s) => s.id === 'authorized');
