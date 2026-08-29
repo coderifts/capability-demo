@@ -121,7 +121,11 @@ describe('STEP 6 — RECOVERY section', () => {
     assert.equal(rec.evidence.needs_attention, 0);
     assert.ok(rec.evidence.grants.length >= 1, 'recovery examined no grant');
     assert.ok(rec.evidence.grants.every((g) => g.outcome === 'CONFIRMED'));
-    assert.match(rec.evidence.grants[0].evidence.reason, /stored attestation carries this row's exact preimage/);
+    // Assert the VERIFICATION, not the prose: a CONFIRMED must carry the
+    // ATTEST_VALID stamp and the kid it verified against.
+    assert.equal(rec.evidence.grants[0].evidence.attest_status, 'ATTEST_VALID');
+    assert.ok(rec.evidence.grants[0].evidence.executor_kid, 'no executor kid on a CONFIRMED');
+    assert.match(rec.evidence.grants[0].evidence.reason, /CRYPTOGRAPHICALLY VERIFIED/);
 
     // CONFIRMED is in the SIGNED bytes, and the proof verdict is still its own.
     const v = verifyProveTranscript(out.token, { publicKey: loadExecutorPub() });

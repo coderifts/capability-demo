@@ -349,6 +349,10 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
     } else {
       try {
         const r = await reconcile({
+          // The executor key manifest. Without it reconcile cannot verify a
+          // stored attestation and every grant is UNVERIFIABLE — which is the
+          // correct fail-closed answer, not an acceptable default.
+          executorKeys: pubFromRegistry().registry,
           adapters: {
             postgres: {
               query: (sql, params) => bootstrap.query(sql, params),

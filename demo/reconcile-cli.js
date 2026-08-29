@@ -30,6 +30,24 @@ const path = require('node:path');
 const { reconcile, OUTCOME, SEVERITY } = require('./src/reconcile');
 const { makePool, bootstrapUrl, configuredDeploymentId } = require('./src/db');
 
+const KEYS_DIR = path.join(__dirname, 'keys');
+
+/**
+ * The executor key manifest reconcile verifies stored attestations against.
+ *
+ * Without it every CONFIRMED becomes INDETERMINATE — a stored token that
+ * nothing checked is not evidence. Returning null on a missing file is the
+ * honest failure: the run then reports UNVERIFIABLE rather than pretending.
+ */
+function executorKeys(file = process.env.CODERIFTS_EXECUTOR_KEYS
+  || path.join(KEYS_DIR, 'executor-keys.json')) {
+  try {
+    return JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
  * Config is MIRRORED, not invented:
  *   · git repo dir   — server.js:62  (CODERIFTS_GIT_REPO_DIR)
@@ -99,6 +117,10 @@ function buildAdapters(doc, { pool } = {}) {
         repoDir: gitRepoDir(),
         refs: g.refs,
         attestationsByJti: g.attestationsByJti || {},
+        // The attestation binds a deployment_id, so verification needs to know
+        // which one to expect. Symmetric with the postgres adapter below; its
+        // absence made every git CONFIRMED fail the binding check against ''.
+        deploymentId: g.deployment_id || configuredDeploymentId(),
       };
     } else {
       skipped.push({ adapter: 'git', reason: 'CODERIFTS_GIT_REPO_DIR is not set' });
@@ -121,7 +143,11 @@ function buildAdapters(doc, { pool } = {}) {
   const h = doc.http;
   if (h && Array.isArray(h.items) && h.items.length > 0) {
     if (httpBaseUrl()) {
-      adapters.http = { readResource: makeReadResource(httpBaseUrl()), items: h.items };
+      adapters.http = {
+        readResource: makeReadResource(httpBaseUrl()),
+        items: h.items,
+        deploymentId: h.deployment_id || configuredDeploymentId(),
+      };
     } else {
       skipped.push({ adapter: 'http', reason: 'CODERIFTS_HTTP_BASE_URL is not set' });
     }
@@ -195,7 +221,14 @@ async function main() {
 
   try {
     const { adapters, skipped } = buildAdapters(doc, { pool });
-    const result = await reconcile({ adapters });
+    const keys = executorKeys();
+    if (!keys) {
+      process.stderr.write(
+        'no executor key manifest found — every grant will report UNVERIFIABLE. '
+        + 'Set CODERIFTS_EXECUTOR_KEYS to its path.\n',
+      );
+    }
+    const result = await reconcile({ adapters, executorKeys: keys });
 
     if (a.json) {
       process.stdout.write(`${JSON.stringify({ ...result, not_examined: skipped }, null, 2)}\n`);

@@ -7,6 +7,7 @@
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const { makePool, migrate, currentDigest, bootstrapUrl, hostUrl, executorUrl, DEFAULT_DEPLOYMENT_ID } = require('../src/db');
@@ -265,6 +266,9 @@ describe('STEP 3b — the attestation is persisted, and only when it binds', () 
 
     const { reconcile } = require('../src/reconcile');
     const out = await reconcile({
+      // Since the P0 fix a CONFIRMED requires a signature that verifies, so a
+      // reconcile with no key manifest reports UNVERIFIABLE, not CONFIRMED.
+      executorKeys: JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8')),
       adapters: {
         postgres: {
           query: (sql, params) => pool.query(sql, params),
@@ -294,6 +298,9 @@ describe('STEP 3b — the attestation is persisted, and only when it binds', () 
 
     const { reconcile } = require('../src/reconcile');
     const out = await reconcile({
+      // Since the P0 fix a CONFIRMED requires a signature that verifies, so a
+      // reconcile with no key manifest reports UNVERIFIABLE, not CONFIRMED.
+      executorKeys: JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8')),
       adapters: {
         postgres: {
           query: (sql, params) => pool.query(sql, params),

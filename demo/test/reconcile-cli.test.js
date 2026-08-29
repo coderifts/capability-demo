@@ -57,6 +57,22 @@ function makeRepo() {
 function runCli(doc, env = {}, json = false) {
   const file = path.join(workDir, `grants-${crypto.randomUUID()}.json`);
   fs.writeFileSync(file, JSON.stringify(doc));
+  // Since the P0 fix reconcile verifies every stored attestation, so the CLI
+  // needs a manifest naming the key these tests actually signed with. Without
+  // it every grant is UNVERIFIABLE — correct, but not what these assert.
+  const keysFile = path.join(workDir, 'executor-keys.json');
+  if (!fs.existsSync(keysFile)) {
+    fs.writeFileSync(keysFile, JSON.stringify({
+      keys: [{
+        kid: 'cli-k1',
+        public_key_pem: executor.privateKey
+          ? crypto.createPublicKey(executor.privateKey).export({ type: 'spki', format: 'pem' })
+          : '',
+        status: 'active',
+        valid_from: '2020-01-01T00:00:00Z',
+      }],
+    }));
+  }
   const res = spawnSync(
     process.execPath,
     [CLI, '--grants', file, ...(json ? ['--json'] : [])],
@@ -66,6 +82,7 @@ function runCli(doc, env = {}, json = false) {
         ...process.env,
         CODERIFTS_GIT_REPO_DIR: '',
         CODERIFTS_HTTP_BASE_URL: '',
+        CODERIFTS_EXECUTOR_KEYS: keysFile,
         ...env,
       },
     },
@@ -99,7 +116,7 @@ describe('reconcile CLI — exit codes', () => {
       operation: 'ff', executor, deploymentId: DEPLOY,
     });
     const { code, out } = runCli(
-      { git: { refs: [REF], attestationsByJti: { [g.jti]: r.attestation } } },
+      { git: { deployment_id: DEPLOY, refs: [REF], attestationsByJti: { [g.jti]: r.attestation } } },
       { CODERIFTS_GIT_REPO_DIR: repoDir },
     );
     assert.equal(code, 0);
@@ -117,7 +134,7 @@ describe('reconcile CLI — exit codes', () => {
     // Delete the consumed-grant claim: absence is not proof it was unconsumed.
     sh(repoDir, ['update-ref', '-d', ledgerRefFor(g.jti)]);
     const { code, out } = runCli(
-      { git: { refs: [REF], attestationsByJti: { [g.jti]: r.attestation } } },
+      { git: { deployment_id: DEPLOY, refs: [REF], attestationsByJti: { [g.jti]: r.attestation } } },
       { CODERIFTS_GIT_REPO_DIR: repoDir },
     );
     assert.notEqual(code, 0);
@@ -136,7 +153,7 @@ describe('reconcile CLI — exit codes', () => {
     const g = grant();
     // git grants are asked for, but CODERIFTS_GIT_REPO_DIR is absent.
     const { code, out, err } = runCli(
-      { git: { refs: [REF], attestationsByJti: { [g.jti]: 'x' } } },
+      { git: { deployment_id: DEPLOY, refs: [REF], attestationsByJti: { [g.jti]: 'x' } } },
       { CODERIFTS_GIT_REPO_DIR: '' },
     );
     assert.equal(code, 2);
@@ -152,7 +169,7 @@ describe('reconcile CLI — exit codes', () => {
       operation: 'ff', executor, deploymentId: DEPLOY,
     });
     const { code, out } = runCli(
-      { git: { refs: [REF], attestationsByJti: { [g.jti]: r.attestation } } },
+      { git: { deployment_id: DEPLOY, refs: [REF], attestationsByJti: { [g.jti]: r.attestation } } },
       { CODERIFTS_GIT_REPO_DIR: repoDir },
       true,
     );
@@ -177,7 +194,7 @@ describe('reconcile CLI — exit 0 means nothing is left to look at', () => {
       operation: 'ff', executor, deploymentId: DEPLOY,
     });
     const { code, out } = runCli(
-      { git: { refs: [REF], attestationsByJti: {} } },
+      { git: { deployment_id: DEPLOY, refs: [REF], attestationsByJti: {} } },
       { CODERIFTS_GIT_REPO_DIR: repoDir },
     );
     assert.equal(out.includes('INDETERMINATE 0'), true, out);
@@ -195,7 +212,7 @@ describe('reconcile CLI — exit 0 means nothing is left to look at', () => {
       operation: 'ff', executor, deploymentId: DEPLOY,
     });
     const { out } = runCli(
-      { git: { refs: [REF], attestationsByJti: {} } },
+      { git: { deployment_id: DEPLOY, refs: [REF], attestationsByJti: {} } },
       { CODERIFTS_GIT_REPO_DIR: repoDir },
     );
     assert.doesNotMatch(out, /^\s+RELEASED\s+git\s+null\s*$/m);
@@ -214,7 +231,7 @@ describe('reconcile CLI — outcomes are carried through verbatim', () => {
     });
     sh(repoDir, ['update-ref', '-d', ledgerRefFor(g.jti)]);
     const { out } = runCli(
-      { git: { refs: [REF], attestationsByJti: { [g.jti]: r.attestation } } },
+      { git: { deployment_id: DEPLOY, refs: [REF], attestationsByJti: { [g.jti]: r.attestation } } },
       { CODERIFTS_GIT_REPO_DIR: repoDir },
       true,
     );

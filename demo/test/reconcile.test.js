@@ -27,11 +27,12 @@ const {
   enforceNoUnprovenConfirmed, OUTCOME,
 } = require('../src/reconcile');
 const { gitAtomicExecute, ledgerRefFor } = require('../src/git-atomic');
+const { encodeAtomicExecutionAttestation, signPreimage } = require('../src/atomic');
 
 const DEPLOY = 'dep-rec-0001';
 const REF = 'refs/heads/target';
 let gitAvailable = false;
-let executor, repoDir, A, B;
+let executor, repoDir, A, B, KEYS, signFor;
 
 const sh = (dir, args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
 
@@ -52,10 +53,32 @@ function makeRepo() {
 
 const grant = () => ({ deployment_id: DEPLOY, jti: `jti-${crypto.randomUUID()}` });
 
+const pg = ({ ledger = [], attestations = [] }) => async (sql, params) => {
+  if (/FROM consumed_grants/.test(sql)) {
+    return { rows: ledger.filter((r) => r.deployment_id === params[0] && r.jti === params[1]) };
+  }
+  return { rows: attestations.filter((r) => r.deployment_id === params[0] && r.grant_jti === params[1]) };
+};
+
+/**
+ * The audit's forged artifact: correct 4-segment shape, correct preimage in
+ * segment 3, the literal string 'sig' where a signature belongs. This is what
+ * `tokenFor` used to mint, and the CONFIRMED tests passed on it.
+ */
+const forgedTokenFor = (preimage) => ['cr.atomic.execution.attestation.v1', 'rec-k1',
+  Buffer.from(preimage, 'utf8').toString('base64url'), 'sig'].join('|');
+
+
 before(() => {
   try { execFileSync('git', ['--version'], { stdio: 'ignore' }); gitAvailable = true; } catch { /* */ }
   const kp = crypto.generateKeyPairSync('ed25519');
   executor = { privateKey: kp.privateKey, kid: 'rec-k1' };
+  // The manifest reconcile verifies against. Real key material, because the
+  // whole point of this fix is that presence is not proof.
+  KEYS = { keys: [{ kid: 'rec-k1', publicKey: kp.publicKey, status: 'active', valid_from: '2020-01-01T00:00:00Z' }] };
+  signFor = (preimage) => encodeAtomicExecutionAttestation({
+    executor_kid: 'rec-k1', preimage, signature: signPreimage(kp.privateKey, preimage),
+  });
 });
 beforeEach(() => {
   if (!gitAvailable) return;
@@ -74,6 +97,7 @@ describe('reconcile — git evidence reader (calls the existing reconcileLedger)
     });
     const out = await reconcileGit({
       repoDir, refs: [REF], attestationsByJti: { [g.jti]: r.attestation },
+      executorKeys: KEYS, deploymentId: DEPLOY,
     });
     const mine = out.find((e) => e.jti === g.jti);
     assert.equal(mine.outcome, OUTCOME.CONFIRMED);
@@ -103,6 +127,7 @@ describe('reconcile — git evidence reader (calls the existing reconcileLedger)
     sh(repoDir, ['update-ref', '-d', ledgerRefFor(g.jti)]);
     const out = await reconcileGit({
       repoDir, refs: [REF], attestationsByJti: { [g.jti]: r.attestation },
+      executorKeys: KEYS, deploymentId: DEPLOY,
     });
     const mine = out.find((e) => e.jti === g.jti);
     assert.equal(mine.outcome, OUTCOME.INDETERMINATE);
@@ -128,23 +153,24 @@ describe('reconcile — git evidence reader (calls the existing reconcileLedger)
 // ── POSTGRES ─────────────────────────────────────────────────────────────────
 describe('reconcile — postgres evidence reader', () => {
   /** A query stub over the two real tables (db.js:52-62, :76-82). */
-  const pg = ({ ledger = [], attestations = [] }) => async (sql, params) => {
-    if (/FROM consumed_grants/.test(sql)) {
-      return { rows: ledger.filter((r) => r.deployment_id === params[0] && r.jti === params[1]) };
-    }
-    return { rows: attestations.filter((r) => r.deployment_id === params[0] && r.grant_jti === params[1]) };
-  };
-  const tokenFor = (preimage) => ['cr.atomic.execution.attestation.v1', 'k1',
-    Buffer.from(preimage, 'utf8').toString('base64url'), 'sig'].join('|');
+  /**
+   * A GENUINELY SIGNED token for these bytes.
+   *
+   * This helper used to put the literal string 'sig' in segment 4 — which is
+   * exactly the audit's forged artifact — and the CONFIRMED tests passed on it.
+   * The test suite was asserting the defect. `forgedTokenFor` below keeps that
+   * shape deliberately, now asserting INDETERMINATE.
+   */
+  const tokenFor = (preimage) => signFor(preimage);
 
   test('consumed + sealed + matching preimage → CONFIRMED', async () => {
-    const pre = 'cr.gate.preimage.v1|j1|dep|sha256:aa|1';
+    const pre = `cr.gate.preimage.v1|j1|${DEPLOY}|sha256:aa|1`;
     const out = await reconcilePostgres({
       query: pg({
         ledger: [{ deployment_id: DEPLOY, jti: 'j1', status: 'sealed', preimage: pre }],
         attestations: [{ deployment_id: DEPLOY, grant_jti: 'j1', token: tokenFor(pre) }],
       }),
-      deploymentId: DEPLOY, jtis: ['j1'],
+      executorKeys: KEYS, deploymentId: DEPLOY, jtis: ['j1'],
     });
     assert.equal(out[0].outcome, OUTCOME.CONFIRMED);
   });
@@ -155,7 +181,7 @@ describe('reconcile — postgres evidence reader', () => {
         ledger: [{ deployment_id: DEPLOY, jti: 'j2', status: 'consumed', preimage: 'p' }],
         attestations: [],
       }),
-      deploymentId: DEPLOY, jtis: ['j2'],
+      executorKeys: KEYS, deploymentId: DEPLOY, jtis: ['j2'],
     });
     assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
     assert.match(out[0].evidence.reason, /no stored attestation/);
@@ -175,7 +201,7 @@ describe('reconcile — postgres evidence reader', () => {
         ledger: [{ deployment_id: DEPLOY, jti: 'j4', status: 'sealed', preimage: 'mine' }],
         attestations: [{ deployment_id: DEPLOY, grant_jti: 'j4', token: tokenFor('someone-elses') }],
       }),
-      deploymentId: DEPLOY, jtis: ['j4'],
+      executorKeys: KEYS, deploymentId: DEPLOY, jtis: ['j4'],
     });
     assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
     assert.match(out[0].evidence.reason, /contradicts itself/);
@@ -185,17 +211,21 @@ describe('reconcile — postgres evidence reader', () => {
 // ── HTTP ─────────────────────────────────────────────────────────────────────
 describe('reconcile — http evidence reader (the honest ceiling)', () => {
   const origin = (map) => async (p) => (map[p] ? map[p] : { ok: false, error: 'not_found' });
+  /** A real attestation for this jti — 'tok' was the forged shape. */
+  const att = (jti) => signFor(`cr.gate.preimage.v1|${jti}|${DEPLOY}|sha256:aa|/a`);
 
   test('origin proves the representation + sealed → CONFIRMED', async () => {
     const out = await reconcileHttp({
+      executorKeys: KEYS, deploymentId: DEPLOY,
       readResource: origin({ '/a': { ok: true, etag: 'W/"v2"' } }),
-      items: [{ jti: 'h1', resourcePath: '/a', expectedEtag: 'W/"v2"', attestation: 'tok' }],
+      items: [{ jti: 'h1', resourcePath: '/a', expectedEtag: 'W/"v2"', attestation: att('h1') }],
     });
     assert.equal(out[0].outcome, OUTCOME.CONFIRMED);
   });
 
   test('mutation landed, NO seal → INDETERMINATE (the window HTTP cannot close)', async () => {
     const out = await reconcileHttp({
+      executorKeys: KEYS, deploymentId: DEPLOY,
       readResource: origin({ '/a': { ok: true, etag: 'W/"v2"' } }),
       items: [{ jti: 'h2', resourcePath: '/a', expectedEtag: 'W/"v2"', attestation: null }],
     });
@@ -205,8 +235,9 @@ describe('reconcile — http evidence reader (the honest ceiling)', () => {
 
   test('origin cannot answer → INDETERMINATE, never inferred either way', async () => {
     const out = await reconcileHttp({
+      executorKeys: KEYS, deploymentId: DEPLOY,
       readResource: async () => { throw new Error('ECONNREFUSED'); },
-      items: [{ jti: 'h3', resourcePath: '/a', expectedEtag: 'W/"v2"', attestation: 'tok' }],
+      items: [{ jti: 'h3', resourcePath: '/a', expectedEtag: 'W/"v2"', attestation: att('h3') }],
     });
     assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
     assert.match(out[0].evidence.reason, /not evidence the mutation did or did not happen/);
@@ -214,6 +245,7 @@ describe('reconcile — http evidence reader (the honest ceiling)', () => {
 
   test('origin shows it did NOT land and no attestation → REJECTED', async () => {
     const out = await reconcileHttp({
+      executorKeys: KEYS, deploymentId: DEPLOY,
       readResource: origin({ '/a': { ok: true, etag: 'W/"v1"' } }),
       items: [{ jti: 'h4', resourcePath: '/a', expectedEtag: 'W/"v2"', attestation: null }],
     });
@@ -222,8 +254,9 @@ describe('reconcile — http evidence reader (the honest ceiling)', () => {
 
   test('origin says not-landed but an attestation exists → INDETERMINATE (contradiction)', async () => {
     const out = await reconcileHttp({
+      executorKeys: KEYS, deploymentId: DEPLOY,
       readResource: origin({ '/a': { ok: true, etag: 'W/"v1"' } }),
-      items: [{ jti: 'h5', resourcePath: '/a', expectedEtag: 'W/"v2"', attestation: 'tok' }],
+      items: [{ jti: 'h5', resourcePath: '/a', expectedEtag: 'W/"v2"', attestation: att('h5') }],
     });
     assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
     assert.match(out[0].evidence.reason, /contradicts itself/);
@@ -231,8 +264,9 @@ describe('reconcile — http evidence reader (the honest ceiling)', () => {
 
   test('nothing to compare against → INDETERMINATE, not CONFIRMED', async () => {
     const out = await reconcileHttp({
+      executorKeys: KEYS, deploymentId: DEPLOY,
       readResource: origin({ '/a': { ok: true, etag: 'W/"v9"' } }),
-      items: [{ jti: 'h6', resourcePath: '/a', attestation: 'tok' }],
+      items: [{ jti: 'h6', resourcePath: '/a', attestation: att('h6') }],
     });
     assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
   });
@@ -245,7 +279,7 @@ describe('reconcile — CONFIRMED never appears without proof', () => {
     const fixed = enforceNoUnprovenConfirmed(rogue, () => false);
     assert.equal(fixed[0].outcome, OUTCOME.INDETERMINATE);
     assert.equal(fixed[0].evidence.downgraded_from, OUTCOME.CONFIRMED);
-    assert.match(fixed[0].evidence.reason, /never confirms without proof/);
+    assert.match(fixed[0].evidence.reason, /never confirms without a signature that verifies/);
   });
 
   test('ACROSS ALL THREE: no consumed-but-unattested grant is CONFIRMED', async (t) => {
@@ -262,7 +296,7 @@ describe('reconcile — CONFIRMED never appears without proof', () => {
           query: async (sql, p) => (/consumed_grants/.test(sql)
             ? { rows: [{ deployment_id: p[0], jti: p[1], status: 'consumed', preimage: 'p' }] }
             : { rows: [] }),                                            // consumed, unattested
-          deploymentId: DEPLOY, jtis: ['pg-1'],
+          executorKeys: KEYS, deploymentId: DEPLOY, jtis: ['pg-1'],
         },
         http: {
           readResource: async () => ({ ok: true, etag: 'W/"v2"' }),
@@ -284,12 +318,239 @@ describe('reconcile — CONFIRMED never appears without proof', () => {
       adapters: {
         postgres: {
           query: async (sql, p) => (/consumed_grants/.test(sql) ? { rows: [] } : { rows: [] }),
-          deploymentId: DEPLOY, jtis: ['a', 'b'],                       // both REJECTED
+          executorKeys: KEYS, deploymentId: DEPLOY, jtis: ['a', 'b'],                       // both REJECTED
         },
       },
     });
     assert.equal(r.counts[OUTCOME.REJECTED], 2);
     assert.equal(r.outcome, OUTCOME.REJECTED);
     assert.equal(r.counts[OUTCOME.CONFIRMED], 0);
+  });
+});
+
+// ── AUDIT P0: CONFIRMED USED TO REST ON PRESENCE ─────────────────────────────
+/**
+ * The 2026-08-29 audit reproduced, with a key, that reconcile returned CONFIRMED
+ * for a FORGED attestation. The cause was that every adapter's CONFIRMED tested
+ * PRESENCE — git `attestationsByJti[jti]` truthy, postgres
+ * `split('|').length === 4`, http `attestation` truthy — while the module header
+ * promised "NEVER CONFIRMED without a verified sealed attestation".
+ *
+ * These are the audit's exact reproductions, kept as tests so the claim and the
+ * code cannot drift apart again. Each one CONFIRMED before the fix.
+ */
+describe('reconcile — AUDIT P0: a forged attestation never confirms', () => {
+  const origin2 = () => async () => ({ ok: true, etag: 'W/"v2"' });
+
+  test('AUDIT CASE 1 — http attestation:"not-a-token" → INDETERMINATE', async () => {
+    const out = await reconcileHttp({
+      executorKeys: KEYS,
+      deploymentId: DEPLOY,
+      readResource: origin2(),
+      items: [{ jti: 'a1', resourcePath: '/a', expectedEtag: 'W/"v2"', attestation: 'not-a-token' }],
+    });
+    assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
+    assert.notEqual(out[0].outcome, OUTCOME.CONFIRMED);
+    assert.equal(out[0].evidence.attest_status, 'ATTEST_MALFORMED');
+  });
+
+  test('AUDIT CASE 2 — postgres 4-part token with a bad signature → INDETERMINATE', async () => {
+    const pre = `cr.gate.preimage.v1|a2|${DEPLOY}|sha256:aa|1`;
+    const out = await reconcilePostgres({
+      query: pg({
+        ledger: [{ deployment_id: DEPLOY, jti: 'a2', status: 'sealed', preimage: pre }],
+        // Correct shape, correct preimage in segment 3, garbage signature.
+        attestations: [{ deployment_id: DEPLOY, grant_jti: 'a2', token: forgedTokenFor(pre) }],
+      }),
+      executorKeys: KEYS,
+      deploymentId: DEPLOY,
+      jtis: ['a2'],
+    });
+    assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
+    assert.equal(out[0].evidence.attest_status, 'ATTEST_INVALID_SIGNATURE');
+    assert.match(out[0].evidence.reason, /did not verify/);
+  });
+
+  test('git: a truthy non-token in attestationsByJti → INDETERMINATE', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'ff', executor, deploymentId: DEPLOY,
+    });
+    // The old reader asked only whether a value existed for this jti.
+    const out = await reconcileGit({
+      repoDir, refs: [REF], attestationsByJti: { [g.jti]: 'yes-i-promise' },
+      executorKeys: KEYS, deploymentId: DEPLOY,
+    });
+    const mine = out.find((e) => e.jti === g.jti);
+    assert.equal(mine.outcome, OUTCOME.INDETERMINATE);
+  });
+
+  test('the happy path still works: a genuine signature → CONFIRMED', async () => {
+    const pre = `cr.gate.preimage.v1|a3|${DEPLOY}|sha256:aa|1`;
+    const out = await reconcilePostgres({
+      query: pg({
+        ledger: [{ deployment_id: DEPLOY, jti: 'a3', status: 'sealed', preimage: pre }],
+        attestations: [{ deployment_id: DEPLOY, grant_jti: 'a3', token: signFor(pre) }],
+      }),
+      executorKeys: KEYS,
+      deploymentId: DEPLOY,
+      jtis: ['a3'],
+    });
+    assert.equal(out[0].outcome, OUTCOME.CONFIRMED);
+    assert.equal(out[0].evidence.attest_status, 'ATTEST_VALID');
+    assert.equal(out[0].evidence.executor_kid, 'rec-k1');
+  });
+});
+
+// ── BINDING ──────────────────────────────────────────────────────────────────
+/**
+ * A valid signature over SOME preimage is not evidence about THIS grant. The
+ * verifier enforces the binding via `intended.grant`; these pin that reconcile
+ * actually passes it, and name what the preimage does not carry.
+ */
+describe('reconcile — a CONFIRMED is bound to THIS grant', () => {
+  test('a genuinely signed attestation for a DIFFERENT jti → INDETERMINATE', async () => {
+    // Signed correctly, but over another grant's bytes — and stored against the
+    // ledger row for j-target, which the preimage check alone would let pass if
+    // the row's preimage were the same bytes.
+    const other = `cr.gate.preimage.v1|SOMEONE-ELSE|${DEPLOY}|sha256:aa|1`;
+    const out = await reconcilePostgres({
+      query: pg({
+        ledger: [{ deployment_id: DEPLOY, jti: 'b1', status: 'sealed', preimage: other }],
+        attestations: [{ deployment_id: DEPLOY, grant_jti: 'b1', token: signFor(other) }],
+      }),
+      executorKeys: KEYS,
+      deploymentId: DEPLOY,
+      jtis: ['b1'],
+    });
+    assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
+    assert.equal(out[0].evidence.attest_status, 'ATTEST_UNBOUND');
+    assert.match(out[0].evidence.reason, /grant_jti_mismatch/);
+  });
+
+  test('a genuinely signed attestation for a DIFFERENT deployment → INDETERMINATE', async () => {
+    const pre = 'cr.gate.preimage.v1|b2|SOME-OTHER-DEPLOYMENT|sha256:aa|1';
+    const out = await reconcilePostgres({
+      query: pg({
+        ledger: [{ deployment_id: DEPLOY, jti: 'b2', status: 'sealed', preimage: pre }],
+        attestations: [{ deployment_id: DEPLOY, grant_jti: 'b2', token: signFor(pre) }],
+      }),
+      executorKeys: KEYS,
+      deploymentId: DEPLOY,
+      jtis: ['b2'],
+    });
+    assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
+    assert.equal(out[0].evidence.attest_status, 'ATTEST_UNBOUND');
+    assert.match(out[0].evidence.reason, /deployment_id_mismatch/);
+  });
+
+  test('a signature from a key that is not in the manifest → INDETERMINATE', async () => {
+    const stranger = crypto.generateKeyPairSync('ed25519');
+    const pre = `cr.gate.preimage.v1|b3|${DEPLOY}|sha256:aa|1`;
+    const token = encodeAtomicExecutionAttestation({
+      executor_kid: 'not-in-the-manifest',
+      preimage: pre,
+      signature: signPreimage(stranger.privateKey, pre),
+    });
+    const out = await reconcilePostgres({
+      query: pg({
+        ledger: [{ deployment_id: DEPLOY, jti: 'b3', status: 'sealed', preimage: pre }],
+        attestations: [{ deployment_id: DEPLOY, grant_jti: 'b3', token }],
+      }),
+      executorKeys: KEYS,
+      deploymentId: DEPLOY,
+      jtis: ['b3'],
+    });
+    assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
+    assert.equal(out[0].evidence.attest_status, 'UNKNOWN_KID');
+  });
+});
+
+// ── KEY LIFECYCLE ────────────────────────────────────────────────────────────
+describe('reconcile — the key lifecycle gates CONFIRMED', () => {
+  const withStatus = (over) => ({ keys: [{ ...KEYS.keys[0], ...over }] });
+  const pgFor = (jti, pre) => pg({
+    ledger: [{ deployment_id: DEPLOY, jti, status: 'sealed', preimage: pre }],
+    attestations: [{ deployment_id: DEPLOY, grant_jti: jti, token: signFor(pre) }],
+  });
+  const run = (jti, keys, asOf) => {
+    const pre = `cr.gate.preimage.v1|${jti}|${DEPLOY}|sha256:aa|1`;
+    return reconcilePostgres({
+      query: pgFor(jti, pre), executorKeys: keys, deploymentId: DEPLOY, jtis: [jti], asOf,
+    });
+  };
+
+  test('a retired key INSIDE its window still confirms — rotation is not retroactive', async () => {
+    const keys = withStatus({
+      status: 'retired', valid_from: '2020-01-01T00:00:00Z', retired_at: '2030-01-01T00:00:00Z',
+    });
+    const out = await run('c1', keys, '2026-01-01T00:00:00Z');
+    assert.equal(out[0].outcome, OUTCOME.CONFIRMED);
+  });
+
+  test('a retired key OUTSIDE its window → INDETERMINATE', async () => {
+    const keys = withStatus({
+      status: 'retired', valid_from: '2020-01-01T00:00:00Z', retired_at: '2021-01-01T00:00:00Z',
+    });
+    const out = await run('c2', keys, '2026-01-01T00:00:00Z');
+    assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
+    assert.equal(out[0].evidence.attest_status, 'KEY_NOT_IN_FORCE');
+    assert.match(out[0].evidence.reason, /outside_key_window/);
+  });
+
+  test('ANY status that is not active or in-window retired → INDETERMINATE (fail closed)', async () => {
+    // The shipped manifest documents only active|retired. A manifest that later
+    // grows `revoked` is already refused rather than silently trusted — the
+    // check is an allowlist, not a denylist of the statuses we thought of.
+    for (const status of ['revoked', 'compromised', 'suspended', '', 'ACTIVE']) {
+      const out = await run(`c-${status || 'empty'}`, withStatus({ status }));
+      assert.equal(out[0].outcome, OUTCOME.INDETERMINATE, `status ${JSON.stringify(status)} confirmed`);
+      assert.equal(out[0].evidence.attest_status, 'KEY_NOT_IN_FORCE');
+    }
+  });
+
+  test('NO key manifest at all → INDETERMINATE, never CONFIRMED', async () => {
+    const out = await run('c4', null);
+    assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
+    assert.equal(out[0].evidence.attest_status, 'NO_KEY_MATERIAL');
+    assert.match(out[0].evidence.reason, /UNVERIFIABLE rather than acceptable/);
+  });
+});
+
+// ── THE INVARIANT CATCHES A FORGED CONFIRMED ─────────────────────────────────
+describe('reconcile — enforceNoUnprovenConfirmed catches an unverified CONFIRMED', () => {
+  test('a CONFIRMED with no attest_status stamp is downgraded', () => {
+    const forged = [{
+      adapter: 'postgres',
+      jti: 'z1',
+      outcome: OUTCOME.CONFIRMED,
+      evidence: { status: 'sealed', reason: 'looks convincing' },
+    }];
+    const out = enforceNoUnprovenConfirmed(forged, () => true);
+    assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
+    assert.equal(out[0].evidence.downgraded_from, OUTCOME.CONFIRMED);
+    assert.match(out[0].evidence.reason, /CRYPTOGRAPHICALLY VERIFIED/);
+  });
+
+  test('a caller predicate cannot WEAKEN the universal check', () => {
+    // A caller that says "trust me" still does not get a CONFIRMED through.
+    const forged = [{
+      adapter: 'http', jti: 'z2', outcome: OUTCOME.CONFIRMED, evidence: { attest_status: 'NOPE' },
+    }];
+    assert.equal(enforceNoUnprovenConfirmed(forged, () => true)[0].outcome, OUTCOME.INDETERMINATE);
+    // …and a verified one still passes.
+    const real = [{
+      adapter: 'http', jti: 'z3', outcome: OUTCOME.CONFIRMED, evidence: { attest_status: 'ATTEST_VALID' },
+    }];
+    assert.equal(enforceNoUnprovenConfirmed(real, () => true)[0].outcome, OUTCOME.CONFIRMED);
+  });
+
+  test('a caller predicate can still TIGHTEN it', () => {
+    const real = [{
+      adapter: 'http', jti: 'z4', outcome: OUTCOME.CONFIRMED, evidence: { attest_status: 'ATTEST_VALID' },
+    }];
+    assert.equal(enforceNoUnprovenConfirmed(real, () => false)[0].outcome, OUTCOME.INDETERMINATE);
   });
 });
