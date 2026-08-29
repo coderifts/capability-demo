@@ -29,6 +29,7 @@ const {
 const { atomicExecute } = require('./atomic');
 const { gitAtomicExecute, GIT_PROFILE } = require('./git-atomic');
 const { httpAtomicExecute, HTTP_PROFILE } = require('./http-atomic');
+const { defaultMetrics, METRICS_HONESTY } = require('./metrics');
 
 const KEYS_DIR = process.env.CODERIFTS_KEYS_DIR || path.join(__dirname, '..', 'keys');
 const KEYS_FILE = process.env.CODERIFTS_KEYS_FILE || path.join(KEYS_DIR, 'coderifts-keys.json');
@@ -63,6 +64,7 @@ function buildApp({
   // http.exclusive origin. SERVER-CONFIGURED, never taken from the request: a
   // client-supplied base URL would let a grant for one origin mutate another.
   httpBaseUrl = process.env.CODERIFTS_HTTP_BASE_URL || null,
+  metrics = defaultMetrics,
 } = {}) {
   const app = express();
   const executor = loadExecutor();
@@ -140,6 +142,14 @@ function buildApp({
     ],
   }));
 
+  // Operational counters. NOT cryptographic evidence; NOT authenticated in this demo.
+  app.get('/metrics', (_q, r) => r.json({
+    counters: metrics.snapshot(),
+    honesty: METRICS_HONESTY,
+    authenticated: false,
+    note: 'not authenticated in the demo — operator concern for production; missing telemetry is UNKNOWN, not "it didn\'t happen"',
+  }));
+
   app.get('/articles/count', async (_q, r) => {
     const x = await pool.query('SELECT count(*)::int AS n FROM articles');
     r.json({ count: x.rows[0].n });
@@ -168,6 +178,9 @@ function buildApp({
     const payload = req.coderifts.payload;
     const profile = grantProfile(payload);
     const targetId = targetOf(req);
+    // ONE metrics hook: filled here, emitted in finally. Observability never
+    // changes the response and never throws into the request path.
+    let observed = { profile, thrown: false };
 
     try {
       // STRICT, not merely anti-BEARER. `grantProfile` returns only ATOMIC|BEARER
@@ -178,10 +191,18 @@ function buildApp({
         // Closed: a grant with no state_nonce used to mutate with no ledger and no
         // attestation — a second, unguarded data plane. Refuse; never take a client
         // from the pool. ATOMIC is the only write path (atomic.js).
+        observed = {
+          profile,
+          thrown: false,
+          out: {
+            ok: false,
+            status: profile === 'BEARER' ? 'BEARER_NOT_PERMITTED' : 'PROFILE_NOT_PERMITTED',
+          },
+        };
         return res.status(403).json({
           error: 'execution_refused',
           profile,
-          status: profile === 'BEARER' ? 'BEARER_NOT_PERMITTED' : 'PROFILE_NOT_PERMITTED',
+          status: observed.out.status,
           reason: profile === 'BEARER'
             ? 'execution_grant_bearer_unsupported'
             : 'execution_grant_profile_unsupported',
@@ -200,6 +221,12 @@ function buildApp({
           title: req.body && req.body.title,
           body: req.body && req.body.body,
         });
+      observed = {
+        profile,
+        thrown: false,
+        out,
+        enforcementProfile: out && out.row && out.row.profile,
+      };
       if (!out.ok) {
         return res.status(out.http).json({
           error: 'execution_refused', profile, status: out.status, reason: out.reason,
@@ -221,7 +248,14 @@ function buildApp({
         authorized_by: { jti: payload.jti, operation: payload.operation, state_nonce: payload.state_nonce },
       });
     } catch (err) {
+      observed = { profile, thrown: true };
       return next(err);
+    } finally {
+      try {
+        metrics.observeHandle({ ...observed, deploymentId: deployment_id });
+      } catch (_) {
+        // a counter error must not fail a mutation
+      }
     }
   };
 
