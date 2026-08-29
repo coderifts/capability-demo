@@ -135,6 +135,126 @@ ALTER FUNCTION cr_forbid_commit_unsigned() OWNER TO cr_owner;
 REVOKE ALL ON FUNCTION cr_forbid_commit_unsigned() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION cr_forbid_commit_unsigned() TO cr_owner, cr_executor;
 
+-- ─────────────────────────────────────────────────────────────────────────────
+-- STEP 3b — persist the attestation the process just signed.
+--
+-- WHY A FUNCTION AND NOT AN INSERT. `attestations` is owner-only on purpose:
+-- gate.sql REVOKEs ALL from cr_executor and the posture drift baseline pins
+-- cr_executor's privileges on it as the empty set. Granting INSERT to make the
+-- executor write directly would hand it an unguarded write into the evidence
+-- table AND fail the drift baseline. SECURITY DEFINER keeps the table ACL
+-- exactly as pinned while letting the sealed transaction record its evidence.
+--
+-- WHY NOT AN EXTRA cap_seal PARAMETER. posture.js pins cap_seal's argument
+-- identity verbatim; a fifth parameter would read as drift.
+--
+-- WHAT IT REFUSES. The token must carry THIS row's exact preimage and THIS
+-- row's sealed signature. That is the same binding reconcilePostgres verifies
+-- when it reads the row back — the writer enforces what the reader checks, so
+-- a token that would reconcile INDETERMINATE can never be stored as evidence.
+-- Without that check this function would be the arbitrary-write primitive the
+-- REVOKE exists to prevent.
+--
+-- Called BEFORE COMMIT, inside the consuming transaction: a committed consume
+-- therefore always has its attestation, and the recovery reader has no window
+-- in which a sealed row lacks stored evidence.
+DROP FUNCTION IF EXISTS cap_persist_attestation(text, text, text);
+
+CREATE OR REPLACE FUNCTION cap_persist_attestation(
+  p_deployment_id text,
+  p_jti           text,
+  p_token         text
+) RETURNS TABLE (
+  ok      boolean,
+  status  text
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, pg_temp
+AS $$
+DECLARE
+  g                 RECORD;
+  expected_segment  text;
+BEGIN
+  IF p_deployment_id IS NULL OR p_deployment_id = '' THEN
+    RAISE EXCEPTION 'cap_persist_attestation: missing_deployment_id'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF p_jti IS NULL OR p_jti = '' THEN
+    RAISE EXCEPTION 'cap_persist_attestation: missing_jti'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF p_token IS NULL OR p_token = '' THEN
+    RAISE EXCEPTION 'cap_persist_attestation: missing_token'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  SELECT cg.jti, cg.status, cg.preimage, cg.attestation_ref
+    INTO g
+    FROM public.consumed_grants cg
+   WHERE cg.deployment_id = p_deployment_id AND cg.jti = p_jti
+     FOR UPDATE;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'cap_persist_attestation: unknown_jti'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- Evidence is recorded for a SEALED row only. An unsigned row has nothing
+  -- to be evidence of, and cap_seal is what puts attestation_ref there.
+  IF g.status IS DISTINCT FROM 'sealed' OR g.attestation_ref IS NULL THEN
+    RAISE EXCEPTION 'cap_persist_attestation: not_sealed (status=%)', g.status
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- Exactly four pipe segments, the atomic-execution tag first. A fifth
+  -- segment means the caller is not handing us the artifact it claims to be.
+  IF split_part(p_token, '|', 1) <> 'cr.atomic.execution.attestation.v1'
+     OR split_part(p_token, '|', 4) = ''
+     OR split_part(p_token, '|', 5) <> '' THEN
+    RAISE EXCEPTION 'cap_persist_attestation: malformed_token'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- Segment 3 must be base64url of THIS row's persisted preimage. Encoding
+  -- forward (rather than decoding the caller's bytes) means a token over any
+  -- other preimage simply fails to match.
+  expected_segment := translate(
+    replace(replace(encode(convert_to(g.preimage, 'UTF8'), 'base64'), chr(10), ''), '=', ''),
+    '+/', '-_');
+  IF split_part(p_token, '|', 3) IS DISTINCT FROM expected_segment THEN
+    RAISE EXCEPTION 'cap_persist_attestation: foreign_preimage'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- Segment 4 must be the signature cap_seal bound to this row. A valid
+  -- artifact for a DIFFERENT execution is still not evidence for this one.
+  IF split_part(p_token, '|', 4) IS DISTINCT FROM g.attestation_ref THEN
+    RAISE EXCEPTION 'cap_persist_attestation: signature_mismatch'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- One row per grant. reconcilePostgres reads the first row it finds; two
+  -- rows for one jti would make which evidence it reads an accident.
+  IF EXISTS (SELECT 1 FROM public.attestations a
+              WHERE a.deployment_id = p_deployment_id AND a.grant_jti = p_jti) THEN
+    RAISE EXCEPTION 'cap_persist_attestation: already_persisted'
+      USING ERRCODE = 'check_violation';
+  END IF;
+
+  INSERT INTO public.attestations (deployment_id, grant_jti, token)
+  VALUES (p_deployment_id, p_jti, p_token);
+
+  ok := true;
+  status := 'PERSISTED';
+  RETURN NEXT;
+END;
+$$;
+
+ALTER FUNCTION cap_persist_attestation(text, text, text) OWNER TO cr_owner;
+REVOKE ALL ON FUNCTION cap_persist_attestation(text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION cap_persist_attestation(text, text, text) TO cr_executor;
+
 -- Constraint triggers must be owned by the table owner (cr_owner).
 -- migrate() RESET ROLE in finally so a failed SET ROLE cannot poison the pool.
 SET ROLE cr_owner;

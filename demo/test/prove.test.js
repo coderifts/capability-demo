@@ -83,14 +83,15 @@ describe('STEP 6 — prove transcript', () => {
  * The RECOVERY section is signed alongside the proof, never instead of it, and
  * an INDETERMINATE recovery is a true outcome rather than a proof failure.
  *
- * MEASURED, and the reason the INDETERMINATE case needs no sabotage: the demo's
- * postgres write path returns its attestation over HTTP and never persists it
- * into `attestations`. reconcilePostgres therefore cannot bind signed evidence
- * to the sealed ledger row, and honestly reports INDETERMINATE. That gap is the
- * finding, not a defect in these tests — see the CONFIRMED test below, which
- * persists the attestation itself and shows the same grant then reconciles
- * CONFIRMED. Together they prove the section reports the state it reads rather
- * than a constant.
+ * CLOSED (1171-s5): the earlier gap — the pg path returned its attestation over
+ * HTTP but never persisted it, so a clean run reconciled INDETERMINATE — is
+ * closed. atomic.js now persists the server's own signed artifact through
+ * cap_persist_attestation INSIDE the consuming transaction, so a clean run
+ * reconciles CONFIRMED.
+ *
+ * The honesty case is kept by DELETING the persisted row: absence of evidence
+ * must still read as doubt, never as a pass. The two tests together prove the
+ * section reports the state it reads rather than a constant in either direction.
  */
 describe('STEP 6 — RECOVERY section', () => {
   test('RECOVERY is present, signed, and carries the recovery vocabulary', async (t) => {
@@ -112,54 +113,42 @@ describe('STEP 6 — RECOVERY section', () => {
     assert.deepEqual(signed.evidence, rec.evidence, 'signed evidence differs from reported evidence');
   });
 
-  test('an INDETERMINATE recovery is signed, visible, and does NOT fail the proof', async (t) => {
+  test('a clean run now reconciles the grant it executed as CONFIRMED', async (t) => {
     if (guard(t)) return;
     const out = await runProve({ silent: true });
     const rec = out.sections.find((s) => s.id === 'recovery');
-    assert.equal(rec.verdict, 'INDETERMINATE');
-    assert.ok(rec.evidence.needs_attention >= 1);
+    assert.equal(rec.verdict, 'CONFIRMED', JSON.stringify(rec.evidence));
+    assert.equal(rec.evidence.needs_attention, 0);
+    assert.ok(rec.evidence.grants.length >= 1, 'recovery examined no grant');
+    assert.ok(rec.evidence.grants.every((g) => g.outcome === 'CONFIRMED'));
+    assert.match(rec.evidence.grants[0].evidence.reason, /stored attestation carries this row's exact preimage/);
 
-    // The proof verdict is unaffected: recovery never decides it.
-    assert.equal(out.ok, true, out.transcript);
-    const proof = out.sections.filter((s) => s.kind !== 'recovery');
-    assert.equal(proof.length, 6);
-    assert.ok(proof.every((s) => s.verdict === 'PASS'));
-
-    // The transcript still verifies WITH the INDETERMINATE in the signed bytes.
+    // CONFIRMED is in the SIGNED bytes, and the proof verdict is still its own.
     const v = verifyProveTranscript(out.token, { publicKey: loadExecutorPub() });
     assert.equal(v.valid, true);
-    assert.equal(v.payload.verdict, 'PASS');
-    const signed = v.payload.sections.find((s) => s.id === 'recovery');
-    assert.equal(signed.verdict, 'INDETERMINATE');
-
-    // CARRY-THROUGH: no grant reconciled INDETERMINATE may appear as CONFIRMED.
-    assert.equal(signed.evidence.counts.CONFIRMED, 0);
-    assert.equal(signed.evidence.grants.filter((g) => g.outcome === 'CONFIRMED').length, 0);
-    assert.ok(signed.evidence.grants.some((g) => g.outcome === 'INDETERMINATE'));
-
-    // And it is VISIBLE, not merely signed.
-    assert.match(out.transcript, /── \(R\) RECOVERY ──/);
-    assert.match(out.transcript, /INDETERMINATE\s+postgres/);
-    assert.match(out.transcript, /outcome=INDETERMINATE/);
+    assert.equal(v.payload.sections.find((s) => s.id === 'recovery').verdict, 'CONFIRMED');
+    assert.equal(out.ok, true, out.transcript);
+    assert.match(out.transcript, /outcome=CONFIRMED/);
   });
 
-  test('with the attestation persisted, the SAME grant reconciles CONFIRMED', async (t) => {
+  test('with the attestation absent, the SAME grant is INDETERMINATE — and that is signed, visible, and does NOT fail the proof', async (t) => {
     if (guard(t)) return;
     const out = await runProve({ silent: true });
     const auth = out.sections.find((s) => s.id === 'authorized');
-    assert.ok(auth.evidence.jti && auth.evidence.attestation, 'prove exercised no attested grant');
-    assert.equal(out.sections.find((s) => s.id === 'recovery').verdict, 'INDETERMINATE');
+    assert.ok(auth.evidence.jti, 'prove exercised no grant');
+    assert.equal(out.sections.find((s) => s.id === 'recovery').verdict, 'CONFIRMED');
 
     const pool = makePool(bootstrapUrl());
     try {
-      // Persist the attestation prove already returned — the step the demo's
-      // postgres path does not take. Nothing is fabricated: this is the token
-      // the server signed, stored against the row it belongs to.
+      // Delete the persisted evidence, leaving the sealed ledger row. This is
+      // the honesty case: absence of evidence is doubt, never a pass.
       const dep = JSON.parse(out.preimage).deployment_id;
-      await pool.query(
-        'INSERT INTO attestations (deployment_id, grant_jti, token) VALUES ($1,$2,$3)',
-        [dep, auth.evidence.jti, auth.evidence.attestation],
+      const del = await pool.query(
+        'DELETE FROM attestations WHERE deployment_id=$1 AND grant_jti=$2',
+        [dep, auth.evidence.jti],
       );
+      assert.equal(del.rowCount, 1, 'nothing was persisted to delete — the loop is not closed');
+
       const { reconcile } = require('../src/reconcile');
       const r = await reconcile({
         adapters: {
@@ -170,10 +159,18 @@ describe('STEP 6 — RECOVERY section', () => {
           },
         },
       });
-      assert.equal(r.outcome, 'CONFIRMED', JSON.stringify(r.grants));
-      assert.equal(r.needs_attention, 0);
+      assert.equal(r.outcome, 'INDETERMINATE', JSON.stringify(r.grants));
+      assert.equal(r.needs_attention, 1);
+      assert.equal(r.counts.CONFIRMED, 0);
+      assert.match(r.grants[0].evidence.reason, /consumed with no stored attestation/);
     } finally {
       try { await pool.end(); } catch { /* */ }
     }
+
+    // And when a run DOES reconcile INDETERMINATE, it stays a signed fact
+    // rather than a proof failure — the property the recovery slice added.
+    const proof = out.sections.filter((s) => s.kind !== 'recovery');
+    assert.equal(proof.length, 6);
+    assert.ok(proof.every((s) => s.verdict === 'PASS'));
   });
 });

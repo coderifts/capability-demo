@@ -209,3 +209,170 @@ describe('state-drift CAS', () => {
     } finally { client.release(); }
   });
 });
+
+// ── ATTESTATION PERSISTENCE (roadmap 1171-s5) ────────────────────────────────
+/**
+ * The pg path used to RETURN its attestation and never store it, so
+ * reconcilePostgres could not bind signed evidence to the sealed row and
+ * honestly reported INDETERMINATE. atomic.js now persists the server's own
+ * artifact through cap_persist_attestation, inside the consuming transaction.
+ *
+ * cap_persist_attestation is a SECURITY DEFINER function precisely so the
+ * `attestations` ACL stays owner-only. These tests therefore also pin what it
+ * REFUSES: without those refusals it would be exactly the arbitrary write into
+ * the evidence table that the REVOKE exists to prevent.
+ */
+describe('STEP 3b — the attestation is persisted, and only when it binds', () => {
+  test('a clean ATOMIC execute persists the returned attestation verbatim', async (t) => {
+    if (guard(t)) return;
+    const title = `persist-${Date.now()}`;
+    const body = JSON.stringify({ title, body: 'legit' });
+    const ch = await challenge('');
+    const g = mkGrant({ operation: 'publish', target_id: '', body, state_nonce: ch.state_nonce });
+    const r = await req('POST', '/articles', { body, grant: g });
+    assert.equal(r.code, 201, JSON.stringify(r.json));
+    const jti = JSON.parse(Buffer.from(g.split('.')[0], 'base64url')).jti;
+
+    const stored = await pool.query(
+      'SELECT token FROM attestations WHERE deployment_id=$1 AND grant_jti=$2',
+      [DEFAULT_DEPLOYMENT_ID, jti],
+    );
+    assert.equal(stored.rowCount, 1, 'the attestation was not persisted');
+    // The wire contract is unchanged AND is the same bytes that were stored.
+    assert.equal(stored.rows[0].token, r.json.attestation);
+
+    // The stored token carries the ledger row's exact preimage — the binding
+    // reconcilePostgres verifies.
+    const led = await pool.query(
+      'SELECT preimage, status, attestation_ref FROM consumed_grants WHERE deployment_id=$1 AND jti=$2',
+      [DEFAULT_DEPLOYMENT_ID, jti],
+    );
+    const seg = stored.rows[0].token.split('|');
+    assert.equal(seg.length, 4);
+    assert.equal(Buffer.from(seg[2], 'base64url').toString('utf8'), led.rows[0].preimage);
+    assert.equal(seg[3], led.rows[0].attestation_ref);
+    assert.equal(led.rows[0].status, 'sealed');
+  });
+
+  test('reconcilePostgres now returns CONFIRMED for that grant', async (t) => {
+    if (guard(t)) return;
+    const title = `persist-rec-${Date.now()}`;
+    const body = JSON.stringify({ title, body: 'legit' });
+    const ch = await challenge('');
+    const g = mkGrant({ operation: 'publish', target_id: '', body, state_nonce: ch.state_nonce });
+    assert.equal((await req('POST', '/articles', { body, grant: g })).code, 201);
+    const jti = JSON.parse(Buffer.from(g.split('.')[0], 'base64url')).jti;
+
+    const { reconcile } = require('../src/reconcile');
+    const out = await reconcile({
+      adapters: {
+        postgres: {
+          query: (sql, params) => pool.query(sql, params),
+          deploymentId: DEFAULT_DEPLOYMENT_ID,
+          jtis: [jti],
+        },
+      },
+    });
+    assert.equal(out.outcome, 'CONFIRMED', JSON.stringify(out.grants));
+    assert.equal(out.needs_attention, 0);
+  });
+
+  test('a consumed row whose attestation is absent is still INDETERMINATE', async (t) => {
+    if (guard(t)) return;
+    const title = `persist-gone-${Date.now()}`;
+    const body = JSON.stringify({ title, body: 'legit' });
+    const ch = await challenge('');
+    const g = mkGrant({ operation: 'publish', target_id: '', body, state_nonce: ch.state_nonce });
+    assert.equal((await req('POST', '/articles', { body, grant: g })).code, 201);
+    const jti = JSON.parse(Buffer.from(g.split('.')[0], 'base64url')).jti;
+
+    const del = await pool.query(
+      'DELETE FROM attestations WHERE deployment_id=$1 AND grant_jti=$2',
+      [DEFAULT_DEPLOYMENT_ID, jti],
+    );
+    assert.equal(del.rowCount, 1);
+
+    const { reconcile } = require('../src/reconcile');
+    const out = await reconcile({
+      adapters: {
+        postgres: {
+          query: (sql, params) => pool.query(sql, params),
+          deploymentId: DEFAULT_DEPLOYMENT_ID,
+          jtis: [jti],
+        },
+      },
+    });
+    assert.equal(out.outcome, 'INDETERMINATE', JSON.stringify(out.grants));
+    assert.equal(out.counts.CONFIRMED, 0);
+  });
+
+  test('the attestations ACL is unchanged: cr_executor still cannot write it directly', async (t) => {
+    if (guard(t)) return;
+    const c = await executorPool.connect();
+    try {
+      await assert.rejects(
+        () => c.query(
+          'INSERT INTO attestations (deployment_id, grant_jti, token) VALUES ($1,$2,$3)',
+          [DEFAULT_DEPLOYMENT_ID, 'direct-write', 'x|y|z|w'],
+        ),
+        (e) => e.code === '42501',
+        'cr_executor gained a direct write into the evidence table',
+      );
+    } finally {
+      c.release();
+    }
+  });
+
+  test('cap_persist_attestation refuses a token over a FOREIGN preimage', async (t) => {
+    if (guard(t)) return;
+    const title = `persist-foreign-${Date.now()}`;
+    const body = JSON.stringify({ title, body: 'legit' });
+    const ch = await challenge('');
+    const g = mkGrant({ operation: 'publish', target_id: '', body, state_nonce: ch.state_nonce });
+    const r = await req('POST', '/articles', { body, grant: g });
+    assert.equal(r.code, 201);
+    const jti = JSON.parse(Buffer.from(g.split('.')[0], 'base64url')).jti;
+    await pool.query('DELETE FROM attestations WHERE deployment_id=$1 AND grant_jti=$2',
+      [DEFAULT_DEPLOYMENT_ID, jti]);
+
+    const seg = r.json.attestation.split('|');
+    const foreign = [
+      seg[0], seg[1],
+      Buffer.from('cr.gate.preimage.v1|other|bytes|entirely', 'utf8').toString('base64url'),
+      seg[3],
+    ].join('|');
+    const c = await executorPool.connect();
+    try {
+      await assert.rejects(
+        () => c.query('SELECT ok, status FROM cap_persist_attestation($1,$2,$3)',
+          [DEFAULT_DEPLOYMENT_ID, jti, foreign]),
+        /foreign_preimage/,
+      );
+    } finally { c.release(); }
+  });
+
+  test('cap_persist_attestation refuses a second row for the same grant', async (t) => {
+    if (guard(t)) return;
+    const title = `persist-dup-${Date.now()}`;
+    const body = JSON.stringify({ title, body: 'legit' });
+    const ch = await challenge('');
+    const g = mkGrant({ operation: 'publish', target_id: '', body, state_nonce: ch.state_nonce });
+    const r = await req('POST', '/articles', { body, grant: g });
+    assert.equal(r.code, 201);
+    const jti = JSON.parse(Buffer.from(g.split('.')[0], 'base64url')).jti;
+
+    const c = await executorPool.connect();
+    try {
+      await assert.rejects(
+        () => c.query('SELECT ok, status FROM cap_persist_attestation($1,$2,$3)',
+          [DEFAULT_DEPLOYMENT_ID, jti, r.json.attestation]),
+        /already_persisted/,
+      );
+    } finally { c.release(); }
+    const n = await pool.query(
+      'SELECT count(*)::int AS n FROM attestations WHERE deployment_id=$1 AND grant_jti=$2',
+      [DEFAULT_DEPLOYMENT_ID, jti],
+    );
+    assert.equal(n.rows[0].n, 1);
+  });
+});

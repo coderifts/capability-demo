@@ -188,6 +188,25 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
       [configured, payload.jti, preimage_hash, signature],
     );
 
+    // Encode here rather than after COMMIT: the artifact must be persisted
+    // INSIDE the consuming transaction, so a committed consume always has its
+    // evidence. The values are the ones already sealed above — encoding is
+    // pure, and the returned artifact below is this same string.
+    const attestation = encodeAtomicExecutionAttestation({
+      executor_kid: executor.kid,
+      preimage,
+      signature,
+    });
+
+    // The SERVER's own signed artifact, never a client-supplied one. The
+    // function re-derives this row's preimage and compares it to the token,
+    // so cr_executor cannot use it to write arbitrary evidence — the table
+    // ACL stays owner-only exactly as the posture baseline pins it.
+    await client.query(
+      'SELECT ok, status FROM cap_persist_attestation($1,$2,$3)',
+      [configured, payload.jti, attestation],
+    );
+
     await client.query('COMMIT');
     begun = false;
 
@@ -204,12 +223,8 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
       preimage_hash,
       signature,
     };
-    const attestation = encodeAtomicExecutionAttestation({
-      executor_kid: executor.kid,
-      preimage,
-      signature,
-    });
-
+    // `attestation` is the exact string persisted above — the wire contract
+    // returns what the evidence table holds, not a second encoding of it.
     return { ok: true, row, attestation, atomic_execution_attestation, preimage };
   } catch (err) {
     if (begun) {
