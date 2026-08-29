@@ -40,6 +40,13 @@ const TRIGGER = 'trg_consumed_grants_forbid_unsigned';
 const FN_IDENTITY = Object.freeze({
   cr_execute_grant: 'p_jti text, p_scope_hash text, p_state_nonce text, p_target_id text, p_operation text, p_title text, p_body text, p_deployment_id text',
   cap_seal: 'p_deployment_id text, p_jti text, p_preimage_hash text, p_signature text',
+  // Read from the deployed catalog, not transcribed from seal.sql: the DDL says
+  // `timestamptz` and `integer`, and pg_get_function_identity_arguments renders
+  // those as `timestamp with time zone` and `integer`. A signature copied from
+  // the source text would not match the live one, and the pin would report
+  // drift against a database that is exactly right.
+  cap_persist_attestation: 'p_deployment_id text, p_jti text, p_token text',
+  cap_export_attestations: 'p_deployment_id text, p_since timestamp with time zone, p_until timestamp with time zone, p_limit integer',
   cr_forbid_commit_unsigned: '',
 });
 const FUNCTIONS = Object.freeze(Object.keys(FN_IDENTITY));
@@ -68,6 +75,28 @@ const BASELINE = Object.freeze({
   functions: Object.freeze({
     cr_execute_grant: Object.freeze({ ...FN_BASE, identity: FN_IDENTITY.cr_execute_grant }),
     cap_seal: Object.freeze({ ...FN_BASE, identity: FN_IDENTITY.cap_seal }),
+    // Both reach the owner-only `attestations` table through SECURITY DEFINER,
+    // which is what keeps that table's pinned empty ACL true. The table pin
+    // above is therefore only half the boundary: a GRANT EXECUTE to the wrong
+    // role would widen the reach of an owner-rights function while every pinned
+    // table privilege still read clean.
+    //
+    // THE TWO GRANT TO DIFFERENT ROLES. FN_BASE defaults to the executor, so
+    // the export overrides BOTH flags — pinning only `cr_host_execute: true`
+    // would leave the executor's `true` default in place and pin the opposite
+    // of what is deployed.
+    cap_persist_attestation: Object.freeze({
+      ...FN_BASE,
+      identity: FN_IDENTITY.cap_persist_attestation,
+      cr_host_execute: false,
+      cr_executor_execute: true,
+    }),
+    cap_export_attestations: Object.freeze({
+      ...FN_BASE,
+      identity: FN_IDENTITY.cap_export_attestations,
+      cr_host_execute: true,
+      cr_executor_execute: false,
+    }),
     cr_forbid_commit_unsigned: Object.freeze({ ...FN_BASE, identity: FN_IDENTITY.cr_forbid_commit_unsigned }),
   }),
   triggers: Object.freeze({

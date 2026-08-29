@@ -21,7 +21,7 @@ const { loadExecutor } = require('../src/server');
 const {
   issuePostureReceipt, verifyPostureReceipt, POSTURE_V, BASELINE,
   encodePostureReceipt, canonicalJson: postureCanonicalJson,
-  POSTURE_CLOCK_SKEW_LEEWAY_MS, checkKeyWindow,
+  POSTURE_CLOCK_SKEW_LEEWAY_MS, checkKeyWindow, FN_IDENTITY, FUNCTIONS,
 } = require('../src/posture');
 const { signPreimage } = require('../src/atomic');
 
@@ -565,5 +565,141 @@ describe('posture receipt — key validity window', () => {
     } finally {
       client.release();
     }
+  });
+});
+
+// ── THE TWO ATTESTATION FUNCTIONS ────────────────────────────────────────────
+/**
+ * cap_persist_attestation and cap_export_attestations both reach the owner-only
+ * `attestations` table through SECURITY DEFINER. That is precisely what keeps
+ * the table's pinned empty ACL true — so pinning the table alone covers only
+ * half the boundary. A GRANT EXECUTE to the wrong role would widen an
+ * owner-rights function while every pinned TABLE privilege still read clean.
+ *
+ * The seeded-drift tests are what make these pins load-bearing rather than
+ * decorative: each one flips a real privilege or signature on the live database
+ * and asserts the check fires, then restores.
+ */
+describe('STEP 5 — the attestation functions are pinned', () => {
+  test('FN_IDENTITY carries both, matching pg_get_function_identity_arguments exactly', async (t) => {
+    if (guard(t)) return;
+    assert.ok(FUNCTIONS.includes('cap_persist_attestation'));
+    assert.ok(FUNCTIONS.includes('cap_export_attestations'));
+
+    // The pin must equal the DEPLOYED identity, not the DDL text. seal.sql
+    // writes `timestamptz` and `integer`; the catalog renders the first as
+    // `timestamp with time zone`. Comparing against the catalog is the check.
+    const live = await bootstrap.query(
+      `SELECT p.proname AS name, pg_get_function_identity_arguments(p.oid) AS args
+         FROM pg_catalog.pg_proc p
+         JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public' AND p.proname = ANY($1::text[])`,
+      [['cap_persist_attestation', 'cap_export_attestations']],
+    );
+    assert.equal(live.rowCount, 2, 'a pinned function is missing from the catalog');
+    for (const row of live.rows) {
+      assert.equal(row.args, FN_IDENTITY[row.name], `${row.name} identity pin does not match the catalog`);
+    }
+  });
+
+  test('the baseline pins SECURITY DEFINER / cr_owner / the RIGHT execute role for each', async (t) => {
+    if (guard(t)) return;
+    const persist = BASELINE.functions.cap_persist_attestation;
+    const exp = BASELINE.functions.cap_export_attestations;
+
+    for (const [name, b] of [['persist', persist], ['export', exp]]) {
+      assert.ok(b, `${name} is not in the baseline`);
+      assert.equal(b.security_definer, true);
+      assert.equal(b.owner, 'cr_owner');
+      assert.equal(b.overload_count, 1);
+    }
+    // They grant to DIFFERENT roles. Asserting both flags on both functions is
+    // the point: a pin that only set the true one would silently keep FN_BASE's
+    // default for the other and pin the opposite of what is deployed.
+    assert.equal(persist.cr_executor_execute, true);
+    assert.equal(persist.cr_host_execute, false);
+    assert.equal(exp.cr_host_execute, true);
+    assert.equal(exp.cr_executor_execute, false);
+
+    const clean = await posture();
+    assert.equal(clean.ok, true, JSON.stringify(clean.drift));
+  });
+
+  test('SEEDED DRIFT: GRANT EXECUTE on cap_export_attestations to cr_executor → FAIL; revoke → PASS', async (t) => {
+    if (guard(t)) return;
+    const ident = 'cap_export_attestations(text, timestamptz, timestamptz, integer)';
+    try {
+      await bootstrap.query(`GRANT EXECUTE ON FUNCTION ${ident} TO cr_executor`);
+      const failed = await posture();
+      assert.equal(failed.ok, false, 'widening the executor was not detected');
+      assert.ok(
+        failed.drift.some((d) => /cap_export_attestations/.test(d.name)),
+        JSON.stringify(failed.drift),
+      );
+    } finally {
+      await bootstrap.query(`REVOKE EXECUTE ON FUNCTION ${ident} FROM cr_executor`);
+    }
+    const restored = await posture();
+    assert.equal(restored.ok, true, JSON.stringify(restored.drift));
+  });
+
+  test('SEEDED DRIFT: REVOKE EXECUTE on cap_persist_attestation from cr_executor → FAIL; restore → PASS', async (t) => {
+    if (guard(t)) return;
+    const ident = 'cap_persist_attestation(text, text, text)';
+    try {
+      await bootstrap.query(`REVOKE EXECUTE ON FUNCTION ${ident} FROM cr_executor`);
+      const failed = await posture();
+      assert.equal(failed.ok, false, 'removing the executor grant was not detected');
+      assert.ok(
+        failed.drift.some((d) => /cap_persist_attestation/.test(d.name)),
+        JSON.stringify(failed.drift),
+      );
+    } finally {
+      await bootstrap.query(`GRANT EXECUTE ON FUNCTION ${ident} TO cr_executor`);
+    }
+    const restored = await posture();
+    assert.equal(restored.ok, true, JSON.stringify(restored.drift));
+  });
+
+  test('SEEDED DRIFT: SECURITY INVOKER on cap_persist_attestation → FAIL; restore → PASS', async (t) => {
+    if (guard(t)) return;
+    const ident = 'cap_persist_attestation(text, text, text)';
+    try {
+      await bootstrap.query(`ALTER FUNCTION ${ident} SECURITY INVOKER`);
+      const failed = await posture();
+      assert.equal(failed.ok, false);
+      assert.ok(
+        failed.drift.some((d) => d.name === 'cap_persist_attestation SECURITY DEFINER dropped'),
+        JSON.stringify(failed.drift),
+      );
+    } finally {
+      await bootstrap.query(`ALTER FUNCTION ${ident} SECURITY DEFINER`);
+    }
+    const restored = await posture();
+    assert.equal(restored.ok, true, JSON.stringify(restored.drift));
+  });
+
+  test('SEEDED DRIFT: an ALTERED signature reads as missing → FAIL; restore → PASS', async (t) => {
+    if (guard(t)) return;
+    // Renaming a parameter changes the identity string. The check finds no row
+    // matching the pinned identity and reports the function missing — which is
+    // the honest reading: the pinned function is not there any more.
+    const ident = 'cap_export_attestations(text, timestamptz, timestamptz, integer)';
+    try {
+      await bootstrap.query(`ALTER FUNCTION ${ident} RENAME TO cap_export_attestations_moved`);
+      const failed = await posture();
+      assert.equal(failed.ok, false, 'an altered signature was not detected');
+      assert.ok(
+        failed.drift.some((d) => /cap_export_attestations/.test(d.name)),
+        JSON.stringify(failed.drift),
+      );
+    } finally {
+      await bootstrap.query(
+        'ALTER FUNCTION cap_export_attestations_moved(text, timestamptz, timestamptz, integer) '
+        + 'RENAME TO cap_export_attestations',
+      );
+    }
+    const restored = await posture();
+    assert.equal(restored.ok, true, JSON.stringify(restored.drift));
   });
 });
