@@ -85,14 +85,31 @@ const entry = (adapter, jti, outcome, evidence) => ({ adapter, jti, outcome, evi
  * signed preimage is `cr.gate.preimage.v1|<jti>|<deployment_id>|sha256:<mutation>|<target>`:
  *   BOUND and enforced here  · grant jti
  *                            · deployment_id
- *   BOUND, not enforced here · the mutation digest and the target string are in
- *                              the signed bytes, so they cannot be altered — but
- *                              this module has nothing independent to compare
- *                              them against, and a comparison against a value
- *                              read from the same evidence would prove nothing.
+ *                            · THE TARGET (roadmap 1196). Compared against the
+ *                              value the caller independently knows — the ref
+ *                              from the repository's reflog, the resourcePath
+ *                              asked about, the ledger row's own target. See
+ *                              compareTarget below for why each is independent.
+ *   BOUND, not enforced here · the mutation digest. It is in the signed bytes,
+ *                              so it cannot be altered — but this module cannot
+ *                              recompute it: git's digest needs the pin, the new
+ *                              sha and the operation (git-atomic.js:517) and the
+ *                              reflog marker carries only ref+jti; http's needs
+ *                              the verb and the wire body (http-atomic.js:586)
+ *                              and the reconciler has neither. On POSTGRES it IS
+ *                              covered, by the whole-preimage comparison against
+ *                              consumed_grants.preimage.
  *   NOT BOUND AT ALL         · state token, receipt hash, adapter identity, and
  *                              a signing timestamp. They are absent from the
  *                              preimage, so no CONFIRMED here can speak to them.
+ *
+ * The earlier version of this list put the target in the middle group, with the
+ * reasoning that there was "nothing independent to compare it against". That was
+ * measurably false — the independent value existed at every adapter and was
+ * simply not passed — and the 2026-08-30 audit reproduced a target swap through
+ * the gap. It is corrected here rather than left as a footnote: a stale
+ * "does not prove" list is the same defect as an overclaim, pointing the other
+ * way.
  */
 const ATTEST = Object.freeze({
   OK: 'ATTEST_VALID',
@@ -100,7 +117,84 @@ const ATTEST = Object.freeze({
   UNKNOWN_KID: 'UNKNOWN_KID',
   KEY_NOT_IN_FORCE: 'KEY_NOT_IN_FORCE',
   BAD_KEY: 'UNUSABLE_KEY',
+  TARGET_MISMATCH: 'ATTEST_TARGET_MISMATCH',
 });
+
+/**
+ * TARGET BINDING (roadmap 1196, ABSOLUTE P0).
+ *
+ * THE REPRODUCED BUG. A valid attestation signed for /resource-A returned
+ * CONFIRMED when reconciling /resource-B — same jti, same deployment, genuine
+ * signature, ATTEST_VALID. The cause was that `intended.grant` carried jti and
+ * deployment_id and nothing else, so the verifier had no target to enforce.
+ *
+ * eeae7e7 NAMED this: "the mutation digest and the target string are in the
+ * signed bytes, so they cannot be altered — but this module has nothing
+ * independent to compare them against". That was honest and it was WRONG about
+ * the target: the independent value does exist at every adapter, it simply was
+ * not passed. Naming an absence is not a substitute for closing it when the
+ * gap is actively exploitable.
+ *
+ * WHAT MAKES THE COMPARISON INDEPENDENT, which is the whole point. The expected
+ * target never comes from the attestation. It comes from the thing the caller
+ * asked to reconcile:
+ *   · git   — `mv.ref`, read from the REPOSITORY's reflog (git-atomic.js:599),
+ *             not from the token
+ *   · http  — `it.resourcePath`, the path the caller named and the origin was
+ *             read at
+ *   · pg    — the target field of `consumed_grants.preimage`, a different table
+ *             from the one holding the token
+ * Comparing the attestation's target against the attestation's own bytes would
+ * prove nothing, and is exactly the shape this fix exists to remove.
+ */
+const TARGET_KIND = Object.freeze({
+  /** The signed target must equal the expected string. HTTP: the resource path. */
+  EXACT: 'exact',
+  /** `git:<ref>@<old>-><new>` — only the ref is independently known here. */
+  GIT_REF: 'git_ref',
+});
+
+/**
+ * The ref out of a git target descriptor.
+ *
+ * Split at the LAST '@': a git ref may legally contain '@', while the tail is
+ * always `<old>-><new>` written by gitTargetDescriptor. Splitting at the first
+ * would truncate such a ref and turn a correct attestation into a mismatch.
+ */
+function gitRefOfTarget(target) {
+  const at = String(target).lastIndexOf('@');
+  if (!String(target).startsWith('git:') || at < 0) return null;
+  return String(target).slice('git:'.length, at);
+}
+
+/**
+ * Compare the SIGNED target against the INDEPENDENTLY-KNOWN one.
+ *
+ * Returns `{ compared: false }` when the caller states no expected target —
+ * reported, never treated as a match. A CONFIRMED that skipped this comparison
+ * says so in its evidence rather than implying a binding it did not make.
+ */
+function compareTarget(preimage, expected) {
+  if (!expected || typeof expected.value !== 'string' || expected.value.length === 0) {
+    return { compared: false, reason: 'no independently-known target was supplied for this entry' };
+  }
+  const fields = String(preimage).split('|');
+  const signed = fields.length >= 5 ? fields[4] : null;
+  if (signed == null || signed === '') {
+    return { compared: false, ok: false, signed: null, reason: 'the signed preimage carries no target field' };
+  }
+  if (expected.kind === TARGET_KIND.GIT_REF) {
+    const ref = gitRefOfTarget(signed);
+    return {
+      compared: true,
+      ok: ref !== null && ref === expected.value,
+      signed,
+      signed_ref: ref,
+      expected: expected.value,
+    };
+  }
+  return { compared: true, ok: signed === expected.value, signed, expected: expected.value };
+}
 
 /** The kid is read to SELECT a key, never to trust one. Selection, not verification. */
 function kidOf(token) {
@@ -155,7 +249,9 @@ function publicKeyOf(entry) {
  * reason the caller puts in the INDETERMINATE evidence — doubt is explained,
  * never silent.
  */
-function verifyStoredAttestation({ token, jti, deploymentId = '', keys, asOf }) {
+function verifyStoredAttestation({
+  token, jti, deploymentId = '', keys, asOf, expectedTarget = null,
+}) {
   if (!keys) {
     return {
       ok: false,
@@ -209,7 +305,26 @@ function verifyStoredAttestation({ token, jti, deploymentId = '', keys, asOf }) 
       reason: `the stored attestation did not verify (${(r && r.reason) || 'no reason given'})`,
     };
   }
-  return { ok: true, status: ATTEST.OK, kid, preimage: r.payload.preimage };
+  // THE TARGET, compared against the value the CALLER independently knows.
+  // A signature that is genuine, in-force and bound to this grant still does not
+  // say the mutation landed where this reconciliation is looking.
+  const t = compareTarget(r.payload.preimage, expectedTarget);
+  if (t.compared && !t.ok) {
+    return {
+      ok: false,
+      status: ATTEST.TARGET_MISMATCH,
+      reason: `the attestation is valid and bound to this grant, but it was signed for `
+        + `${JSON.stringify(t.signed_ref != null ? t.signed_ref : t.signed)} while this `
+        + `reconciliation is about ${JSON.stringify(t.expected)}. A valid signature for one `
+        + 'target is not evidence about another.',
+      target: t,
+    };
+  }
+  if (t.compared === false && t.ok === false) {
+    // The preimage has no target field at all — malformed for this purpose.
+    return { ok: false, status: ATTEST.TARGET_MISMATCH, reason: t.reason, target: t };
+  }
+  return { ok: true, status: ATTEST.OK, kid, preimage: r.payload.preimage, target: t };
 }
 
 
@@ -260,6 +375,10 @@ async function reconcileGit({
         deploymentId,
         keys: executorKeys,
         asOf,
+        // `mv.ref` is read from the reflog of the ref we were asked to inspect
+        // (git-atomic.js:599). It is not derived from the token, which is what
+        // makes it usable as the independent side of the comparison.
+        expectedTarget: { kind: TARGET_KIND.GIT_REF, value: mv.ref },
       });
       out.push(v.ok
         ? entry('git', mv.jti, OUTCOME.CONFIRMED, {
@@ -366,7 +485,21 @@ async function reconcilePostgres({
       }));
       continue;
     }
-    const v = verifyStoredAttestation({ token, jti, deploymentId, keys: executorKeys, asOf });
+    // The ledger row's target, taken from `consumed_grants.preimage` — a
+    // different table from the one holding the token. The whole-preimage
+    // comparison above already implies this; passing it makes the binding
+    // EXPLICIT in the result rather than a side effect of a byte comparison.
+    const ledgerFields = String(row.preimage).split('|');
+    const v = verifyStoredAttestation({
+      token,
+      jti,
+      deploymentId,
+      keys: executorKeys,
+      asOf,
+      expectedTarget: ledgerFields.length >= 5
+        ? { kind: TARGET_KIND.EXACT, value: ledgerFields[4] }
+        : null,
+    });
     if (!v.ok) {
       out.push(entry('postgres', jti, OUTCOME.INDETERMINATE, {
         status: row.status,
@@ -475,7 +608,15 @@ async function reconcileHttp({
     // AUTHORISED, and this path used to confirm on the token merely existing —
     // attestation:"not-a-token" reconciled CONFIRMED.
     const v = verifyStoredAttestation({
-      token: attestation, jti, deploymentId, keys: executorKeys, asOf,
+      token: attestation,
+      jti,
+      deploymentId,
+      keys: executorKeys,
+      asOf,
+      // THE AUDIT'S CASE. `resourcePath` is what the caller asked about and what
+      // readResource was called with — an attestation signed for another path
+      // now fails here instead of confirming this one.
+      expectedTarget: { kind: TARGET_KIND.EXACT, value: resourcePath },
     });
     if (!v.ok) {
       out.push(entry('http', jti, OUTCOME.INDETERMINATE, {

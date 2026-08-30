@@ -25,6 +25,7 @@ const { execFileSync } = require('node:child_process');
 const {
   reconcile, reconcileGit, reconcilePostgres, reconcileHttp,
   enforceNoUnprovenConfirmed, OUTCOME,
+  verifyStoredAttestation,
 } = require('../src/reconcile');
 const { gitAtomicExecute, ledgerRefFor } = require('../src/git-atomic');
 const { encodeAtomicExecutionAttestation, signPreimage } = require('../src/atomic');
@@ -552,5 +553,206 @@ describe('reconcile — enforceNoUnprovenConfirmed catches an unverified CONFIRM
       adapter: 'http', jti: 'z4', outcome: OUTCOME.CONFIRMED, evidence: { attest_status: 'ATTEST_VALID' },
     }];
     assert.equal(enforceNoUnprovenConfirmed(real, () => false)[0].outcome, OUTCOME.INDETERMINATE);
+  });
+});
+
+// ── AUDIT 1196: THE TARGET SWAP ──────────────────────────────────────────────
+/**
+ * The 2026-08-30 audit reproduced this: a valid executor attestation for
+ * /resource-A returned CONFIRMED when reconciling /resource-B — same jti, same
+ * deployment, genuine signature, ATTEST_VALID.
+ *
+ * The cause was that `intended.grant` carried jti and deployment_id and nothing
+ * else. eeae7e7 had NAMED the target as "in the signed bytes, but nothing
+ * independent to compare it against" — honest, and wrong: the independent value
+ * exists at every adapter. Naming an absence does not substitute for closing it
+ * when the gap is exploitable.
+ *
+ * The load-bearing property in these tests is that the expected target is the
+ * one the CALLER named — the reflog's ref, the resourcePath asked about — never
+ * a value read back out of the attestation.
+ */
+describe('reconcile — AUDIT 1196: a signature for one target never confirms another', () => {
+  const targetAtt = (jti, deployment, target) => signFor(
+    `cr.gate.preimage.v1|${jti}|${deployment}|sha256:aa|${target}`,
+  );
+  const origin = () => async () => ({ ok: true, etag: 'W/"v2"' });
+
+  test('AUDIT CASE — http: signed for /resource-A, reconciling /resource-B → INDETERMINATE', async () => {
+    const out = await reconcileHttp({
+      executorKeys: KEYS,
+      deploymentId: DEPLOY,
+      readResource: origin(),
+      items: [{
+        jti: 't1',
+        resourcePath: '/resource-B',
+        expectedEtag: 'W/"v2"',
+        attestation: targetAtt('t1', DEPLOY, '/resource-A'),
+      }],
+    });
+    assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
+    assert.notEqual(out[0].outcome, OUTCOME.CONFIRMED);
+    assert.equal(out[0].evidence.attest_status, 'ATTEST_TARGET_MISMATCH');
+    assert.match(out[0].evidence.reason, /"\/resource-A".*"\/resource-B"/);
+    assert.match(out[0].evidence.reason, /not evidence about another/);
+  });
+
+  test('http: signed for /resource-A, reconciling /resource-A → CONFIRMED', async () => {
+    const out = await reconcileHttp({
+      executorKeys: KEYS,
+      deploymentId: DEPLOY,
+      readResource: origin(),
+      items: [{
+        jti: 't2',
+        resourcePath: '/resource-A',
+        expectedEtag: 'W/"v2"',
+        attestation: targetAtt('t2', DEPLOY, '/resource-A'),
+      }],
+    });
+    assert.equal(out[0].outcome, OUTCOME.CONFIRMED);
+    assert.equal(out[0].evidence.attest_status, 'ATTEST_VALID');
+  });
+
+  test('git: an attestation for ref-A reconciling ref-B → INDETERMINATE', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    // A real consume on REF, so the ledger and the reflog agree — only the
+    // attestation is for a different ref.
+    await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'ff', executor, deploymentId: DEPLOY,
+    });
+    const forAnotherRef = targetAtt(g.jti, DEPLOY, `git:refs/heads/other@${A}->${B}`);
+    const out = await reconcileGit({
+      repoDir, refs: [REF], attestationsByJti: { [g.jti]: forAnotherRef },
+      executorKeys: KEYS, deploymentId: DEPLOY,
+    });
+    const mine = out.find((e) => e.jti === g.jti);
+    assert.equal(mine.outcome, OUTCOME.INDETERMINATE);
+    assert.equal(mine.evidence.attest_status, 'ATTEST_TARGET_MISMATCH');
+    assert.match(mine.evidence.reason, /refs\/heads\/other/);
+  });
+
+  test('git: the genuine attestation for the ref being reconciled → CONFIRMED', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    const r = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'ff', executor, deploymentId: DEPLOY,
+    });
+    const out = await reconcileGit({
+      repoDir, refs: [REF], attestationsByJti: { [g.jti]: r.attestation },
+      executorKeys: KEYS, deploymentId: DEPLOY,
+    });
+    const mine = out.find((e) => e.jti === g.jti);
+    assert.equal(mine.outcome, OUTCOME.CONFIRMED, JSON.stringify(mine.evidence));
+  });
+
+  test('postgres: an attestation whose target differs from the ledger row → INDETERMINATE', async () => {
+    // The ledger row is the independent side here: a different table from the
+    // one holding the token.
+    const ledgerPre = `cr.gate.preimage.v1|t5|${DEPLOY}|sha256:aa|pg:articles#7`;
+    const out = await reconcilePostgres({
+      query: pg({
+        ledger: [{ deployment_id: DEPLOY, jti: 't5', status: 'sealed', preimage: ledgerPre }],
+        attestations: [{
+          deployment_id: DEPLOY,
+          grant_jti: 't5',
+          token: targetAtt('t5', DEPLOY, 'pg:articles#99'),
+        }],
+      }),
+      executorKeys: KEYS,
+      deploymentId: DEPLOY,
+      jtis: ['t5'],
+    });
+    assert.equal(out[0].outcome, OUTCOME.INDETERMINATE);
+    assert.notEqual(out[0].outcome, OUTCOME.CONFIRMED);
+  });
+});
+
+// ── THE COMPARISON IS INDEPENDENT ────────────────────────────────────────────
+describe('reconcile — the target is compared to the INDEPENDENT value', () => {
+  test('the expected target comes from the caller, not from the attestation', async () => {
+    // The proof that the comparison is not self-referential: hold the
+    // attestation fixed and change ONLY what the caller says it is reconciling.
+    // A self-referential check would confirm both.
+    const att = signFor(`cr.gate.preimage.v1|t6|${DEPLOY}|sha256:aa|/fixed`);
+    const run = (resourcePath) => reconcileHttp({
+      executorKeys: KEYS,
+      deploymentId: DEPLOY,
+      readResource: async () => ({ ok: true, etag: 'W/"v2"' }),
+      items: [{ jti: 't6', resourcePath, expectedEtag: 'W/"v2"', attestation: att }],
+    });
+    assert.equal((await run('/fixed'))[0].outcome, OUTCOME.CONFIRMED);
+    assert.equal((await run('/moved'))[0].outcome, OUTCOME.INDETERMINATE);
+  });
+
+  test('a CONFIRMED records that the target WAS compared, and to what', async () => {
+    const out = await reconcileHttp({
+      executorKeys: KEYS,
+      deploymentId: DEPLOY,
+      readResource: async () => ({ ok: true, etag: 'W/"v2"' }),
+      items: [{
+        jti: 't7',
+        resourcePath: '/r',
+        expectedEtag: 'W/"v2"',
+        attestation: signFor(`cr.gate.preimage.v1|t7|${DEPLOY}|sha256:aa|/r`),
+      }],
+    });
+    assert.equal(out[0].outcome, OUTCOME.CONFIRMED);
+    const v = verifyStoredAttestation({
+      token: signFor(`cr.gate.preimage.v1|t7|${DEPLOY}|sha256:aa|/r`),
+      jti: 't7',
+      deploymentId: DEPLOY,
+      keys: KEYS,
+      expectedTarget: { kind: 'exact', value: '/r' },
+    });
+    assert.equal(v.ok, true);
+    assert.equal(v.target.compared, true);
+    assert.equal(v.target.expected, '/r');
+    assert.equal(v.target.signed, '/r');
+  });
+
+  test('no expected target → the comparison is NOT made, and says so', () => {
+    // Honest, and visible: a CONFIRMED reached without this comparison must not
+    // read as one that made it.
+    const v = verifyStoredAttestation({
+      token: signFor(`cr.gate.preimage.v1|t8|${DEPLOY}|sha256:aa|/r`),
+      jti: 't8',
+      deploymentId: DEPLOY,
+      keys: KEYS,
+      expectedTarget: null,
+    });
+    assert.equal(v.ok, true);
+    assert.equal(v.target.compared, false);
+    assert.match(v.target.reason, /no independently-known target/);
+  });
+
+  test('a git ref containing "@" is split at the LAST one, not the first', () => {
+    // Splitting at the first '@' would truncate a legal ref and turn a correct
+    // attestation into a mismatch — a false alarm is a defect too.
+    const ref = 'refs/heads/feat@main';
+    const v = verifyStoredAttestation({
+      token: signFor(`cr.gate.preimage.v1|t9|${DEPLOY}|sha256:aa|git:${ref}@abc->def`),
+      jti: 't9',
+      deploymentId: DEPLOY,
+      keys: KEYS,
+      expectedTarget: { kind: 'git_ref', value: ref },
+    });
+    assert.equal(v.ok, true, JSON.stringify(v));
+    assert.equal(v.target.signed_ref, ref);
+  });
+
+  test('a preimage with no target field is refused, not passed', () => {
+    const short = `cr.gate.preimage.v1|t10|${DEPLOY}|sha256:aa`;
+    const v = verifyStoredAttestation({
+      token: signFor(short),
+      jti: 't10',
+      deploymentId: DEPLOY,
+      keys: KEYS,
+      expectedTarget: { kind: 'exact', value: '/r' },
+    });
+    assert.equal(v.ok, false);
+    assert.equal(v.status, 'ATTEST_TARGET_MISMATCH');
   });
 });
