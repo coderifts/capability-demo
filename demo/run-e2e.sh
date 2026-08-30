@@ -34,9 +34,28 @@ verdict() {  # verdict <expected> <actual> <text>
   else printf '    ❌ VERDICT: %s  (expected %s, got %s)\n' "$3" "$1" "$2"; FAILED=1; fi
 }
 
+# Run-level verdict from the counts this run actually observed. PARTIAL while
+# any point is MODELLED; "holds end to end" only when modelled is 0.
+# Args: <proven_n> <modelled_n> <modelled_names>
+print_run_verdict() {
+  local proven="$1" modelled="$2" names="${3:-}"
+  if [ "$modelled" -gt 0 ]; then
+    printf '\n\033[1m⚠️  PARTIAL — %s proven, %s modelled (%s). The chain does NOT hold end to end while critical points are modelled.\033[0m\n' \
+      "$proven" "$modelled" "$names"
+  else
+    printf '\n\033[1m✅ the chain holds end to end\033[0m\n'
+  fi
+}
+
+# Test hook: same function the live path calls, no docker / no chain.
+if [ "${1:-}" = "--summarize-verdict" ]; then
+  print_run_verdict "${2:-0}" "${3:-0}" "${4:-}"
+  exit 0
+fi
+
 printf '\033[1m═══ coderifts e2e — the chain, end to end ═══\033[0m\n'
-printf 'Claim under test: one running executor carries a mutation from authorize to deploy,\n'
-printf 'and every step that can be proven IS proven — the rest is labelled, not implied.\n'
+printf 'Claim under test: every provable step of a running executor is proven; the rest is labelled MODELLED, not implied.\n'
+printf 'This is not a claim that a mutation is carried through to deploy — that endpoint is modelled until a producer exists.\n'
 
 # ── bring the stack up ──────────────────────────────────────────────────────
 if [ "$SKIP_COMPOSE" = "1" ]; then
@@ -81,6 +100,7 @@ fi
 
 PROVEN_N=0
 MODELLED_N=0
+MODELLED_NAMES=""
 # A SIXTH field is required, not optional: `read` puts everything left over
 # into the LAST variable, so with five names the detail would be appended to
 # the OK/FAIL field and every verdict would compare "OK|<detail>" against "OK".
@@ -91,7 +111,16 @@ while IFS='|' read -r kind a b c d detail; do
       scene "$a" "$b  [$c]"
       printf '    %s\n' "$detail"
       verdict "OK" "$d" "$b is $(printf '%s' "$c" | tr '[:upper:]' '[:lower:]')"
-      if [ "$c" = "PROVEN" ]; then PROVEN_N=$((PROVEN_N+1)); else MODELLED_N=$((MODELLED_N+1)); fi
+      if [ "$c" = "PROVEN" ]; then
+        PROVEN_N=$((PROVEN_N+1))
+      else
+        MODELLED_N=$((MODELLED_N+1))
+        if [ -n "$MODELLED_NAMES" ]; then
+          MODELLED_NAMES="$MODELLED_NAMES, $b"
+        else
+          MODELLED_NAMES="$b"
+        fi
+      fi
       ;;
     TRANSCRIPT)
       printf '\n\033[1m─── TRANSCRIPT\033[0m\n'
@@ -111,4 +140,4 @@ if [ "$FAILED" != "0" ] || [ "$CHAIN_RC" != "0" ]; then
   printf '\n\033[1m❌ the chain did not hold\033[0m\n'
   exit 1
 fi
-printf '\n\033[1m✅ the chain holds end to end\033[0m\n'
+print_run_verdict "$PROVEN_N" "$MODELLED_N" "$MODELLED_NAMES"
