@@ -337,7 +337,17 @@ describe('github.exclusive — cross-ref single-use', () => {
     assert.equal(moved.length, 1, 'exactly one ref may have moved');
   });
 
-  test('ledger claimed but CAS refused → grant_spent, target unmoved, no rollback', async (t) => {
+  /**
+   * REWRITTEN for 1199. This test used to pin the opposite outcome — the claim
+   * landing, the CAS refusing, and the grant left SPENT with an explicit "no
+   * rollback" assertion. That was correct for two separate update-ref calls.
+   *
+   * The claim and the CAS are now one `update-ref --stdin` transaction, so a
+   * refused CAS aborts the batch and the claim never lands. The grant is
+   * therefore reusable, which is the same shape the Postgres gate has: a failed
+   * transaction consumes nothing.
+   */
+  test('CAS refused → the ledger claim is NOT left behind, and the grant is reusable', async (t) => {
     if (!gitAvailable) return t.skip('git binary unavailable');
     sh(repoDir, ['update-ref', REF, C]);              // drift the target first
     const g = grant();
@@ -346,22 +356,47 @@ describe('github.exclusive — cross-ref single-use', () => {
       operation: 'fast-forward', executor, deploymentId: DEPLOY,
     });
     assert.equal(r.status, 'STATE_DRIFT');
-    assert.equal(r.grant_spent, true, 'the ledger claim landed before the CAS refused');
+    assert.equal(r.grant_spent, false, 'nothing landed, so nothing was spent');
     assert.equal(await readRef(repoDir, REF), C, 'the target did not move');
-    assert.match(r.detail.note, /Mint a new grant/);
+    assert.match(r.detail.note, /neither landed/);
 
-    // NOT rolled back: rolling back would reopen the replay window this closes.
+    // THE ATOMIC PROPERTY: the ledger ref is not there either.
     const ledger = await listConsumedLedger({ repoDir });
-    assert.ok(ledger.some((e) => e.ref === ledgerRefFor(g.jti)),
-      'the claim must survive a failed CAS');
+    assert.ok(!ledger.some((e) => e.ref === ledgerRefFor(g.jti)),
+      'the claim landed despite the CAS refusing — the two are not one transaction');
+    assert.equal(await readRef(repoDir, ledgerRefFor(g.jti)), `absent:${ledgerRefFor(g.jti)}`);
 
-    // And the spent grant is genuinely unusable afterwards.
+    // …and the grant works once the target is back at the challenged state.
     sh(repoDir, ['update-ref', REF, A]);
     const retry = await gitAtomicExecute({
       repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
       operation: 'fast-forward', executor, deploymentId: DEPLOY,
     });
-    assert.equal(retry.reason, 'grant_already_consumed_cross_ref');
+    assert.equal(retry.ok, true, JSON.stringify(retry));
+    assert.equal(await readRef(repoDir, REF), B);
+
+    // ONE use, still. On the SAME ref the per-ref reflog check catches it first
+    // (the cheaper rejection, before any transaction) — measured, and the
+    // reason names that path rather than the cross-ref one.
+    sh(repoDir, ['update-ref', REF, A]);
+    const third = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(third.ok, false);
+    assert.equal(third.reason, 'grant_already_consumed');
+
+    // …and on a DIFFERENT ref the cross-ref claim is what refuses it, which is
+    // the reach the unified transaction had to preserve.
+    const other = 'refs/heads/second-use';
+    sh(repoDir, ['update-ref', other, A]);
+    const elsewhere = await gitAtomicExecute({
+      repoDir, ref: other, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(elsewhere.ok, false);
+    assert.equal(elsewhere.reason, 'grant_already_consumed_cross_ref');
+    assert.equal(await readRef(repoDir, other), A, 'the second ref must not have moved');
   });
 });
 
@@ -407,17 +442,30 @@ describe('github.exclusive — offline ledger enumeration', () => {
     assert.match(rec.reason, /Absence is not proof/);
   });
 
+  /**
+   * REWRITTEN for 1199. This used to be produced by a FAILED CAS: the claim
+   * landed, the target refused, and the leftover claim was a ledger entry with
+   * no move. That state cannot occur any more — the two are one transaction.
+   *
+   * The state itself has not gone away. reconcileLedger's own comment names the
+   * other way to reach it: the grant was spent on a ref OUTSIDE the set we were
+   * asked to inspect. That is what this now exercises, which is also the case an
+   * operator actually meets.
+   */
   test('a ledger entry with no ref move in scope is reported, not dropped', async (t) => {
     if (!gitAvailable) return t.skip('git binary unavailable');
-    sh(repoDir, ['update-ref', REF, C]);
+    const other = 'refs/heads/elsewhere';
+    sh(repoDir, ['update-ref', other, A]);
     const g = grant();
-    await gitAtomicExecute({          // spends the grant, CAS refuses
-      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+    const r = await gitAtomicExecute({     // succeeds, on a ref we will not inspect
+      repoDir, ref: other, payload: g, expectedOldSha: A, newSha: B,
       operation: 'fast-forward', executor, deploymentId: DEPLOY,
     });
+    assert.equal(r.ok, true, JSON.stringify(r));
+
     const rec = await reconcileLedger({ repoDir, refs: [REF] });
     assert.equal(rec.ledger_without_move.length, 1,
-      'a grant spent on a failed CAS leaves a ledger entry with no move — surfaced');
+      'a grant spent on a ref outside the inspected set leaves a claim with no move here');
   });
 });
 
@@ -854,5 +902,178 @@ describe('github.exclusive — TTL reclaim invariant (roadmap 1171)', () => {
     const after = await listConsumedLedger({ repoDir });
     assert.equal(after.length, ledger.length);
     assert.deepEqual(after.map((e) => e.ref).sort(), ledger.map((e) => e.ref).sort());
+  });
+});
+
+// ── 1199: ONE TRANSACTION ────────────────────────────────────────────────────
+/**
+ * The ledger claim and the target CAS used to be two `update-ref` calls. That
+ * was fail-closed — a claim could land with no move — and it is now ATOMIC:
+ * `git update-ref --stdin` applies both in one ref transaction.
+ *
+ * These pin the property in both directions. Only the FIRST asserts the new
+ * behaviour; the rest assert that strengthening it did not cost the reflog
+ * marker, the per-ref replay check or the pre-transaction refusals, each of
+ * which had to survive the change.
+ */
+describe('github.exclusive — the claim and the CAS are one transaction (1199)', () => {
+  test('a refused CAS leaves NO ledger ref — neither operation lands', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const before = (await listConsumedLedger({ repoDir })).length;
+    sh(repoDir, ['update-ref', REF, C]);
+    const g = grant();
+    const r = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 'STATE_DRIFT');
+    // Both sides of the transaction are untouched.
+    assert.equal(await readRef(repoDir, REF), C);
+    assert.equal((await listConsumedLedger({ repoDir })).length, before,
+      'the ledger gained an entry from a transaction that failed');
+  });
+
+  test('the happy path lands BOTH, and the reflog marker is on the target move', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    const r = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(await readRef(repoDir, REF), B, 'the target moved');
+    assert.equal(await readRef(repoDir, ledgerRefFor(g.jti)), B, 'the claim landed');
+
+    // SAME-LOCK PROPERTY. `-m` applies to the batch; the marker must be on the
+    // TARGET ref's reflog, which is what reconcileLedger reads to find moves.
+    const markers = sh(repoDir, ['reflog', 'show', REF, '--format=%gs']).split('\n');
+    assert.ok(markers.some((m) => m.trim() === `${REFLOG_MARKER} jti=${g.jti}`),
+      `the marker is missing from ${REF}: ${JSON.stringify(markers)}`);
+  });
+
+  test('the marker is NOT duplicated onto the ledger ref', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    // MEASURED: refs/coderifts/ is outside core.logAllRefUpdates' default set,
+    // so the batch's -m does not write a reflog there. Pinned because a marker
+    // on the claim would make reflogMarkers see a "move" that never happened.
+    const g = grant();
+    await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'fast-forward', executor, deploymentId: DEPLOY,
+    });
+    const led = ledgerRefFor(g.jti);
+    const out = execFileSync('git', ['-C', repoDir, 'reflog', 'show', led, '--format=%gs'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    assert.equal(out, '', `the ledger ref carries a reflog: ${JSON.stringify(out)}`);
+  });
+
+  test('create-only (absent:) still works through the transaction', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const fresh = 'refs/heads/created-by-tx';
+    const g = grant();
+    const r = await gitAtomicExecute({
+      repoDir, ref: fresh, payload: g, expectedOldSha: `absent:${fresh}`, newSha: B,
+      operation: 'create', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(await readRef(repoDir, fresh), B);
+  });
+
+  test('create-only against a ref that EXISTS is refused, and nothing lands', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const taken = 'refs/heads/already-there';
+    sh(repoDir, ['update-ref', taken, A]);
+    const g = grant();
+    const r = await gitAtomicExecute({
+      repoDir, ref: taken, payload: g, expectedOldSha: `absent:${taken}`, newSha: B,
+      operation: 'create', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.ok, false);
+    assert.equal(await readRef(repoDir, taken), A, 'the ref moved despite the create-only pin');
+    assert.equal(await readRef(repoDir, ledgerRefFor(g.jti)), `absent:${ledgerRefFor(g.jti)}`,
+      'the claim landed despite the transaction failing');
+  });
+});
+
+// ── 1199: THE REFUSALS STILL COME FIRST ──────────────────────────────────────
+/**
+ * Every one of these must reject BEFORE the transaction runs, with no side
+ * effect on either ref. They were all pre-transaction before the change and had
+ * to stay that way: a rejection that reached the transaction would touch the
+ * ledger namespace for an input we already knew was invalid.
+ */
+describe('github.exclusive — pre-transaction refusals survive unification (1199)', () => {
+  const noSideEffect = async (jti) => {
+    assert.equal(await readRef(repoDir, REF), A, 'the target moved on a refused input');
+    assert.equal(await readRef(repoDir, ledgerRefFor(jti)), `absent:${ledgerRefFor(jti)}`,
+      'a refused input still claimed the ledger');
+  };
+
+  test('a missing pin is refused before anything is touched', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    const r = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: null, newSha: B,
+      operation: 'ff', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.reason, 'missing_expected_old_sha');
+    await noSideEffect(g.jti);
+  });
+
+  test('a delimiter in a signed field is refused before anything is touched', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = { ...grant(), jti: 'jti|with|pipes' };
+    const r = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'ff', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.reason, 'delimiter_in_field');
+    assert.equal(await readRef(repoDir, REF), A);
+  });
+
+  test('per-ref replay is caught by the reflog, before the transaction', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    assert.equal((await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'ff', executor, deploymentId: DEPLOY,
+    })).ok, true);
+    sh(repoDir, ['update-ref', REF, A]);
+    const again = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'ff', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(again.reason, 'grant_already_consumed');
+    assert.equal(await readRef(repoDir, REF), A, 'the replay moved the ref');
+  });
+
+  test('cross-ref already-consumed refuses with the target untouched', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    assert.equal((await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'ff', executor, deploymentId: DEPLOY,
+    })).ok, true);
+    const other = 'refs/heads/cross';
+    sh(repoDir, ['update-ref', other, A]);
+    const r = await gitAtomicExecute({
+      repoDir, ref: other, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'ff', executor, deploymentId: DEPLOY,
+    });
+    assert.equal(r.reason, 'grant_already_consumed_cross_ref');
+    assert.equal(r.detail.ledger_ref, ledgerRefFor(g.jti));
+    assert.equal(await readRef(repoDir, other), A, 'the second target moved');
+  });
+
+  test('a deployment mismatch is refused before anything is touched', async (t) => {
+    if (!gitAvailable) return t.skip('git binary unavailable');
+    const g = grant();
+    const r = await gitAtomicExecute({
+      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+      operation: 'ff', executor, deploymentId: 'some-other-deployment',
+    });
+    assert.equal(r.reason, 'deployment_id_mismatch');
+    await noSideEffect(g.jti);
   });
 });

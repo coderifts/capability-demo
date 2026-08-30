@@ -31,10 +31,35 @@
  *   returns 0, THE REF HAS MOVED. If the process dies before the attestation is
  *   produced, the world changed and no signed evidence exists for it.
  *
+ *   WHAT IS NOW ONE TRANSACTION (1199). The cross-ref ledger claim and the
+ *   target CAS used to be two `update-ref` calls, in that order. That was
+ *   fail-closed — a claim could land and the CAS then refuse, spending a grant
+ *   with no mutation — and it is now ATOMIC: both go through a single
+ *   `git update-ref --stdin` batch, so they land together or not at all.
+ *
+ *   The refusal path changed with it, and the change is real rather than
+ *   cosmetic: a refused CAS used to leave the grant SPENT (the claim had already
+ *   landed, and the code deliberately did not roll it back), and now leaves it
+ *   REUSABLE, because nothing landed. That matches the Postgres gate, where a
+ *   failed transaction also consumes nothing. A racer who can force STATE_DRIFT
+ *   no longer burns the holder's grant; what they still cannot get is a second
+ *   USE, since a landing attempt takes the claim in the same batch as the move,
+ *   and the grant expires on its own `exp` regardless.
+ *
+ *   THIS DOES NOT EXTEND THE LEDGER'S REACH. It makes two existing operations
+ *   one transaction. The scope note below — that the cross-ref ledger is what it
+ *   is — is unchanged by it.
+ *
+ *   What is still NOT in any transaction is the attestation, and that is the
+ *   line this adapter cannot cross: once the batch returns 0, THE REF HAS MOVED.
  *   That case is not preventable here. It is DETECTABLE, and detection is what
  *   this adapter offers instead of prevention:
  *     · `update-ref -m` writes the reflog entry in the SAME lock as the ref move
  *       (measured 2026-08-29, git 2.50.1), so the marker cannot be half-written.
+ *       Re-measured for the `--stdin` batch (2026-08-30, same git): the message
+ *       lands on the target ref's reflog, and the ledger ref under
+ *       refs/coderifts/ records nothing — it is outside core.logAllRefUpdates'
+ *       default set — so the marker is not duplicated onto the claim.
  *     · The marker carries the jti, so a moved ref can always be traced to the
  *       grant that moved it, even when no attestation was produced.
  *   A ref whose reflog marker names a jti for which no attestation exists is
@@ -315,6 +340,28 @@ function git(repoDir, args) {
 }
 
 /**
+ * Same runner, with a transaction on stdin.
+ *
+ * `git update-ref --stdin` applies every command in one ref transaction: all of
+ * them land, or none does. MEASURED against git 2.50.1 — a failing
+ * `update` aborts the batch and the other refs are left untouched, which is the
+ * property the unified claim+CAS below rests on.
+ */
+function gitStdin(repoDir, args, stdin) {
+  return new Promise((resolve) => {
+    const child = execFile('git', ['-C', repoDir, ...args], { encoding: 'utf8' }, (err, stdout, stderr) => {
+      resolve({
+        ok: !err,
+        code: err && typeof err.code === 'number' ? err.code : (err ? 1 : 0),
+        stdout: String(stdout || ''),
+        stderr: String(stderr || ''),
+      });
+    });
+    child.stdin.end(stdin);
+  });
+}
+
+/**
  * Current ref value, or the ABSENT marker.
  *
  * Mirrors the Postgres gate's `absent:<id>` distinction (gate.sql builds
@@ -428,79 +475,90 @@ async function gitAtomicExecute({
     return { ok: false, status: 'GRANT_CONSUMED', reason: 'grant_already_consumed', http: 409 };
   }
 
-  // (2b) CROSS-REF consume. Claims the jti globally BEFORE the target ref moves,
-  //      so a grant already spent on ANOTHER ref is refused with no side effect
-  //      on this one. The create-only old-value makes the second claim fail under
-  //      git's own ref lock — the same serialisation the CAS below relies on.
+  // (2b) + (3) ONE TRANSACTION — the cross-ref ledger claim and the target CAS.
   //
-  //      THE OBJECT IS `newSha`, and the choice is forced by the ordering. The
-  //      panel suggested a tag carrying the attestation, but the attestation does
-  //      not exist yet: it is signed AFTER the CAS, and the claim must land
-  //      BEFORE it. `newSha` is the commit this grant authorises, it already
-  //      exists, it is carried by any push that carries the branch, and being a
-  //      ref target keeps it from gc. No new object, no extra git call.
+  // These used to be two `update-ref` calls, in that order, and the ordering was
+  // deliberate: claiming the jti globally BEFORE the target moved meant a grant
+  // already spent on ANOTHER ref was refused with no side effect here. That was
+  // fail-closed and it was correct; what it could not do was fail TOGETHER. A
+  // CAS that refused after the claim landed left the grant spent with no
+  // mutation — a real state the old code documented rather than hid.
+  //
+  // `git update-ref --stdin` applies both in one ref transaction, so the claim
+  // and the move now land together or not at all.
+  //
+  // ── WHAT THIS CHANGES ON THE REFUSAL PATH, stated because it is a semantic
+  //    change and not only a mechanical one ────────────────────────────────────
+  // The old code deliberately did NOT roll the ledger back on a CAS refusal,
+  // reasoning that deleting a claim would let a racer who can force STATE_DRIFT
+  // farm rollbacks and reuse the grant. Under one transaction there is nothing
+  // to roll back: the claim never lands, so a refused attempt leaves the grant
+  // REUSABLE where it used to leave it SPENT.
+  //
+  // That is the same shape the Postgres gate already has — BEGIN, consume and
+  // mutate, COMMIT; a failed transaction leaves the grant reusable there too —
+  // and it is why the trade is acceptable rather than merely convenient. What a
+  // forced-failure racer gains is that the holder's grant is not burned; what
+  // they cannot gain is a second USE, because a landing attempt consumes the
+  // claim in the same lock as the move. The grant still expires on its own `exp`.
+  //
+  // THE REFLOG MARKER STAYS ON THE TARGET MOVE. MEASURED: `-m` applies to the
+  // whole batch, the target ref records it, and the ledger ref under
+  // refs/coderifts/ records nothing (core.logAllRefUpdates does not cover it),
+  // so the marker is not duplicated onto the claim.
   const ledgerRef = ledgerRefFor(jti);
-  const claim = await git(repoDir, ['update-ref', ledgerRef, newSha, MUST_NOT_EXIST]);
-  if (!claim.ok) {
-    return {
-      ok: false,
-      status: 'GRANT_CONSUMED',
-      // Distinguishable from the per-ref path on purpose: an operator seeing this
-      // learns the grant was spent SOMEWHERE ELSE, which is a different fact.
-      reason: 'grant_already_consumed_cross_ref',
-      http: 409,
-      detail: { ledger_ref: ledgerRef },
-    };
-  }
 
   // Pin is the caller's. Never `readRef` here: an execution-time sha cannot
   // bind to the state authorize verified (HIBA-1). `before` is gone.
   const pin = String(expectedOldSha);
+  // The empty old-value means "must not exist" — the create-only form, matching
+  // the `absent:` sentinel the caller was given at authorize.
+  const targetOld = pin.startsWith('absent:') ? '' : pin;
 
-  // (3) THE CAS. update-ref moves the ref only if it still points at `pin`.
-  //     The reflog message is written in the SAME lock (measured), so the marker
-  //     cannot exist without the move, nor the move without the marker.
-  const args = ['update-ref', '-m', marker, ref, newSha];
-  if (pin.startsWith('absent:')) {
-    // Require creation: the empty old-value means "must not exist".
-    args.push('');
-  } else {
-    args.push(pin);
-  }
-  const upd = await git(repoDir, args);
+  const transaction = `update ${ledgerRef} ${newSha} ${MUST_NOT_EXIST}\n`
+    + `update ${ref} ${newSha} ${targetOld}\n`;
+  const tx = await gitStdin(repoDir, ['update-ref', '-m', marker, '--stdin'], transaction);
 
-  if (!upd.ok) {
+  if (!tx.ok) {
     // Re-READ rather than parse the error text: the observed value is a
-    // measurement, the message is prose that git may reword.
+    // measurement, the message is prose that git may reword. Two different
+    // facts hide behind one failed transaction, and an operator needs to know
+    // which — a grant spent elsewhere is not the same as a target that drifted.
+    const ledgerNow = await readRef(repoDir, ledgerRef);
     const current = await readRef(repoDir, ref);
 
-    // THE GRANT IS SPENT AND THE MUTATION DID NOT HAPPEN.
+    if (!String(ledgerNow).startsWith('absent:')) {
+      // The claim exists and this transaction did not create it, so the grant
+      // was consumed somewhere else. Distinguishable on purpose (the old
+      // separate-claim path reported this too).
+      return {
+        ok: false,
+        status: 'GRANT_CONSUMED',
+        reason: 'grant_already_consumed_cross_ref',
+        http: 409,
+        detail: { ledger_ref: ledgerRef },
+      };
+    }
+
+    // THE TARGET DID NOT MOVE, AND NEITHER DID THE LEDGER.
     //
-    // The ledger claim landed above; the target then refused to move. This is a
-    // real state, not an edge case to smooth over, and it is NOT a clean refusal:
-    // a clean refusal leaves the grant reusable, and this one does not.
-    //
-    // WE DO NOT ROLL THE LEDGER BACK. Deleting the claim would restore the exact
-    // replay window this whole step exists to close — a racer who can force a
-    // STATE_DRIFT could farm rollbacks and reuse the grant. Spending a grant on a
-    // failed attempt is the cheaper loss, and it is the one the holder can see.
-    //
-    // The honest outcome is therefore SPENT, not REFUSED: the caller must mint a
-    // new grant rather than retry this one, and `grant_spent: true` says so
-    // without pretending the mutation occurred.
+    // Under the old two-call form this branch reported `grant_spent: true`,
+    // because the claim had already landed. It now reports the opposite, and
+    // the difference is real: nothing was consumed, so this grant can be
+    // retried against the state it was actually issued for.
     return {
       ok: false,
       status: 'STATE_DRIFT',
       reason: 'state_changed_since_challenge',
       http: 409,
-      grant_spent: true,
+      grant_spent: false,
       detail: {
         challenged: pin,
         current,
         ledger_ref: ledgerRef,
-        note: 'the cross-ref ledger claim landed before the CAS refused; this grant '
-          + 'is consumed and the target did not move. Mint a new grant — retrying '
-          + 'this one returns grant_already_consumed_cross_ref.',
+        note: 'the ledger claim and the target CAS are one transaction; the CAS refused, so '
+          + 'neither landed. This grant was NOT consumed and may be retried once the target '
+          + 'is at the challenged state.',
       },
     };
   }

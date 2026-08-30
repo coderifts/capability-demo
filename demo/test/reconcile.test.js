@@ -135,15 +135,28 @@ describe('reconcile — git evidence reader (calls the existing reconcileLedger)
     assert.match(mine.evidence.reason, /absence is not proof/);
   });
 
-  test('a claim with no ref move (grant_spent) → RELEASED, with the ambiguity stated', async (t) => {
+  /**
+   * REWRITTEN for 1199. This used to reach the RELEASED state through a FAILED
+   * CAS: the ledger claim landed, the target refused, and the leftover claim had
+   * no matching move. Since the claim and the CAS became one `update-ref
+   * --stdin` transaction, a refused CAS leaves NO claim, so that route is gone.
+   *
+   * RELEASED itself is unchanged, and reconcileGit's own reason names the other
+   * route: the move is on a ref outside the set we were asked to inspect. The
+   * outcome is the same and the ambiguity it reports is the same — only the way
+   * the fixture reaches it had to move.
+   */
+  test('a claim with no ref move in scope → RELEASED, with the ambiguity stated', async (t) => {
     if (!gitAvailable) return t.skip('git binary unavailable');
-    sh(repoDir, ['update-ref', REF, B]);                 // drift the target first
+    const elsewhere = 'refs/heads/spent-elsewhere';
+    sh(repoDir, ['update-ref', elsewhere, A]);
     const g = grant();
-    const r = await gitAtomicExecute({
-      repoDir, ref: REF, payload: g, expectedOldSha: A, newSha: B,
+    const r = await gitAtomicExecute({          // succeeds, on a ref we will not inspect
+      repoDir, ref: elsewhere, payload: g, expectedOldSha: A, newSha: B,
       operation: 'ff', executor, deploymentId: DEPLOY,
     });
-    assert.equal(r.grant_spent, true);
+    assert.equal(r.ok, true, JSON.stringify(r));
+
     const out = await reconcileGit({ repoDir, refs: [REF], attestationsByJti: {} });
     const rel = out.find((e) => e.outcome === OUTCOME.RELEASED);
     assert.ok(rel, JSON.stringify(out));
