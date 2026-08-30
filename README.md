@@ -219,6 +219,32 @@ Analyze mode never mints a grant; STOP / REQUEST_APPROVAL never mint one either.
 any CodeRifts key. The demo grant also binds a labelled stand-in receipt digest rather than
 a real receipt token.
 
+### `deployment_id` on the demo's v1 grant is conscious design (1130-F1)
+
+The demo deliberately issues **v1** grants — a simpler, teachable reference for the
+data-plane gateway. Every such grant carries a `deployment_id`. That field is **this
+repo's data-plane atomicity concept**, not part of the public grant format:
+
+- it is half of the `consumed_grants (deployment_id, jti)` PRIMARY KEY
+- it is inside the signed gate preimage (`cr.gate.preimage.v1|{jti}|{deployment_id}|sha256:mutation|{target}`)
+- the attestation binds it (`ATTEST_UNBOUND` / `deployment_id_mismatch` on mismatch)
+- the reconciler's CONFIRMED path enforces it
+
+The public grant format does **not** carry it. Public v1 `SIGNED_FIELDS` and v2
+`V2_REQUIRED_STRINGS` neither list `deployment_id`. The public v1-verifier therefore
+rejects the demo's default grant as `unknown_field` — and that is **correctly
+strict**, not a gap. `issue-grant.js` calls the slot "optional-additive"; the data
+plane here makes it **mandatory**. Those are two different jobs.
+
+**Two purposes, two verifiers.** The demo grant verifies with **this** repo's verifier
+because the demo is teaching consume + mutate + seal. It is **not** publicly
+verifiable against the product v1-verifier, by design. The real product
+(`execution-grant-v2.js`) uses **v2**, which binds the deployment via
+`tenant_id` + `target_uri` instead of stuffing `deployment_id` into a v1 grant.
+
+Do not paper this over by loosening the public verifier, and do not cite a demo
+grant as a publicly verifiable `cr.exec.v1` token.
+
 ## Two profiles: BEARER is refused; ATOMIC is the write path
 
 The grant format still carries an optional `state_nonce` (the verifier classifies
