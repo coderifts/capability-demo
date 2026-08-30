@@ -26,6 +26,9 @@
  *   That limit is MACHINE-READABLE on every execute result:
  *     same_resource_cas          = ENFORCING_EXCLUSIVE_HTTP_CAS  (If-Match on ONE path)
  *     cross_resource_single_use  = INDETERMINATE_HTTP_CAS        (NOT ENFORCING_ATOMIC)
+ *     target_scope_binding       = EXACT  (already proven by verify-grant step 8
+ *       before execute: a grant for /a cannot run on /b. SURFACED here, not added.)
+ *   EXACT does not imply single-use. The two fields stay separate.
  *   A consumer must not have to read this comment. Git/pg declare their
  *   level on `row.profile` (ENFORCING_EXCLUSIVE_REF_CAS / ENFORCING_ATOMIC);
  *   HTTP keeps that field as the same-resource CAS it can actually do, and
@@ -112,6 +115,12 @@ const HTTP_PROFILE = 'ENFORCING_EXCLUSIVE_HTTP_CAS';
  *  Named on the result so a consumer does not have to read the comment.
  *  NOT ENFORCING_ATOMIC — that is the pg one-transaction profile. */
 const HTTP_CROSS_RESOURCE = 'INDETERMINATE_HTTP_CAS';
+
+/** Grant is cryptographically bound to this target (verify-grant.js:230-231
+ *  `GRANT_SCOPE_MISMATCH` / `target_mismatch`). A successful execute is only
+ *  reachable AFTER that check. Not a new binding — the field names what
+ *  already ran. Does NOT imply cross-resource single-use. */
+const TARGET_SCOPE_EXACT = 'EXACT';
 
 function httpAssurance() {
   return {
@@ -608,6 +617,9 @@ async function httpAtomicExecute({
       atomic_execution_attestation,
       preimage,
       if_match_honored: 'unproven_on_matching_2xx',
+      // SURFACED, not added: verify-grant step 8 already bound the grant to this
+      // target before execute. EXACT does not imply single-use.
+      target_scope_binding: TARGET_SCOPE_EXACT,
       ...(canaryResult ? { canary: canaryResult } : {}),
       ...honesty,
     };
@@ -630,6 +642,7 @@ module.exports = {
   observeEtag,
   HTTP_PROFILE,
   HTTP_CROSS_RESOURCE,
+  TARGET_SCOPE_EXACT,
   GATE_PREIMAGE_V,
   CANARY_HONORS,
   CANARY_DOES_NOT_HONOR,

@@ -14,7 +14,7 @@ const crypto = require('node:crypto');
 const http = require('node:http');
 
 const {
-  httpAtomicExecute, providerCanary, HTTP_PROFILE, HTTP_CROSS_RESOURCE,
+  httpAtomicExecute, providerCanary, HTTP_PROFILE, HTTP_CROSS_RESOURCE, TARGET_SCOPE_EXACT,
   CANARY_HONORS, CANARY_DOES_NOT_HONOR, CANARY_UNKNOWN, CANARY_STALE_IF_MATCH,
 } = require('../src/http-atomic');
 const { verifyAtomicExecutionAttestation } = require('../src/atomic');
@@ -173,6 +173,8 @@ describe('http.exclusive — If-Match CAS', () => {
       'same-resource ETag CAS keeps its real level');
     assert.equal(r.cross_resource_single_use, HTTP_CROSS_RESOURCE);
     assert.equal(r.cross_resource_single_use, 'INDETERMINATE_HTTP_CAS');
+    assert.equal(r.target_scope_binding, TARGET_SCOPE_EXACT);
+    assert.equal(r.target_scope_binding, 'EXACT');
     assert.notEqual(r.row.profile, 'ENFORCING_ATOMIC');
     assert.notEqual(r.cross_resource_single_use, 'ENFORCING_ATOMIC');
     assert.equal(r.row.if_match, '"v1"');
@@ -285,6 +287,11 @@ describe('http.exclusive — If-Match CAS', () => {
     assert.notEqual(r.cross_resource_single_use, 'ENFORCING_ATOMIC');
     assert.equal(r.same_resource_cas, 'ENFORCING_EXCLUSIVE_HTTP_CAS');
     assert.equal(r.row.profile, HTTP_PROFILE, 'the downgrade is scoped; same-resource CAS is unchanged');
+    // Proven target-binding and unproven single-use stay SEPARATE on the same result.
+    assert.equal(r.target_scope_binding, 'EXACT');
+    assert.equal(r.cross_resource_single_use, 'INDETERMINATE_HTTP_CAS');
+    assert.notEqual(r.target_scope_binding, r.cross_resource_single_use,
+      'EXACT must not be read as single-use');
   });
 
   test('UPDATE-intent + no ETag on pre-mutation GET → fail-closed BEFORE PUT (HIBA-3)', async () => {

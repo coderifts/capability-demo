@@ -124,6 +124,9 @@ describe('POST /http/resource-update', () => {
     assert.equal(r.json.ok, true);
     assert.equal(r.json.profile, 'ATOMIC', 'the GRANT profile is unchanged by the target');
     assert.equal(r.json.enforcement_profile, HTTP_PROFILE, 'which adapter held the boundary');
+    assert.equal(r.json.target_scope_binding, 'EXACT');
+    assert.equal(r.json.cross_resource_single_use, 'INDETERMINATE_HTTP_CAS');
+    assert.notEqual(r.json.target_scope_binding, r.json.cross_resource_single_use);
     assert.ok(r.json.attestation);
     assert.ok(r.json.authorized_by && r.json.authorized_by.jti);
     assert.equal(origin.state.writes, 1);
@@ -191,6 +194,24 @@ describe('POST /http/resource-update', () => {
     assert.equal(r.json.status, 'STATE_CHALLENGE_UNKNOWN');
     assert.equal(r.json.reason, 'resource_path_absolute');
     assert.equal(origin.state.requests, 0, 'must not let the request pick the origin');
+  });
+
+  test('grant for /a presented on /b is refused before execute (verify-grant target_mismatch)', async () => {
+    origin.state.requests = 0;
+    origin.state.writes = 0;
+    const issuedFor = httpBody({ resource_path: PATH });
+    const grantA = httpGrant(issuedFor);
+    const bodyB = httpBody({ resource_path: '/articles/2' });
+    const r = await req('POST', '/http/resource-update', { body: bodyB, grant: grantA, at: base });
+    assert.equal(r.code, 403, JSON.stringify(r.json));
+    // Published verifier name (untouched): GRANT_SCOPE_MISMATCH / target_mismatch.
+    assert.equal(r.json.status, 'GRANT_SCOPE_MISMATCH');
+    assert.equal(r.json.reason, 'target_mismatch');
+    // Demo-layer name: GRANT_TARGET_SCOPE_MISMATCH, no mutation attempted.
+    assert.equal(r.json.demo_named, 'GRANT_TARGET_SCOPE_MISMATCH');
+    assert.equal(r.json.mutation_attempted, false);
+    assert.equal(origin.state.writes, 0);
+    assert.equal(origin.state.requests, 0, 'guard refuses before any origin HTTP');
   });
 });
 

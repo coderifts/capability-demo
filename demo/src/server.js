@@ -67,6 +67,27 @@ function buildApp({
   metrics = defaultMetrics,
 } = {}) {
   const app = express();
+  // Demo-layer name for verify-grant.js:230-231 (published: GRANT_SCOPE_MISMATCH /
+  // target_mismatch). The verifier is UNTOUCHED. When a grant for /a is presented
+  // on /b the guard refuses BEFORE handle/execute; we surface that as
+  // GRANT_TARGET_SCOPE_MISMATCH + mutation_attempted:false so a consumer does
+  // not have to know the published reason string.
+  app.use((req, res, next) => {
+    const orig = res.json.bind(res);
+    res.json = (body) => {
+      if (body && typeof body === 'object'
+          && body.status === 'GRANT_SCOPE_MISMATCH'
+          && body.reason === 'target_mismatch') {
+        return orig({
+          ...body,
+          demo_named: 'GRANT_TARGET_SCOPE_MISMATCH',
+          mutation_attempted: false,
+        });
+      }
+      return orig(body);
+    };
+    next();
+  });
   const executor = loadExecutor();
   const deployment_id = deploymentId == null ? '' : String(deploymentId);
   // STEP 1: host routes use `pool` (cr_host).
@@ -243,6 +264,9 @@ function buildApp({
       return res.status(req.method === 'POST' ? 201 : 200).json({
         ok: true, profile, row: out.row,
         ...(out.row && out.row.profile ? { enforcement_profile: out.row.profile } : {}),
+        ...(out.target_scope_binding ? { target_scope_binding: out.target_scope_binding } : {}),
+        ...(out.same_resource_cas ? { same_resource_cas: out.same_resource_cas } : {}),
+        ...(out.cross_resource_single_use ? { cross_resource_single_use: out.cross_resource_single_use } : {}),
         attestation: out.attestation,
         atomic_execution_attestation: out.atomic_execution_attestation,
         authorized_by: { jti: payload.jti, operation: payload.operation, state_nonce: payload.state_nonce },
