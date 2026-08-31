@@ -1,0 +1,62 @@
+# CodeRifts executor — CUSTOMER-HOSTED, KEYLESS.
+#
+# ── WHY THIS IS A SECOND DOCKERFILE ─────────────────────────────────────────
+# demo/Dockerfile builds the DEMO image and runs `gen-keys.js` at build time, so
+# a keypair exists inside that image. That is correct for a demo and wrong for
+# anything a customer runs: a published image carrying a CodeRifts-generated key
+# would mean CodeRifts had produced the identity that signs the customer's
+# attestations. This image generates NOTHING. It has no key, and it cannot make
+# one.
+#
+# ── THE C-ROUTE LINE (roadmap 1096) ─────────────────────────────────────────
+# The customer runs this container, on their infrastructure, with a keypair they
+# generated and hold. CodeRifts does not operate it, cannot reach it, and never
+# sees the private key. A MANAGED variant — CodeRifts running the executor and
+# holding the key — would cross that line; this does not.
+#
+# ── FAIL-CLOSED, MEASURED ───────────────────────────────────────────────────
+# src/server.js:51-55 loads the executor key EAGERLY in buildApp. With no key the
+# process does not start — it cannot serve a single request, let alone sign an
+# attestation. That is stronger than "verifies but does not attest", and the
+# entrypoint turns the resulting ENOENT into a sentence an operator can act on.
+FROM node:20-alpine
+
+# OCI labels — a reader of the registry sees the boundary without the doc.
+LABEL org.opencontainers.image.title="CodeRifts executor (customer-hosted)"
+LABEL org.opencontainers.image.description="Keyless executor. The customer generates the executor keypair, holds the private key, and runs this container. CodeRifts neither operates it nor holds the key."
+LABEL org.opencontainers.image.source="https://github.com/coderifts/capability-demo"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL com.coderifts.hosting="customer-hosted"
+LABEL com.coderifts.key-custody="customer"
+LABEL com.coderifts.key-baked-at-build="false"
+
+WORKDIR /app
+
+# The middleware is a file: dependency — copy it before install so npm can link it.
+COPY packages/middleware /app/packages/middleware
+COPY demo/package.json /app/demo/package.json
+
+WORKDIR /app/demo
+RUN npm install --omit=dev --no-audit --no-fund
+
+COPY demo/ /app/demo/
+
+# NO gen-keys.js. Deleted from the image so it cannot be run by accident inside a
+# customer deployment and quietly mint an identity nobody registered.
+RUN rm -f /app/demo/gen-keys.js /app/demo/keys/*.pem /app/demo/keys/*.json 2>/dev/null || true
+
+COPY demo/docker-entrypoint-executor.sh /usr/local/bin/executor-entrypoint
+RUN chmod +x /usr/local/bin/executor-entrypoint
+
+RUN apk add --no-cache curl postgresql-client
+
+# The key directory the customer mounts. Empty in the image — that is the point.
+ENV CODERIFTS_KEYS_DIR=/keys
+VOLUME ["/keys"]
+
+# Non-root: the executor reads a mounted key and writes nothing to its own image.
+USER node
+
+EXPOSE 3000
+ENTRYPOINT ["/usr/local/bin/executor-entrypoint"]
+CMD ["node", "src/server.js"]
