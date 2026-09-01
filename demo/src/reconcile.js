@@ -118,7 +118,61 @@ const ATTEST = Object.freeze({
   KEY_NOT_IN_FORCE: 'KEY_NOT_IN_FORCE',
   BAD_KEY: 'UNUSABLE_KEY',
   TARGET_MISMATCH: 'ATTEST_TARGET_MISMATCH',
+
+  // ── Codes for doubt that never reached the signature gate (1246) ──────────
+  //
+  // Every INDETERMINATE used to carry prose and, on these paths, nothing a
+  // machine could read. Two entries with different causes — no attestation was
+  // ever stored, and an attestation exists but describes another mutation —
+  // were indistinguishable to a caller classifying the outcome.
+  //
+  // ADDITIVE ONLY. No verdict moves: each of these already resolved to
+  // INDETERMINATE and still does. What changes is that the doubt is now named.
+  // The existing set is deliberately mixed — `ATTEST_*` for what the signed
+  // evidence says, bare names for the material it was checked against — and
+  // these follow the same split.
+
+  /** No signed evidence exists for this entry at all. */
+  ABSENT: 'ATTEST_ABSENT',
+  /** An attestation exists, but the ledger row holds no preimage to bind it to. */
+  NO_LEDGER_PREIMAGE: 'LEDGER_PREIMAGE_ABSENT',
+  /** The consumed-grant claim itself is gone (deleted or pruned). */
+  NO_LEDGER_CLAIM: 'LEDGER_CLAIM_ABSENT',
+  /** Signed preimage and ledger preimage disagree on the mutation digest. */
+  DIGEST_MISMATCH: 'ATTEST_DIGEST_MISMATCH',
+  /** They disagree somewhere else, or do not share a comparable shape. */
+  PREIMAGE_MISMATCH: 'ATTEST_PREIMAGE_MISMATCH',
+  /** The origin could not be read, so it is evidence of nothing either way. */
+  ORIGIN_UNREADABLE: 'ORIGIN_UNREADABLE',
+  /** The origin answered, but nothing here can say the answer is this grant's work. */
+  NO_EXPECTED_REPRESENTATION: 'NO_EXPECTED_REPRESENTATION',
+  /** Something signed for a mutation the origin does not show. */
+  ORIGIN_CONTRADICTS: 'ORIGIN_CONTRADICTS_ATTESTATION',
 });
+
+/**
+ * Which field of the canonical preimage the two copies disagree on.
+ *
+ * MEASURED (demo/sql/gate.sql:146-148) — the preimage is
+ * `cr.gate.preimage.v1|<jti>|<deployment_id>|sha256:<mutation_digest>|<target_id>`,
+ * so at this gate BOTH copies are in hand and the divergence is separable
+ * without moving any check: the signed bytes are compared to the ledger's,
+ * field by field, purely to name what differs.
+ *
+ * This runs BEFORE the signature gate and does not replace it. A token whose
+ * preimage matches still has to verify; a token whose preimage does not match
+ * is doubt regardless of how well it is signed.
+ */
+function preimageDivergence(signedPreimage, ledgerPreimage) {
+  const a = String(signedPreimage).split('|');
+  const b = String(ledgerPreimage).split('|');
+  const FIELD_TARGET = 4;
+  const FIELD_DIGEST = 3;
+  if (a.length !== b.length || a.length < 5) return ATTEST.PREIMAGE_MISMATCH;
+  if (a[FIELD_TARGET] !== b[FIELD_TARGET]) return ATTEST.TARGET_MISMATCH;
+  if (a[FIELD_DIGEST] !== b[FIELD_DIGEST]) return ATTEST.DIGEST_MISMATCH;
+  return ATTEST.PREIMAGE_MISMATCH;
+}
 
 /**
  * TARGET BINDING (roadmap 1196, ABSOLUTE P0).
@@ -357,12 +411,14 @@ async function reconcileGit({
     if (missing.has(mv.jti)) {
       out.push(entry('git', mv.jti, OUTCOME.INDETERMINATE, {
         ref: mv.ref,
+        attest_status: ATTEST.NO_LEDGER_CLAIM,
         reason: 'ref moved and its consumed-grant claim is absent (deleted or pruned); '
           + 'absence is not proof the grant was unconsumed',
       }));
     } else if (unattested.has(mv.jti)) {
       out.push(entry('git', mv.jti, OUTCOME.INDETERMINATE, {
         ref: mv.ref,
+        attest_status: ATTEST.ABSENT,
         reason: 'ref moved under this grant and no attestation exists for it',
       }));
     } else {
@@ -454,6 +510,7 @@ async function reconcilePostgres({
     if (!token) {
       out.push(entry('postgres', jti, OUTCOME.INDETERMINATE, {
         status: row.status,
+        attest_status: ATTEST.ABSENT,
         reason: 'consumed with no stored attestation: the mutation may have been applied and no '
           + 'signed evidence exists for what was authorised',
       }));
@@ -462,6 +519,7 @@ async function reconcilePostgres({
     if (!row.preimage) {
       out.push(entry('postgres', jti, OUTCOME.INDETERMINATE, {
         status: row.status,
+        attest_status: ATTEST.NO_LEDGER_PREIMAGE,
         reason: 'an attestation exists but the ledger row carries no preimage to bind it to',
       }));
       continue;
@@ -478,8 +536,18 @@ async function reconcilePostgres({
     const carriesRowPreimage = seg.length === 4
       && Buffer.from(seg[2], 'base64url').toString('utf8') === row.preimage;
     if (!carriesRowPreimage) {
+      // Name WHICH field diverged. Both copies are in hand here, so reporting
+      // "the preimages differ" when we can say "they name different targets"
+      // discards something the caller needs to classify the outcome.
+      const signedPreimage = seg.length === 4
+        ? Buffer.from(seg[2], 'base64url').toString('utf8')
+        : null;
+      const divergence = signedPreimage === null
+        ? ATTEST.PREIMAGE_MISMATCH
+        : preimageDivergence(signedPreimage, row.preimage);
       out.push(entry('postgres', jti, OUTCOME.INDETERMINATE, {
         status: row.status,
+        attest_status: divergence,
         reason: 'the stored attestation does not carry this row\'s preimage: the evidence '
           + 'contradicts itself, which is doubt, not a pass',
       }));
@@ -555,6 +623,7 @@ async function reconcileHttp({
     if (!obs || obs.ok !== true) {
       out.push(entry('http', jti, OUTCOME.INDETERMINATE, {
         resource: resourcePath,
+        attest_status: ATTEST.ORIGIN_UNREADABLE,
         reason: `the origin could not be read (${(obs && obs.error) || 'no response'}): an origin `
           + 'that cannot answer is not evidence the mutation did or did not happen',
       }));
@@ -569,6 +638,7 @@ async function reconcileHttp({
       out.push(entry('http', jti, OUTCOME.INDETERMINATE, {
         resource: resourcePath,
         observed_etag: obs.etag == null ? null : obs.etag,
+        attest_status: ATTEST.NO_EXPECTED_REPRESENTATION,
         reason: 'no expected representation to compare: the origin answered, but nothing here can '
           + 'say whether what it returned is the result of this grant',
       }));
@@ -581,6 +651,7 @@ async function reconcileHttp({
         out.push(entry('http', jti, OUTCOME.INDETERMINATE, {
           resource: resourcePath,
           observed_etag: obs.etag == null ? null : obs.etag,
+          attest_status: ATTEST.ORIGIN_CONTRADICTS,
           reason: 'an attestation exists but the origin does not show the expected representation: '
             + 'the evidence contradicts itself',
         }));
@@ -598,6 +669,7 @@ async function reconcileHttp({
       out.push(entry('http', jti, OUTCOME.INDETERMINATE, {
         resource: resourcePath,
         observed_etag: obs.etag,
+        attest_status: ATTEST.ABSENT,
         reason: 'the mutation landed and no signed evidence exists for what authorised it — the '
           + 'crash window HTTP cannot close, by construction',
       }));
