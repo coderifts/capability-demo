@@ -80,6 +80,41 @@ give it — your database, your git remote, your HTTP origin.
 
 ---
 
+## 4. Confirm what the running instance loaded
+
+The container logs the executor identity it loaded, so the first line to check is which key a
+running instance signs with:
+
+```
+demo api on 3000 (offline grants; ATOMIC via session-tx gate+sign+seal; executor has no table DML)
+executor key loaded: kid=<your-kid> from /etc/coderifts/keys/executor-private.pem
+```
+
+`GET /readyz` reports the same thing as data, plus the digest of the grant-verification module on
+disk and which adapters are wired on this instance:
+
+```console
+$ curl -s localhost:3000/readyz | jq
+{
+  "ready": true,
+  "profile": "ENFORCING_ATOMIC",
+  "key": { "kid": "<your-kid>", "source": "/etc/coderifts/keys/executor-private.pem" },
+  "adapters": [ { "target": "postgres", "wired": true }, ... ],
+  "verify_core_sha": "sha256:...",
+  "does_not_prove": [ ... ]
+}
+```
+
+Two comparisons are worth making, and neither is made for you: the `kid` against the public half you
+registered in step 2, and `verify_core_sha` against the artifact you reviewed. The endpoint reports
+what this process has; it cannot tell you whether that is what you intended.
+
+It carries no key material — `kid` names the key, and the private half never leaves the process.
+
+`/readyz` is a statement about configuration at this moment. It is not evidence that any write
+happened, that a grant was honoured, or that the executor behaved correctly; those are decided per
+request, in a transaction, and the honest list is in the response itself under `does_not_prove`.
+
 ## What this executor proves
 
 Per the enforcement profile it is wired for (`GET /health` reports which):

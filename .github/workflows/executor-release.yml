@@ -1,0 +1,139 @@
+# Publish the customer-hosted executor image.
+#
+# The image is KEYLESS BY DESIGN: the customer generates the executor keypair and holds the private
+# half. Every gate below exists because a published image that carried a key — or could mint one —
+# would be an identity CodeRifts created for signatures the customer is accountable for. The gates
+# run BEFORE the push, so a build that fails them is never published.
+#
+# The first push was made manually. This workflow is for the ones after it.
+#
+# ── permissions ──────────────────────────────────────────────────────────────────────────────────
+# `packages: write` on GITHUB_TOKEN is the intended path. Whether the organisation allows it could
+# NOT be measured from this checkout (`gh api orgs/coderifts/actions/permissions/workflow` returns
+# 403 without the admin:org scope), so if the push step fails with a permissions error, the
+# fallback is a PAT with `write:packages` stored as the repository secret GHCR_PUSH_TOKEN — swap the
+# `password:` line below. Do not widen the default token instead.
+
+name: executor-release
+
+on:
+  push:
+    tags:
+      - 'executor-v*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the version from the tag
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#executor-v}"
+          if [ -z "$version" ] || [ "$version" = "$GITHUB_REF_NAME" ]; then
+            echo "tag ${GITHUB_REF_NAME} is not executor-v<version>" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/coderifts/executor:$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: |
+          docker build -f demo/Dockerfile.executor \
+            -t "${{ steps.version.outputs.image }}" .
+
+      # ── keyless verification, as gates ────────────────────────────────────────────────────────
+      # Each step inspects the BUILT image. A failure here stops the job before any push.
+
+      - name: No private key material outside /etc/ssl
+        run: |
+          # /etc/ssl is the base image's CA bundle and is expected. Anything else is a key we
+          # would be shipping, which is the one thing this image must never do.
+          found=$(docker run --rm --entrypoint sh "${{ steps.version.outputs.image }}" -c \
+            "find / -xdev \( -name '*.pem' -o -name '*.key' \) -not -path '/etc/ssl/*' 2>/dev/null" || true)
+          if [ -n "$found" ]; then
+            echo "key material in the image:" >&2
+            echo "$found" >&2
+            exit 1
+          fi
+          echo "no key material outside /etc/ssl"
+
+      - name: No key generator in the image
+        run: |
+          # gen-keys.js is removed at build time. If it is present, the image can mint an identity
+          # inside a container the customer is accountable for.
+          found=$(docker run --rm --entrypoint sh "${{ steps.version.outputs.image }}" -c \
+            "find / -xdev -name 'gen-keys.js' 2>/dev/null" || true)
+          if [ -n "$found" ]; then
+            echo "key generator present: $found" >&2
+            exit 1
+          fi
+          echo "no key generator"
+
+      - name: Refuses to start without a key (exit 78)
+        run: |
+          set +e
+          docker run --rm "${{ steps.version.outputs.image }}" >/dev/null 2>&1
+          code=$?
+          set -e
+          # 78 is EX_CONFIG: a configuration problem, not a crash. Any other code — including 0 —
+          # means the image started without an executor identity.
+          if [ "$code" -ne 78 ]; then
+            echo "expected exit 78 with no key, got $code" >&2
+            exit 1
+          fi
+          echo "keyless start refused with exit 78"
+
+      - name: Custody labels are present and say customer
+        run: |
+          for pair in \
+            "com.coderifts.hosting=customer-hosted" \
+            "com.coderifts.key-custody=customer" \
+            "com.coderifts.key-baked-at-build=false"; do
+            key="${pair%%=*}"; want="${pair#*=}"
+            got=$(docker inspect -f "{{ index .Config.Labels \"$key\" }}" "${{ steps.version.outputs.image }}")
+            if [ "$got" != "$want" ]; then
+              echo "label $key is '$got', expected '$want'" >&2
+              exit 1
+            fi
+          done
+          echo "custody labels correct"
+
+      # ── publish ───────────────────────────────────────────────────────────────────────────────
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # Fallback if the organisation does not allow GITHUB_TOKEN to write packages:
+          #   password: ${{ secrets.GHCR_PUSH_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the version tag
+        id: push
+        run: |
+          # The version tag only. :latest is deliberately NOT pushed — an operator running a
+          # customer-hosted executor should be pinning a version they reviewed, and a moving tag
+          # invites the opposite.
+          docker push "${{ steps.version.outputs.image }}"
+          digest=$(docker inspect -f '{{ index .RepoDigests 0 }}' "${{ steps.version.outputs.image }}")
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Report the digest
+        run: |
+          {
+            echo "### Executor image published"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| tag | \`${{ steps.version.outputs.image }}\` |"
+            echo "| digest | \`${{ steps.push.outputs.digest }}\` |"
+            echo ""
+            echo "Pin the digest, not the tag. The keyless gates that ran before this push:"
+            echo "no key material outside /etc/ssl, no key generator, exit 78 with no key, custody labels."
+          } >> "$GITHUB_STEP_SUMMARY"

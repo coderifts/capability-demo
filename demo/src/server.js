@@ -48,6 +48,28 @@ const OPERATION_MAP = {
   'POST /http/resource-update': 'resource-update',
 };
 
+/**
+ * SHA-256 of the grant-verification module this server actually runs.
+ *
+ * Computed from the file on disk rather than pinned in a constant: a constant records what
+ * someone believed was deployed, and the only useful readback is what is deployed. Reported by
+ * /readyz so an operator can compare a running container against a reviewed artifact.
+ */
+function verifyCoreSha() {
+  try {
+    const file = require.resolve('@coderifts/execution-grant-middleware/src/verify-grant.js');
+    return `sha256:${crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')}`;
+  } catch (_) {
+    try {
+      const fallback = path.join(__dirname, '..', '..', 'packages', 'middleware', 'src', 'verify-grant.js');
+      return `sha256:${crypto.createHash('sha256').update(fs.readFileSync(fallback)).digest('hex')}`;
+    } catch (_e) {
+      // Not resolvable is reported as unknown; a missing digest must never read as a matching one.
+      return null;
+    }
+  }
+}
+
 function loadExecutor() {
   const privateKey = crypto.createPrivateKey(fs.readFileSync(EXEC_KEY_FILE, 'utf8'));
   const kid = JSON.parse(fs.readFileSync(EXEC_REGISTRY, 'utf8')).keys[0].kid;
@@ -164,6 +186,46 @@ function buildApp({
   }));
 
   // Operational counters. NOT cryptographic evidence; NOT authenticated in this demo.
+  /**
+   * Readiness, as measured values only.
+   *
+   * DISTINCT FROM /health, which describes what this build CAN do. /readyz reports what this
+   * PROCESS actually loaded: which key id it signs with, where that key came from, which adapters
+   * are wired on this instance, and the digest of the grant-verification module on disk.
+   *
+   * No key material, ever — the kid names the key, the private half never leaves the process.
+   *
+   * `does_not_prove` is not a disclaimer bolted on the end. A readiness endpoint that lists what
+   * is loaded invites the reading that a green /readyz means the executor is behaving correctly,
+   * and it means nothing of the sort: it is a statement about configuration at this moment, made
+   * by the process about itself.
+   */
+  app.get('/readyz', (_q, r) => {
+    const sha = verifyCoreSha();
+    return r.json({
+      ready: true,
+      profile: 'ENFORCING_ATOMIC',
+      key: {
+        kid: executor.kid,
+        // WHERE the key came from, not the key. A mounted file and a baked-in one are the same
+        // bytes to this process and a completely different claim about who is accountable.
+        source: EXEC_KEY_FILE,
+      },
+      adapters: [
+        { target: 'postgres', wired: true },
+        { target: 'github.exclusive', wired: gitRepoDir != null },
+        { target: 'http.exclusive', wired: httpBaseUrl != null },
+      ],
+      verify_core_sha: sha,
+      does_not_prove: [
+        'that any write has happened — this reports configuration at this moment, not behaviour',
+        'that the executor key is the one you registered; compare the kid against your registry',
+        'that the verify core on disk is the one you reviewed; compare verify_core_sha yourself',
+        'that a grant will be honoured — that is decided per request, by the gate, in a transaction',
+      ],
+    });
+  });
+
   app.get('/metrics', (_q, r) => r.json({
     counters: metrics.snapshot(),
     honesty: METRICS_HONESTY,
@@ -343,9 +405,13 @@ async function main() {
   const hostPool = makePool(hostUrl());
   const executorPool = makePool(executorUrl());
   buildApp({ pool: hostPool, executorPool }).listen(PORT, () => {
+    // The startup line already existed but never named the key. An operator reading container
+    // logs could not tell WHICH executor identity a running instance had loaded, which is the
+    // first thing to check when signatures are attributed to the wrong party.
     process.stdout.write(
       `demo api on ${PORT} (offline grants; ATOMIC via session-tx gate+sign+seal; executor has no table DML)\n`,
     );
+    process.stdout.write(`executor key loaded: kid=${loadExecutor().kid} from ${EXEC_KEY_FILE}\n`);
   });
 }
 
