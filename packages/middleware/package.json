@@ -1,7 +1,6 @@
 {
   "name": "@coderifts/capability-express",
-  "version": "0.1.0",
-  "private": true,
+  "version": "1.0.0",
   "description": "Express middleware that verifies cr.exec.v1 execution grants OFFLINE against a pinned Ed25519 public key.",
   "license": "MIT",
   "main": "src/index.js",
@@ -10,6 +9,31 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test \"test/*.test.js\"",
+    "prepublishOnly": "npm test"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coderifts/capability-demo.git",
+    "directory": "packages/middleware"
+  },
+  "homepage": "https://github.com/coderifts/capability-demo/tree/main/packages/middleware",
+  "bugs": {
+    "url": "https://github.com/coderifts/capability-demo/issues"
+  },
+  "keywords": [
+    "express",
+    "middleware",
+    "ed25519",
+    "authorization",
+    "offline-verification"
+  ],
+  "publishConfig": {
+    "access": "public"
   }
 }
