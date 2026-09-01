@@ -115,6 +115,15 @@ It carries no key material — `kid` names the key, and the private half never l
 happened, that a grant was honoured, or that the executor behaved correctly; those are decided per
 request, in a transaction, and the honest list is in the response itself under `does_not_prove`.
 
+## Making the target unreachable without a grant
+
+The executor refuses a request that carries no valid grant. A stronger arrangement is one where the
+agent host cannot reach the target at all, so the executor is the only route that exists.
+
+[docs/host-isolation.md](../docs/host-isolation.md) is a measured reference for that: a
+copy-pasteable docker-compose file with the verification commands and their real output, an IAM
+sketch for the cloud case, and an explicit list of what the pattern does not prove.
+
 ## What this executor proves
 
 Per the enforcement profile it is wired for (`GET /health` reports which):
