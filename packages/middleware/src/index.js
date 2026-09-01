@@ -31,6 +31,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const { verifyExecutionGrant, computeScopeHash } = require('./verify-grant');
+const { buildDenyRemedy, denyErrorForReason } = require('./deny-remedy.js');
 
 /** Reference convention established by this package (spec is silent on transport). */
 const DEFAULT_HEADER = 'coderifts-execution-grant';
@@ -133,23 +134,46 @@ function requireExecutionGrant(options = {}) {
   const pinned = loadPublicKey({ publicKeyPem, keysFile, kid });
   const headerName = String(header).toLowerCase();
 
-  const deny = (res, status, reason) => res.status(403).json({ error: 'execution_grant_required', status, reason });
+  // The 403 body, plus the next step when the caller can act on one.
+  //
+  // `error`, `status` and `reason` are byte-identical to what this returned
+  // before the remedy existed; the remedy is an additive key. The error class is
+  // decided by the CALLER of deny, not derived here, because one refusal on this
+  // surface — an unmapped route — is not something a grant can fix, and mapping
+  // it by its status would send the caller to mint a grant that still gets 403.
+  const deny = (res, status, reason, remedy = null) => res.status(403).json({
+    error: 'execution_grant_required', status, reason, ...(remedy ? { remedy } : {}),
+  });
+
+  // The request line is this surface's own addressing for what it refused.
+  const targetOf = (req, routePath) => `${req.method} ${routePath}`;
 
   return function executionGrantGuard(req, res, next) {
     const routePath = (req.route && req.route.path) || req.path;
     const operation = operationMap[`${req.method} ${routePath}`];
     if (!operation) {
       // Fail closed: an unmapped mutation is not an authorized mutation.
+      // NO remedy: this route has no operation to authorize, so no grant the
+      // caller could obtain would change this answer. An unactionable refusal is
+      // reported as unactionable.
       return deny(res, 'GRANT_SCOPE_MISMATCH', 'unmapped_operation');
-    }
-
-    const token = req.headers[headerName];
-    if (!token || typeof token !== 'string') {
-      return deny(res, 'MALFORMED', 'missing_grant_header');
     }
 
     // The binding rule: the raw request body IS the after-payload.
     const afterPayload = req.rawBody != null ? req.rawBody.toString('utf8') : '';
+    // The scope hash of the request being refused — the same value a grant for
+    // this request would have to carry, so the caller can match it.
+    const scope = computeScopeHash({ operation, target_id: targetId(req), after_payload: afterPayload });
+
+    const token = req.headers[headerName];
+    if (!token || typeof token !== 'string') {
+      return deny(res, 'MALFORMED', 'missing_grant_header', buildDenyRemedy({
+        error: denyErrorForReason('missing_grant_header'),
+        target: targetOf(req, routePath),
+        fingerprint: scope,
+        observed: { status: 'MALFORMED', reason: 'missing_grant_header' },
+      }));
+    }
 
     const result = verifyExecutionGrant(token, {
       publicKey: pinned.publicKey,
@@ -165,7 +189,17 @@ function requireExecutionGrant(options = {}) {
     });
 
     if (!result.valid) {
-      return deny(res, result.status, result.reason);
+      // The specific reason first; its status is the fallback, so a new reason
+      // string still lands in the right class rather than silently losing its
+      // remedy. A reason and a status that both fall outside the three classes
+      // produce no remedy at all.
+      const error = denyErrorForReason(result.reason) || denyErrorForReason(result.status);
+      return deny(res, result.status, result.reason, buildDenyRemedy({
+        error,
+        target: targetOf(req, routePath),
+        fingerprint: scope,
+        observed: { status: result.status, reason: result.reason },
+      }));
     }
 
     req.coderifts = { payload: result.payload };
