@@ -39,8 +39,11 @@ const guard = (t) => {
 };
 
 /** Run the chain as a real child process; the exit code is part of the contract. */
-function runChain() {
-  const r = spawnSync(process.execPath, [CHAIN], { encoding: 'utf8' });
+function runChain(extraEnv = {}) {
+  const r = spawnSync(process.execPath, [CHAIN], {
+    encoding: 'utf8',
+    env: { ...process.env, ...extraEnv },
+  });
   const points = (r.stdout || '').split('\n')
     .filter((l) => l.startsWith('POINT|'))
     .map((l) => {
@@ -64,22 +67,68 @@ describe('e2e chain — the nine points', () => {
     const { code, stdout } = runChain();
     assert.equal(code, 0);
     assert.match(stdout, /^TRANSCRIPT\|PASS\|VERIFIES\|sha256:/m);
-    assert.match(stdout, /^SUMMARY\|7 proven\|2 modelled\|9\/9 points OK$/m);
+    // The summary names THREE columns now: the carried class is counted separately so nine
+    // points always add up on the line a reader sees.
+    assert.match(stdout, /^SUMMARY\|8 proven\|0 carried \(provider readback, unsigned\)\|1 modelled\|9\/9 points OK$/m);
   });
 });
 
 // ── THE LABELS ───────────────────────────────────────────────────────────────
 describe('e2e chain — modelled is labelled modelled, never proven', () => {
-  test('merge and deploy are MODELLED; the other seven are PROVEN', (t) => {
+  test('with no provider readback supplied, merge stays MODELLED and deploy is PROVEN', (t) => {
     if (guard(t)) return;
     const { points } = runChain();
     const byName = Object.fromEntries(points.map((p) => [p.name, p]));
+    // 1293 — merge is filled only by a SUPPLIED readback. Nothing is synthesised to fill it.
     assert.equal(byName.merge.state, 'MODELLED');
-    assert.equal(byName.deploy.state, 'MODELLED');
     assert.notEqual(byName.merge.state, 'PROVEN');
-    assert.notEqual(byName.deploy.state, 'PROVEN');
-    assert.equal(points.filter((p) => p.state === 'PROVEN').length, 7);
-    assert.equal(points.filter((p) => p.state === 'MODELLED').length, 2);
+    // The deploy seal is this deployment's own, verified against the executor key.
+    assert.equal(byName.deploy.state, 'PROVEN');
+    assert.equal(points.filter((p) => p.state === 'PROVEN').length, 8);
+    assert.equal(points.filter((p) => p.state === 'MODELLED').length, 1);
+  });
+
+  test('a supplied readback fills merge as PROVIDER_READBACK — never as PROVEN', (t) => {
+    if (guard(t)) return;
+    const fs = require('node:fs');
+    const os = require('node:os');
+    const path = require('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'readback-'));
+    const file = path.join(dir, 'readback.json');
+    fs.writeFileSync(file, JSON.stringify({
+      provider: 'github',
+      required_check: 'CodeRifts / contract-gate (Action)',
+      bound_to_source: true,
+      integration_id: 15368,
+      rollup_state: 'blocked',
+      observed_at: '2026-09-02T07:50:17.040Z',
+    }));
+    const { points } = runChain({ CODERIFTS_PROVIDER_READBACK: file });
+    const merge = points.find((p) => p.name === 'merge');
+    // The class distinction is the point: an unsigned readback must never share a column with a
+    // checked signature.
+    assert.equal(merge.state, 'PROVIDER_READBACK');
+    assert.notEqual(merge.state, 'PROVEN');
+    assert.match(merge.detail, /UNSIGNED/);
+    assert.equal(points.filter((p) => p.state === 'MODELLED').length, 0);
+  });
+
+  test('an ungradeable readback leaves merge MODELLED — it is not forced into a class', (t) => {
+    if (guard(t)) return;
+    const fs = require('node:fs');
+    const os = require('node:os');
+    const path = require('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'readback-bad-'));
+    const file = path.join(dir, 'readback.json');
+    // Name-only requirement: an honest readback whose BINDING is absent.
+    fs.writeFileSync(file, JSON.stringify({
+      provider: 'github', required_check: 'X', bound_to_source: false,
+      integration_id: null, rollup_state: 'clean', observed_at: '2026-09-02T00:00:00.000Z',
+    }));
+    const { points } = runChain({ CODERIFTS_PROVIDER_READBACK: file });
+    const merge = points.find((p) => p.name === 'merge');
+    assert.equal(merge.state, 'MODELLED');
+    assert.match(merge.detail, /READBACK_NOT_SOURCE_BOUND/);
   });
 
   test('a MODELLED point says it does not claim the step happened', (t) => {
@@ -87,15 +136,20 @@ describe('e2e chain — modelled is labelled modelled, never proven', () => {
     const { points } = runChain();
     for (const p of points.filter((x) => x.state === 'MODELLED')) {
       assert.match(p.detail, /does not claim it happened/, `point ${p.n} does not disclaim`);
-      assert.match(p.detail, /no \w+ producer exists in this deployment/);
+      // The reason a point is modelled is now stated as the absence of a SUPPLIED input rather
+      // than the absence of a producer: this deployment has producers for both remaining slots.
+      assert.match(p.detail, /no provider readback was supplied to this run/);
     }
   });
 
-  test('the MODELLED label is grounded in the bundle slot table, not hand-written', () => {
-    // If a producer ever appears, the slot table is where it lands — and this
-    // pins that the chain's label tracks it rather than a duplicated constant.
-    assert.equal(SLOT_BY_KEY.merge_evidence.producer, null);
-    assert.equal(SLOT_BY_KEY.deploy_attestation.producer, null);
+  test('the label is grounded in the bundle slot table, not hand-written', () => {
+    // Both slots now NAME a producer, and the chain's labels track the table rather than a
+    // duplicated constant. What keeps merge modelled is that no readback was supplied — an input
+    // absence, not a producer absence, and the table says which.
+    assert.match(SLOT_BY_KEY.merge_evidence.producer, /provider-readback\.js/);
+    assert.match(SLOT_BY_KEY.deploy_attestation.producer, /atomic\.js executor seal/);
+    assert.equal(SLOT_BY_KEY.merge_evidence.verifiable, true);
+    assert.equal(SLOT_BY_KEY.deploy_attestation.verifiable, true);
   });
 });
 

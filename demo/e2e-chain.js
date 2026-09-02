@@ -32,6 +32,8 @@ const path = require('node:path');
 const { runProve, verifyProveTranscript } = require('./prove');
 const { verifyAtomicExecutionAttestation } = require('./src/atomic');
 const { assembleBundle, SLOT_BY_KEY } = require('./bundle');
+// The PUBLIC grader, from the verifier repo — this file does not decide what a readback means.
+const { verifyProviderReadback } = require('../../receipt-verifier/verify-bundle.js');
 const { makePool, bootstrapUrl, configuredDeploymentId } = require('./src/db');
 
 const KEYS = path.join(__dirname, 'keys');
@@ -39,6 +41,16 @@ const GATE_PREIMAGE_V = 'cr.gate.preimage.v1';
 
 const PROVEN = 'PROVEN';
 const MODELLED = 'MODELLED';
+/**
+ * A THIRD state, deliberately not PROVEN.
+ *
+ * A provider readback is a JSON document nobody signed. Grading it PROVEN beside a checked
+ * Ed25519 signature would put a self-asserted file and a cryptographic proof in one column, which
+ * is the overstatement the PROVEN/MODELLED split exists to prevent. It is also not MODELLED: a
+ * real read of a real host did happen. So it gets its own name, and the verdict line counts it
+ * separately.
+ */
+const PROVIDER_READBACK = 'PROVIDER_READBACK';
 
 const points = [];
 const point = (n, name, state, ok, detail) => {
@@ -197,12 +209,36 @@ async function main() {
     tokens: {},
     allowEmpty: true,
   });
-  for (const [n, key, label] of [[8, 'merge_evidence', 'merge']]) {
+  // 1293 — a provider readback fills point 8 when one is SUPPLIED. Absent, the point stays
+  // MODELLED and nothing is synthesised to fill it.
+  const readbackPath = process.env.CODERIFTS_PROVIDER_READBACK || null;
+  let readback = null;
+  let readbackError = null;
+  if (readbackPath) {
+    try { readback = JSON.parse(fs.readFileSync(readbackPath, 'utf8')); } catch (err) {
+      readbackError = (err && err.message) || 'unreadable';
+    }
+  }
+
+  if (readback || readbackError) {
+    const graded = readbackError
+      ? { valid: false, status: 'READBACK_UNREADABLE', reason: readbackError }
+      : verifyProviderReadback(readback);
+    const gradedOk = graded.status === 'PROVIDER_READBACK';
+    point(8, 'merge', gradedOk ? PROVIDER_READBACK : MODELLED, gradedOk,
+      gradedOk
+        ? `required check ${JSON.stringify(graded.payload.required_check)} bound to integration `
+          + `${graded.payload.integration_id}; rollup ${graded.payload.rollup_state}; observed `
+          + `${graded.payload.observed_at} — CARRIED provider evidence, UNSIGNED: it attests that `
+          + 'a readback was recorded, never that the recorded values are true'
+        : `a provider readback was supplied but is not gradeable (${graded.status}`
+          + `${graded.reason ? ': ' + graded.reason : ''}) — the point stays modelled`);
+  } else {
+    const key = 'merge_evidence';
     const named = bundle.manifest.absent.find((a) => a.slot === key);
     const notPlaced = !Object.prototype.hasOwnProperty.call(bundle.slots, key);
-    const def = SLOT_BY_KEY[key];
-    point(n, label, MODELLED, notPlaced && !!named && def.producer === null,
-      `no ${label} producer exists in this deployment — ${named ? named.reason : 'unnamed'}; `
+    point(8, 'merge', MODELLED, notPlaced && !!named,
+      `no provider readback was supplied to this run — ${named ? named.reason : 'unnamed'}; `
       + 'this run models the step and does not claim it happened');
   }
 
@@ -235,8 +271,9 @@ async function main() {
       a9.ok
         ? `the executor seal binds deployment ${deploymentId || '(unset)'} and verifies `
           + `(${deployDef.envelope}); a forged signature over the same bytes is REFUSED. `
-          + 'Held OUT of the bundle: no public verifier for this envelope yet, so a token there '
-          + 'would grade NO_VERIFIER rather than be checked'
+          + 'A PUBLIC verifier for this envelope now exists — receipt-verifier '
+          + 'verify-atomic-attestation.js — so the bundle slot grades it rather than refusing it '
+          + 'for want of one'
         : `deploy attestation did not prove out: ${a9.detail}`);
   }
 
@@ -252,8 +289,11 @@ async function main() {
   );
   const proven = points.filter((p) => p.state === PROVEN).length;
   const modelled = points.filter((p) => p.state === MODELLED).length;
-  process.stdout.write(`SUMMARY|${proven} proven|${modelled} modelled|`
-    + `${points.filter((p) => p.ok).length}/${points.length} points OK\n`);
+  const carried = points.filter((p) => p.state === PROVIDER_READBACK).length;
+  // The third class is NAMED in the summary. Printing "8 proven, 0 modelled" over nine points
+  // leaves the ninth unaccounted for, and a reader is entitled to see which column it landed in.
+  process.stdout.write(`SUMMARY|${proven} proven|${carried} carried (provider readback, unsigned)|`
+    + `${modelled} modelled|${points.filter((p) => p.ok).length}/${points.length} points OK\n`);
 
   // A modelled point that is honestly modelled does not fail the run; a point
   // that misbehaved does. The transcript must also still verify.

@@ -84,13 +84,27 @@ const SLOTS = Object.freeze([
     absent_reason: 'no public verifier for this slot',
   }),
   Object.freeze({
-    key: 'merge_evidence', envelope: null, verifiable: false, producer: null,
-    absent_reason: 'no public verifier for this slot',
+    key: 'merge_evidence',
+    envelope: 'provider-readback.v1',
+    verifiable: true,
+    // 1293 — A PRODUCER EXISTS. coderifts-app scripts/provider-readback.js reads the host's
+    // branch protection and check rollup and emits the evidence; receipt-verifier
+    // verify-bundle.js grades it structurally as PROVIDER_READBACK.
+    //
+    // CARRIED, NOT SIGNED. The document is unsigned: whoever can write the file can write any
+    // value into it. It is graded in its own class precisely so it is never read beside a checked
+    // signature as if the two were the same kind of fact.
+    producer: 'coderifts-app scripts/provider-readback.js (provider readback of the required '
+      + 'check on a pull request)',
+    absent_reason: 'no provider readback was supplied to this run; supply one with '
+      + 'CODERIFTS_PROVIDER_READBACK=<path> to fill this slot',
   }),
   Object.freeze({
     key: 'deploy_attestation',
     envelope: 'cr.atomic.execution.attestation.v1',
-    verifiable: false,
+    // 1300 — the verifier gap is CLOSED. receipt-verifier verify-atomic-attestation.js speaks
+    // this envelope, so a token placed here is checked rather than refused for want of one.
+    verifiable: true,
     // 1293 — THIS DEPLOYMENT HAS A PRODUCER. demo/src/atomic.js seals the executor's signature
     // over the canonical gate preimage and binds it to the configured deployment id; the e2e run
     // verifies one against the executor key AND requires a forged signature over the same bytes
@@ -98,11 +112,8 @@ const SLOTS = Object.freeze([
     // deploy evidence existed anywhere, which was false about our own executor.
     producer: 'demo/src/atomic.js executor seal (cr.atomic.execution.attestation.v1), bound to '
       + 'the configured deployment id',
-    absent_reason: 'this deployment CAN produce a deploy attestation and does; the slot has no '
-      + 'PUBLIC verifier for cr.atomic.execution.attestation.v1 (receipt-verifier verify-attest.js '
-      + 'speaks cr.exec.attest.v1, a different envelope), so a token placed here would grade '
-      + 'INVALID (NO_VERIFIER). It is held out of the bundle rather than placed where it cannot '
-      + 'be checked — the gap is a verifier gap, not a producer gap',
+    absent_reason: 'no deploy attestation was supplied to this run; this deployment can produce '
+      + 'one (demo/src/atomic.js) and receipt-verifier verify-atomic-attestation.js can check it',
   }),
   Object.freeze({
     key: 'provider_evidence',

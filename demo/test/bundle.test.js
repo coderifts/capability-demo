@@ -205,9 +205,10 @@ describe('bundle — the assembler refuses what it must not emit', () => {
   test('an all-absent input is refused, so no green-empty bundle is ever built', () => {
     assert.throws(() => assembleBundle({ tokens: {} }), /no slot could be placed/);
     assert.throws(() => assembleBundle({ tokens: { execution_grant: '' } }), /no slot could be placed/);
-    // Only no-verifier tokens is still nothing placeable.
+    // Only no-verifier tokens is still nothing placeable. merge_evidence and deploy_attestation
+    // gained verifiers (1293 / 1300), so the slots used here are the ones that still have none.
     assert.throws(
-      () => assembleBundle({ tokens: { provider_evidence: 'x', merge_evidence: 'y' } }),
+      () => assembleBundle({ tokens: { provider_evidence: 'x', nonce_commitment: 'y' } }),
       /no slot could be placed/,
     );
   });
