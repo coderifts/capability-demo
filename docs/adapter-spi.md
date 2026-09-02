@@ -40,6 +40,11 @@ this page said they were. They are two axes over the same adapters:
   `ENFORCING_EXCLUSIVE_HTTP_CAS` (http, same resource) and `INDETERMINATE_HTTP_CAS`
   (http, cross resource).
 
+The http adapter forwards the grant `jti` as the `Idempotency-Key` header on the mutating
+request (`demo/src/http-atomic.js`, per draft-ietf-httpapi-idempotency-key-header). If the target API supports idempotency keys, retry-dedup also holds on their side — this is the target's guarantee, not ours.
+It raises neither the strength nor the profile above, because forwarding a header is not the
+target honouring it, and we cannot see from here which kind of target we are talking to.
+
 They agree everywhere they overlap, and http is where they visibly do not line up one-to-one: it has
 ONE SPI strength (`INDETERMINATE`, because there is no cross-resource ledger) and TWO profile names,
 because its write path IS single-writer on one path and is not across paths. Collapsing that into

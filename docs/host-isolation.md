@@ -142,6 +142,10 @@ the third column is the one that has to stay true.
 | http, same resource | `ENFORCING_EXCLUSIVE_HTTP_CAS` | `If-Match` on ONE path; a 2xx after a non-matching observed ETag is `origin_ignored_if_match`, never a success | **not** ATOMIC: the origin may ignore `If-Match`, and sending it is not the origin honouring it |
 | http, cross resource | `INDETERMINATE_HTTP_CAS` | nothing single-writer — the name is the downgrade | it does not claim enforcement at all |
 
+The http write also carries the grant `jti` as an `Idempotency-Key` header. If the target API supports idempotency keys, retry-dedup also holds on their side — this is the target's guarantee, not ours.
+Neither profile name above moves because of it: the header is a request, not a property of
+the origin, and this table names only what is enforced.
+
 No claim was renamed in this pass: each name already stops short of the guarantee it cannot make.
 `demo/test/adapter-wrong-paths.test.js` asserts that — including that neither git nor HTTP profile
 name contains `ATOMIC`.

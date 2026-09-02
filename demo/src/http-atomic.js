@@ -525,6 +525,21 @@ async function httpAtomicExecute({
     const headers = { 'content-type': 'application/json' };
     if (createIntent) headers['if-none-match'] = '*';
     else headers['if-match'] = ifMatchEtag;
+    // ── http.idempotent (1194) ────────────────────────────────────────────────────────────
+    //
+    // The grant's `jti` is already the one value that is unique to this authorization and stable
+    // across a retry of it, which is exactly what an idempotency key has to be. Forwarding it
+    // costs one header and lets a target that implements idempotency keys collapse a retry into
+    // the original result.
+    //
+    // Header name per the IETF draft (draft-ietf-httpapi-idempotency-key-header): `Idempotency-Key`.
+    //
+    // THIS RAISES NO GUARANTEE WE CAN PROVE, and the adapter's strength and profile are unchanged
+    // because of it. Whether the retry is actually deduplicated is the TARGET's behaviour: an
+    // origin that ignores the header answers exactly as it did before, and we cannot tell from
+    // here which one we are talking to. Sending a header and then claiming the property it asks
+    // for would be the same overclaim as reading a 2xx after a PUT as a verified CAS.
+    headers['idempotency-key'] = jti;
     cas = await httpRequest({
       url: dest.url,
       method: verb,
@@ -652,7 +667,12 @@ function consumeOnce(input) {
     reason: REASON.NO_CROSS_RESOURCE_LEDGER,
     strength: STRENGTH.INDETERMINATE,
     detail: 'HTTP has no cross-resource single-use ledger; If-Match gives single-writer on one '
-      + 'path only. Same-resource CAS is enforced on the write itself.',
+      + 'path only. Same-resource CAS is enforced on the write itself. '
+      + 'The mutating request forwards the grant jti as the Idempotency-Key header '
+      + '(draft-ietf-httpapi-idempotency-key-header); if the target API supports idempotency keys, '
+      + 'retry-dedup also holds on their side — that is the target\'s guarantee, not ours, and it '
+      + 'does not change this verdict.',
+    idempotency_key_forwarded: true,
   };
 }
 
