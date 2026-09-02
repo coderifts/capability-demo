@@ -1,0 +1,96 @@
+# CodeRifts contract gate — GitLab CI/CD component
+#
+# Runs the SAME verify path as every other CodeRifts surface: the published `coderifts` CLI.
+# This file wires it into a GitLab pipeline; it makes no decision of its own and reimplements
+# no verification.
+#
+# Usage (consumer .gitlab-ci.yml):
+#   include:
+#     - component: $CI_SERVER_FQDN/<group>/coderifts-contract-gate/contract-gate@1.0.0
+#       inputs:
+#         stage: test
+#         operation: merge
+#
+# WHAT THIS DOES NOT DO, and it matters: GitLab has no native identity binding for a job result.
+# The job fails on a refusal, which stops the pipeline — but anyone who can edit .gitlab-ci.yml can
+# remove the include. The provider-side status of this layer is NOT_VERIFIED. What IS verifiable is
+# the receipt: signed, offline-checkable, and independent of GitLab.
+
+spec:
+  inputs:
+    stage:
+      default: test
+      description: Pipeline stage to attach the gate job to.
+    job_name:
+      default: coderifts-contract-gate
+      description: Name of the generated job.
+    node_version:
+      default: "20"
+      description: Node major used to run the published CLI. CodeRifts requires >= 20.
+    cli_version:
+      default: latest
+      description: >-
+        npm version spec for the `coderifts` CLI. Pin an exact version for a reproducible
+        gate; `latest` is convenient and is not reproducible.
+    operation:
+      default: merge
+      description: The operation being authorized (merge, deploy, publish).
+    environment:
+      default: ""
+      description: Optional environment name bound into the decision.
+    advisory:
+      default: false
+      type: boolean
+      description: >-
+        When true the job reports and does not fail the pipeline. Default false — the gate is
+        fail-closed, which is the only setting under which its result means anything.
+    allow_failure:
+      default: false
+      type: boolean
+      description: GitLab-level allow_failure. Independent of `advisory`; both default off.
+---
+
+"$[[ inputs.job_name ]]":
+  stage: $[[ inputs.stage ]]
+  image: node:$[[ inputs.node_version ]]-alpine
+  allow_failure: $[[ inputs.allow_failure ]]
+  variables:
+    # Read by the CLI. Set CODERIFTS_API_KEY as a masked, protected CI/CD variable in the
+    # project settings — never in this file, and never in the consumer's .gitlab-ci.yml.
+    CODERIFTS_OPERATION: $[[ inputs.operation ]]
+    CODERIFTS_ENVIRONMENT: $[[ inputs.environment ]]
+    CODERIFTS_ADVISORY_INPUT: $[[ inputs.advisory ]]
+  rules:
+    # Merge-request pipelines are where a contract change is still reversible.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - |
+      set -eu
+      if [ -z "${CODERIFTS_API_KEY:-}" ]; then
+        echo "CODERIFTS_API_KEY is not set."
+        echo "Add it as a MASKED, PROTECTED CI/CD variable (Settings -> CI/CD -> Variables)."
+        echo "Refusing to run: a gate without a key would report nothing and look like a pass."
+        exit 1
+      fi
+    - npm install -g "coderifts@$[[ inputs.cli_version ]]"
+    - coderifts --version
+    - |
+      set -eu
+      # git baseline -> head is the CLI's own change-set derivation. The component does not
+      # assemble artifacts itself; doing so would be a second implementation of the diff.
+      ARGS="--operation ${CODERIFTS_OPERATION}"
+      if [ -n "${CODERIFTS_ENVIRONMENT}" ]; then
+        ARGS="${ARGS} --env ${CODERIFTS_ENVIRONMENT}"
+      fi
+      if [ "${CODERIFTS_ADVISORY_INPUT}" = "true" ]; then
+        echo "advisory mode: the decision is reported and the job will not fail on a refusal."
+        coderifts preflight ${ARGS} || true
+      else
+        coderifts preflight ${ARGS}
+      fi
+    - |
+      echo ""
+      echo "NOT_VERIFIED (provider side): GitLab has no identity binding for this job, so a"
+      echo "passing pipeline is not attributable to this component. The receipt above is the"
+      echo "verifiable artifact — check it offline with the open-source verifier."

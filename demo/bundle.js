@@ -88,8 +88,21 @@ const SLOTS = Object.freeze([
     absent_reason: 'no public verifier for this slot',
   }),
   Object.freeze({
-    key: 'deploy_attestation', envelope: null, verifiable: false, producer: null,
-    absent_reason: 'no public verifier for this slot',
+    key: 'deploy_attestation',
+    envelope: 'cr.atomic.execution.attestation.v1',
+    verifiable: false,
+    // 1293 — THIS DEPLOYMENT HAS A PRODUCER. demo/src/atomic.js seals the executor's signature
+    // over the canonical gate preimage and binds it to the configured deployment id; the e2e run
+    // verifies one against the executor key AND requires a forged signature over the same bytes
+    // to be refused (demo/e2e-chain.js attestationPoint). Calling that `producer: null` said no
+    // deploy evidence existed anywhere, which was false about our own executor.
+    producer: 'demo/src/atomic.js executor seal (cr.atomic.execution.attestation.v1), bound to '
+      + 'the configured deployment id',
+    absent_reason: 'this deployment CAN produce a deploy attestation and does; the slot has no '
+      + 'PUBLIC verifier for cr.atomic.execution.attestation.v1 (receipt-verifier verify-attest.js '
+      + 'speaks cr.exec.attest.v1, a different envelope), so a token placed here would grade '
+      + 'INVALID (NO_VERIFIER). It is held out of the bundle rather than placed where it cannot '
+      + 'be checked — the gap is a verifier gap, not a producer gap',
   }),
   Object.freeze({
     key: 'provider_evidence',

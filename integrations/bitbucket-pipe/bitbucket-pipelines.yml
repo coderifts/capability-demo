@@ -1,0 +1,22 @@
+# Release pipeline for the PIPE ITSELF (not for consumers).
+image: atlassian/default-image:4
+
+pipelines:
+  default:
+    - step:
+        name: Build and smoke-test the pipe image
+        services: [docker]
+        script:
+          - docker build --build-arg CLI_VERSION=latest -t coderifts/contract-gate-pipe:test .
+          # The image must contain the CLI. A pipe that builds and cannot run the gate is worse
+          # than one that fails to build.
+          - docker run --rm --entrypoint coderifts coderifts/contract-gate-pipe:test --version
+  tags:
+    "*":
+      - step:
+          name: Push the tagged pipe image
+          services: [docker]
+          script:
+            - docker build --build-arg CLI_VERSION="${CLI_VERSION:-latest}" -t "coderifts/contract-gate-pipe:${BITBUCKET_TAG}" .
+            - echo "${DOCKERHUB_PASSWORD}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+            - docker push "coderifts/contract-gate-pipe:${BITBUCKET_TAG}"

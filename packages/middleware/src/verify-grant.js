@@ -25,6 +25,39 @@ const GRANT_VERSION = 'cr.exec.v1';
 const SIGNING_PREFIX = 'crexec.v1';
 
 /**
+ * ── DUAL-ACCEPT: cr.exec.v2 ────────────────────────────────────────────────────────────────
+ *
+ * The executor refused every v2 grant as `unsupported_version`, so an adopter who asked for the
+ * atomic profile got a token the executor could not read — the version existed on the issuing
+ * side and nowhere else.
+ *
+ * MIRRORED, NOT REINVENTED. Every constant below is transcribed from the committed issuer,
+ * coderifts-app `src/verdict-core/execution-grant-v2.js` (GRANT_VERSION_V2 :20,
+ * SIGNING_PREFIX_V2 :21, REQUIRED_STRINGS :27-31, the parse rules :85-103). v2's signing input is
+ * `crexec.v2|<RFC 8785-canonical body>` — a different SHAPE from v1's field-joined preimage, not
+ * a longer version of it, so the two paths cannot share a signing function.
+ *
+ * V1 IS UNTOUCHED. Its preimage, field set, statuses and reasons are byte-identical to before;
+ * the v1 vectors verify without modification, which is the proof.
+ *
+ * THE REFUSALS STAY REFUSALS. An unknown version is still MALFORMED/unsupported_version — the
+ * set of accepted versions grew by exactly one. Unknown fields are still refused, per version:
+ * a v1 field on a v2 token is an unknown field there, and the reverse holds too.
+ */
+const GRANT_VERSION_V2 = 'cr.exec.v2';
+const SIGNING_PREFIX_V2 = 'crexec.v2';
+
+/** execution-grant-v2.js:27-31 — every one is a required NON-EMPTY string. */
+const REQUIRED_STRINGS_V2 = Object.freeze([
+  'v', 'kid', 'grant_id', 'receipt_hash', 'tenant_id', 'executor_id', 'adapter_id',
+  'operation', 'target_uri', 'expected_state_token', 'after_payload_hash',
+  'nonce_hash', 'policy_hash', 'audience_hash', 'not_before', 'expires_at',
+]);
+
+/** execution-grant-v2.js:25 — target_uri must carry one of these schemes. */
+const TARGET_SCHEMES_V2 = Object.freeze(['fs', 'git', 'api', 'db', 'registry', 'deploy']);
+
+/**
  * Field separator in the scope_hash preimage.
  * docs/cr-exec-v1.md § Derivation specifies \x1f (the reference calls the constant
  * NUL, but the byte it uses is 0x1F — Unit Separator; the byte, not the name, is
@@ -250,8 +283,195 @@ function verifyExecutionGrant(token, opts = {}) {
   return { valid: true, status: 'GRANT_CURRENT', reason: null, payload };
 }
 
+
+/**
+ * RFC 8785 (JCS) canonical JSON for our data domain. MUST match the issuer's
+ * coderifts-app src/canonical-json.js byte for byte: sorted keys, no whitespace,
+ * JSON.stringify scalars, reject non-finite numbers.
+ */
+function canonicalJsonV2(value) {
+  const t = typeof value;
+  if (value === null || t === 'boolean' || t === 'string') return JSON.stringify(value);
+  if (t === 'number') {
+    if (!Number.isFinite(value)) throw new TypeError('canonicalJson: non-finite number');
+    return JSON.stringify(value);
+  }
+  if (t === 'undefined') throw new TypeError('canonicalJson: undefined');
+  if (Array.isArray(value)) return `[${value.map(canonicalJsonV2).join(',')}]`;
+  if (t === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJsonV2(value[k])}`).join(',')}}`;
+  }
+  throw new TypeError(`canonicalJson: unsupported type ${t}`);
+}
+
+/** execution-grant-v2.js:64-66. The whole body is signed, not a field join. */
+function signingInputV2(body) {
+  return `${SIGNING_PREFIX_V2}|${canonicalJsonV2(body)}`;
+}
+
+/** execution-grant-v2.js canonicalizeTargetUri — scheme check only, mirrored. */
+function targetUriSchemeOk(uri) {
+  if (typeof uri !== 'string' || uri.length === 0) return false;
+  const i = uri.indexOf('://');
+  if (i <= 0) return false;
+  return TARGET_SCHEMES_V2.includes(uri.slice(0, i).toLowerCase());
+}
+
+/** execution-grant-v2.js:68-104, transcribed. Same statuses, same reasons. */
+function parseGrantTokenV2(token) {
+  if (typeof token !== 'string' || token.length === 0) {
+    return { ok: false, status: 'MALFORMED', reason: 'malformed_structure' };
+  }
+  const segments = token.split('.');
+  if (segments.length !== 2 || segments.some((x) => !x)) {
+    return { ok: false, status: 'MALFORMED', reason: 'malformed_structure' };
+  }
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(segments[0], 'base64url').toString('utf8'));
+  } catch (_) {
+    return { ok: false, status: 'MALFORMED', reason: 'bad_json' };
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { ok: false, status: 'MALFORMED', reason: 'bad_json' };
+  }
+  if (payload.v !== GRANT_VERSION_V2) {
+    return { ok: false, status: 'MALFORMED', reason: 'unsupported_version', payload };
+  }
+  for (const k of REQUIRED_STRINGS_V2) {
+    if (typeof payload[k] !== 'string' || payload[k].length === 0) {
+      return { ok: false, status: 'MALFORMED', reason: 'missing_field', payload };
+    }
+  }
+  if (!Number.isInteger(payload.max_attempts) || payload.max_attempts < 1) {
+    return { ok: false, status: 'MALFORMED', reason: 'bad_max_attempts', payload };
+  }
+  const allowed = new Set([...REQUIRED_STRINGS_V2, 'max_attempts']);
+  for (const k of Object.keys(payload)) {
+    if (!allowed.has(k)) return { ok: false, status: 'MALFORMED', reason: 'unknown_field', payload };
+  }
+  if (!targetUriSchemeOk(payload.target_uri)) {
+    return { ok: false, status: 'MALFORMED', reason: 'bad_target_uri', payload };
+  }
+  return { ok: true, payload, sig: segments[1] };
+}
+
+/**
+ * v2 offline verification. Same shape of answer as v1 — { valid, status, reason, payload } — so a
+ * caller that already branches on those does not learn a second vocabulary.
+ *
+ * BOUND FIELDS ARE HASHES HERE. v2 signs `after_payload_hash` / `audience_hash` / `nonce_hash`
+ * rather than the values, so an `intended` check compares the hash the caller computes with the
+ * hash the issuer signed. A caller that supplies nothing gets signature + expiry only, exactly as
+ * in v1 — an unstated intent is never treated as a match.
+ */
+function verifyExecutionGrantV2(token, opts = {}) {
+  const parsed = parseGrantTokenV2(token);
+  if (!parsed.ok) {
+    return { valid: false, status: parsed.status, reason: parsed.reason, payload: parsed.payload };
+  }
+  const payload = parsed.payload;
+
+  if (!opts.publicKey) {
+    return { valid: false, status: 'UNKNOWN_KEY', reason: 'unknown_kid', payload };
+  }
+  if (opts.keyKid != null && opts.keyKid !== '' && payload.kid !== String(opts.keyKid)) {
+    return { valid: false, status: 'UNKNOWN_KEY', reason: 'unknown_kid', payload };
+  }
+  if (opts.keyStatus === 'retired') {
+    return { valid: false, status: 'UNKNOWN_KEY', reason: 'retired_kid', payload };
+  }
+
+  // The signature covers the body MINUS nothing — the whole payload is the message.
+  let ok = false;
+  try {
+    ok = crypto.verify(
+      null,
+      Buffer.from(signingInputV2(payload), 'utf8'),
+      opts.publicKey,
+      Buffer.from(parsed.sig, 'base64url'),
+    );
+  } catch (_) {
+    return { valid: false, status: 'INVALID_SIGNATURE', reason: 'signature_error', payload };
+  }
+  if (!ok) {
+    return { valid: false, status: 'INVALID_SIGNATURE', reason: 'signature_mismatch', payload };
+  }
+
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const expMs = Date.parse(payload.expires_at);
+  const nbfMs = Date.parse(payload.not_before);
+  if (!Number.isFinite(expMs) || !Number.isFinite(nbfMs)) {
+    return { valid: false, status: 'MALFORMED', reason: 'bad_timestamp', payload };
+  }
+  if (expMs + CLOCK_SKEW_LEEWAY_MS < now) {
+    return { valid: false, status: 'GRANT_EXPIRED', reason: 'expired', payload };
+  }
+  if (nbfMs > now + CLOCK_SKEW_LEEWAY_MS) {
+    return { valid: false, status: 'GRANT_EXPIRED', reason: 'nbf_in_future', payload };
+  }
+
+  const intended = opts.intended && typeof opts.intended === 'object' ? opts.intended : {};
+  const pref = (v) => `sha256:${sha256hex(String(v))}`;
+  if (intended.receipt_token != null && String(intended.receipt_token).length > 0
+      && pref(intended.receipt_token) !== payload.receipt_hash) {
+    return { valid: false, status: 'GRANT_UNBOUND', reason: 'receipt_hash_mismatch', payload };
+  }
+  if (intended.operation != null && intended.operation !== ''
+      && payload.operation !== String(intended.operation)) {
+    return { valid: false, status: 'GRANT_SCOPE_MISMATCH', reason: 'operation_mismatch', payload };
+  }
+  if (intended.target_uri != null && intended.target_uri !== ''
+      && payload.target_uri !== String(intended.target_uri)) {
+    return { valid: false, status: 'GRANT_SCOPE_MISMATCH', reason: 'target_mismatch', payload };
+  }
+  if (intended.executor_id != null && intended.executor_id !== ''
+      && payload.executor_id !== String(intended.executor_id)) {
+    return { valid: false, status: 'GRANT_SCOPE_MISMATCH', reason: 'executor_mismatch', payload };
+  }
+  if (intended.adapter_id != null && intended.adapter_id !== ''
+      && payload.adapter_id !== String(intended.adapter_id)) {
+    return { valid: false, status: 'GRANT_SCOPE_MISMATCH', reason: 'adapter_mismatch', payload };
+  }
+  if (intended.audience != null && String(intended.audience).length > 0
+      && payload.audience_hash !== pref(intended.audience)) {
+    return { valid: false, status: 'GRANT_WRONG_AUDIENCE', reason: 'audience_mismatch', payload };
+  }
+  if (intended.after_payload != null
+      && payload.after_payload_hash !== pref(intended.after_payload)) {
+    return { valid: false, status: 'GRANT_SCOPE_MISMATCH', reason: 'after_payload_mismatch', payload };
+  }
+  return { valid: true, status: 'GRANT_CURRENT', reason: null, payload };
+}
+
+/**
+ * DUAL-ACCEPT ENTRY POINT. Dispatches on the token's own `v` field and nothing else — no option,
+ * no guess. An unreadable or unknown version is refused exactly as before.
+ */
+function verifyExecutionGrantAnyVersion(token, opts = {}) {
+  if (typeof token === 'string' && token.length > 0) {
+    const seg = token.split('.');
+    if (seg.length === 2 && seg[0]) {
+      try {
+        const peek = JSON.parse(Buffer.from(seg[0], 'base64url').toString('utf8'));
+        if (peek && peek.v === GRANT_VERSION_V2) return verifyExecutionGrantV2(token, opts);
+      } catch (_) { /* fall through to v1, which reports the malformed reason */ }
+    }
+  }
+  return verifyExecutionGrant(token, opts);
+}
+
 module.exports = {
   GRANT_VERSION,
+  GRANT_VERSION_V2,
+  SIGNING_PREFIX_V2,
+  REQUIRED_STRINGS_V2,
+  canonicalJsonV2,
+  signingInputV2,
+  parseGrantTokenV2,
+  verifyExecutionGrantV2,
+  verifyExecutionGrantAnyVersion,
   grantProfile,
   OPTIONAL_SIGNED_FIELDS,
   SIGNING_PREFIX,

@@ -1,0 +1,31 @@
+name: CodeRifts contract gate
+image: coderifts/contract-gate-pipe:1.0.0
+description: >-
+  Run the published CodeRifts CLI against this change set and fail the step on a governance
+  refusal. Same verify path as the GitHub Action and the deploy gate. Provider-side status is
+  NOT_VERIFIED — Bitbucket has no native identity binding for a pipe result.
+repository: https://github.com/coderifts/bitbucket-pipe
+maintainer:
+  name: CodeRifts
+  website: https://coderifts.com
+category: Security
+variables:
+  - name: CODERIFTS_API_KEY
+    required: true
+    description: >-
+      API key, as a SECURED repository variable. The pipe refuses to run without one rather than
+      reporting nothing and looking like a pass.
+  - name: OPERATION
+    default: merge
+    description: Operation being authorized (merge, deploy, publish).
+  - name: ENVIRONMENT
+    default: ""
+    description: Optional environment name bound into the decision.
+  - name: ADVISORY
+    default: "false"
+    description: >-
+      When "true" the step reports and exits 0 on a refusal. Default false — the gate is
+      fail-closed, which is the only setting under which its result means anything.
+  - name: DEBUG
+    default: "false"
+    description: Trace the wrapper (set -x). Never prints the API key.

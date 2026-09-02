@@ -197,13 +197,47 @@ async function main() {
     tokens: {},
     allowEmpty: true,
   });
-  for (const [n, key, label] of [[8, 'merge_evidence', 'merge'], [9, 'deploy_attestation', 'deploy']]) {
+  for (const [n, key, label] of [[8, 'merge_evidence', 'merge']]) {
     const named = bundle.manifest.absent.find((a) => a.slot === key);
     const notPlaced = !Object.prototype.hasOwnProperty.call(bundle.slots, key);
     const def = SLOT_BY_KEY[key];
     point(n, label, MODELLED, notPlaced && !!named && def.producer === null,
       `no ${label} producer exists in this deployment — ${named ? named.reason : 'unnamed'}; `
       + 'this run models the step and does not claim it happened');
+  }
+
+  // ── (9) DEPLOY — PROVEN, and it is the same seal point 6 checks ───────────
+  //
+  // 1293. This point was MODELLED because `deploy_attestation` was declared `producer: null`,
+  // which said no deploy evidence existed anywhere. That was false about our own executor:
+  // demo/src/atomic.js seals the executor's signature over the canonical gate preimage and binds
+  // it to the CONFIGURED DEPLOYMENT ID. Verifying that binding is a deploy fact.
+  //
+  // IT IS PROVEN BY THE SAME DISCRIMINATING CHECK AS POINT 6 — the real seal must verify AND a
+  // forged signature over the same bytes must be refused. A point that could not fail would be
+  // MODELLED wearing a PROVEN label, which is worse than the MODELLED it replaced.
+  //
+  // WHAT IT STILL DOES NOT CLAIM, and the slot says so: the artifact is not in the bundle,
+  // because no PUBLIC verifier speaks cr.atomic.execution.attestation.v1 yet. A third party
+  // cannot re-check this offline from the bundle alone. That is a verifier gap, and it is named
+  // in the slot's absent_reason rather than papered over by placing an uncheckable token.
+  {
+    const deployDef = SLOT_BY_KEY.deploy_attestation;
+    const deploymentId = configuredDeploymentId();
+    const a9 = attestationPoint({
+      attestation: authOk ? auth.evidence.attestation : null,
+      jti: authOk ? auth.evidence.jti : null,
+      deploymentId,
+    });
+    const producerNamed = typeof deployDef.producer === 'string' && deployDef.producer.length > 0;
+    const heldOut = !Object.prototype.hasOwnProperty.call(bundle.slots, 'deploy_attestation');
+    point(9, 'deploy', PROVEN, a9.ok && producerNamed && heldOut,
+      a9.ok
+        ? `the executor seal binds deployment ${deploymentId || '(unset)'} and verifies `
+          + `(${deployDef.envelope}); a forged signature over the same bytes is REFUSED. `
+          + 'Held OUT of the bundle: no public verifier for this envelope yet, so a token there '
+          + 'would grade NO_VERIFIER rather than be checked'
+        : `deploy attestation did not prove out: ${a9.detail}`);
   }
 
   // ── OUTPUT ────────────────────────────────────────────────────────────────

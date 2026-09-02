@@ -1,0 +1,50 @@
+# Release pipeline for the component project itself (not for consumers).
+#
+# A CI/CD component is published by tagging the project; the catalog entry is created by the
+# release-cli job below. Nothing here runs a consumer's gate.
+
+stages: [test, release]
+
+structure-test:
+  stage: test
+  image: node:20-alpine
+  script:
+    # The template must parse as YAML and declare the spec/inputs header the catalog requires.
+    # Kept as a block scalar: the checks contain colons, which a plain scalar cannot hold.
+    - |
+      set -eu
+      node --version
+      node -e '
+        const fs = require("fs");
+        const t = fs.readFileSync("templates/contract-gate.yml", "utf8");
+        if (!t.includes("spec:") || !t.includes("inputs:")) {
+          throw new Error("missing spec/inputs header");
+        }
+        if (t.split("\n---").length < 2) {
+          throw new Error("missing spec/config separator");
+        }
+        if (!t.includes("coderifts preflight")) {
+          throw new Error("the template never invokes the CLI — it would gate nothing");
+        }
+        console.log("contract-gate.yml: spec header, separator and CLI invocation present");
+      '
+
+create-release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    # A component version IS a project tag. v1.0.0 publishes 1.0.0 to the catalog.
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  script:
+    - echo "Publishing CodeRifts contract-gate component ${CI_COMMIT_TAG} to the CI/CD catalog."
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "CodeRifts contract gate $CI_COMMIT_TAG"
+    description: |
+      GitLab CI/CD component wrapping the published `coderifts` CLI.
+
+      Runs the same verify path as every other CodeRifts surface. Fail-closed by default.
+
+      Provider-side status: NOT_VERIFIED — GitLab has no native identity binding for a job
+      result, so a passing pipeline is not attributable to this component. The receipt is the
+      verifiable artifact.
