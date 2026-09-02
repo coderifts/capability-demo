@@ -102,6 +102,7 @@
  * resourcePath is refused — that would let a request pick the origin.
  */
 
+const { STRENGTH, REASON, checkInput } = require('./adapter-spi');
 const crypto = require('node:crypto');
 
 const {
@@ -635,7 +636,28 @@ async function httpAtomicExecute({
   };
 }
 
+/**
+ * Adapter SPI (see src/adapter-spi.js). HTTP declares INDETERMINATE and returns consumed:false.
+ *
+ * This is not a stub. There is genuinely no cross-resource ledger on this adapter: a jti spent on
+ * /a can be presented on /b, and `If-Match` says nothing across paths. Returning `true` here would
+ * make the SPI's strongest and weakest adapters indistinguishable to a caller, which is the exact
+ * confusion the contract exists to prevent.
+ */
+function consumeOnce(input) {
+  const bad = checkInput(input, STRENGTH.INDETERMINATE);
+  if (bad) return bad;
+  return {
+    consumed: false,
+    reason: REASON.NO_CROSS_RESOURCE_LEDGER,
+    strength: STRENGTH.INDETERMINATE,
+    detail: 'HTTP has no cross-resource single-use ledger; If-Match gives single-writer on one '
+      + 'path only. Same-resource CAS is enforced on the write itself.',
+  };
+}
+
 module.exports = {
+  consumeOnce,
   httpAtomicExecute,
   providerCanary,
   resourceUrl,

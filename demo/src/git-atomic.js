@@ -124,6 +124,7 @@
  *   ledger, so no reclaim applies.
  */
 
+const { STRENGTH, REASON, checkInput } = require('./adapter-spi');
 const { execFile } = require('node:child_process');
 const crypto = require('node:crypto');
 
@@ -689,7 +690,34 @@ async function reconcileLedger({ repoDir, refs = [], attestationsByJti = {} }) {
   };
 }
 
+/**
+ * Adapter SPI (see src/adapter-spi.js). Git declares EXCLUSIVE_REF_CAS.
+ *
+ * The claim is a ledger ref created in the SAME `git update-ref --stdin` batch as the target CAS
+ * (:509), so the claim and the move land together or not at all. This entry point reports whether
+ * the jti is ALREADY claimed; the claim itself is made by gitAtomicExecute inside that batch,
+ * because a claim written separately from the move is the split this adapter exists to avoid.
+ */
+async function consumeOnce(input) {
+  const bad = checkInput(input, STRENGTH.EXCLUSIVE_REF_CAS);
+  if (bad) return bad;
+  const { jti, repoDir } = input;
+  const ref = ledgerRefFor(jti);
+  if (repoDir && await readRef(repoDir, ref)) {
+    return { consumed: false, reason: REASON.ALREADY_CONSUMED, strength: STRENGTH.EXCLUSIVE_REF_CAS, ledger_ref: ref };
+  }
+  return {
+    consumed: true,
+    reason: null,
+    strength: STRENGTH.EXCLUSIVE_REF_CAS,
+    ledger_ref: ref,
+    detail: 'the claim is written in the same update-ref batch as the target CAS by '
+      + 'gitAtomicExecute; this reports the jti is unclaimed, it does not claim it',
+  };
+}
+
 module.exports = {
+  consumeOnce,
   gitAtomicExecute,
   reconcileRef,
   reconcileLedger,

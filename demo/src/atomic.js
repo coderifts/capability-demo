@@ -19,6 +19,7 @@
  * BEARER grants never enter — server.js refuses them before this is called.
  */
 
+const { STRENGTH, REASON, checkInput } = require('./adapter-spi');
 const crypto = require('node:crypto');
 
 const PG_UNIQUE_VIOLATION = '23505';
@@ -244,7 +245,39 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
   }
 }
 
+/**
+ * Adapter SPI (see src/adapter-spi.js). Postgres declares ATOMIC_TRANSACTION.
+ *
+ * The claim is `INSERT consumed_grants (jti PRIMARY KEY)` inside the SAME transaction as the
+ * mutation (demo/sql/gate.sql:6): a second attempt violates the key, and a crash rolls the claim
+ * and the write back together. This entry point reports whether the jti is ALREADY claimed; the
+ * claim is made by cr_execute_grant inside that transaction, because a claim made outside it is
+ * exactly the atomicity this adapter provides.
+ */
+async function consumeOnce(input) {
+  const bad = checkInput(input, STRENGTH.ATOMIC_TRANSACTION);
+  if (bad) return bad;
+  const { jti, query, deploymentId } = input;
+  if (typeof query === 'function') {
+    const r = await query(
+      'SELECT jti FROM consumed_grants WHERE deployment_id = $1 AND jti = $2',
+      [deploymentId == null ? '' : String(deploymentId), jti],
+    );
+    if (r && r.rows && r.rows.length > 0) {
+      return { consumed: false, reason: REASON.ALREADY_CONSUMED, strength: STRENGTH.ATOMIC_TRANSACTION };
+    }
+  }
+  return {
+    consumed: true,
+    reason: null,
+    strength: STRENGTH.ATOMIC_TRANSACTION,
+    detail: 'the claim is an INSERT with jti as PRIMARY KEY inside the consuming transaction '
+      + '(cr_execute_grant); this reports the jti is unclaimed, it does not claim it',
+  };
+}
+
 module.exports = {
+  consumeOnce,
   atomicExecute,
   resultDigestOf,
   PG_UNIQUE_VIOLATION,
