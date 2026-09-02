@@ -12,7 +12,9 @@
     "test": "node --test \"packages/middleware/test/*.test.js\"",
     "test:pg": "node --test --test-concurrency=1 \"demo/test/*.test.js\"",
     "test:all": "npm test && npm run test:pg",
-    "prove": "node demo/prove.js"
+    "prove": "node demo/prove.js",
+    "prove:all": "node bin/prove-all.js",
+    "prove:check": "node bin/prove-all.js --check"
   },
   "engines": {
     "node": ">=20"
