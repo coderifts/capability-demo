@@ -1,9 +1,62 @@
-# capability-demo — offline enforcement for `cr.exec.v1` execution grants
+# capability-demo — the atomic execution reference
 
-The reference PHASE-1 enforcement point for the CodeRifts execution-grant format, plus a
-demo API where **mutation through the guarded route without a valid grant is HTTP 403** — a refusal this
-process issues about itself, not a capability boundary. See *What the 403 is, and what it is not* below
-before citing it as evidence.
+**What this repo is now:** the reference implementation of *what happens after a decision* — a
+signed execution grant carried to an executor, consumed exactly once, and the mutation sealed
+inside the transaction that made it. Every hop is asserted, and every limit is written down beside
+the claim it bounds.
+
+It began as an Express middleware demo, and that middleware is still here. It is no longer the
+point. The 403 that middleware returns is *this process refusing itself* — useful evidence about
+routing, not a capability boundary — and the sections below say so at length. What the repo is for
+now is the part that is hard to fake: a grant that the database itself will not let you spend
+twice, and a seal that verifies with the network unplugged.
+
+## Run it — three paths, lightest first
+
+**1 · No database, no key, no network — about 30 seconds**
+
+```bash
+node examples/atomic-v2/run.js
+```
+
+Four hops asserted end to end: authorize request shape, grant issuance, one-use consumption, seal
+verification — plus a control that a forged signature over identical bytes is refused. Nothing is
+narrated; every line is a check. Start here.
+
+**2 · The full proof, and an artifact you can hand to someone — docker, about two minutes**
+
+```bash
+node bin/prove-all.js
+```
+
+Boots a throwaway Postgres, runs the six panel proofs and the ten chain points in one process on
+one clock, and writes `transcript.json` and `TRANSCRIPT.md` into the current directory. The tenth
+point re-verifies the transcript this run just produced with the network trapped, so the artifact's
+central claim — that it checks offline — is demonstrated rather than asserted.
+
+Set `DATABASE_URL` to use a scratch database of your own instead; it refuses hosts that look like
+managed production, and it refuses to start at all if there is neither docker nor a URL rather than
+reporting a proof it did not run. Re-check any transcript, including someone else's, with no
+database and no network:
+
+```bash
+node bin/prove-all.js --check transcript.json
+```
+
+**3 · The suites and the ten scenes — docker compose**
+
+```bash
+cd demo && docker compose up -d --build
+cd .. && ./demo/run-demo.sh
+npm run test:all
+```
+
+**Before citing the 403 as evidence:** the demo API returns `403` for a mutation through the
+guarded route without a valid grant. That refusal is issued by the same process that owns the data.
+Read *What the 403 is, and what it is not* below before quoting it — it is evidence about routing,
+not a capability boundary.
+
+---
 
 ## What this is, and why
 
