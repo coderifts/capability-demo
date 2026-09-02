@@ -104,11 +104,25 @@ function attestationPoint({ attestation, jti, deploymentId = '' } = {}) {
   };
 }
 
-async function main() {
+/**
+ * Run the nine points and RETURN them, printing nothing.
+ *
+ * Split out of main() so an umbrella runner (bin/prove-all.js) can compose the chain with the
+ * panels in ONE process, on ONE clock, without re-running prove or re-deriving a single fact.
+ * main() below is now the thin printing wrapper it always was in effect — `node demo/e2e-chain.js`
+ * emits exactly the same lines it did before this split.
+ *
+ * @param {object} [o]
+ * @param {object} [o.prove]  an ALREADY-COMPLETED runProve() result. Passing it is what makes the
+ *   umbrella one run rather than two: without it this calls runProve itself, as it always did.
+ * @returns {Promise<{points: object[], prove: object, transcriptOk: object, exitCode: number}>}
+ */
+async function runChain({ prove = null } = {}) {
   // ── THE LEFT HALF ─────────────────────────────────────────────────────────
   // One call. Its transcript is the input to everything below; nothing here
   // re-derives a fact prove.js already signed.
-  const out = await runProve({ silent: true });
+  points.length = 0;
+  const out = prove || await runProve({ silent: true });
   const transcriptOk = verifyProveTranscript(out.token, { publicKey: executorPublicKey() });
 
   const deny = sectionOf(out, 'deny');
@@ -277,30 +291,39 @@ async function main() {
         : `deploy attestation did not prove out: ${a9.detail}`);
   }
 
-  // ── OUTPUT ────────────────────────────────────────────────────────────────
-  for (const p of points) {
-    process.stdout.write(
-      `POINT|${p.n}|${p.name}|${p.state}|${p.ok ? 'OK' : 'FAIL'}|${p.detail}\n`,
-    );
+  // A modelled point that is honestly modelled does not fail the run; a point
+  // that misbehaved does. The transcript must also still verify.
+  const exitCode = points.every((p) => p.ok) && transcriptOk.valid ? 0 : 1;
+  return { points: points.slice(), prove: out, transcriptOk, exitCode };
+}
+
+/** The POINT/TRANSCRIPT/SUMMARY lines run-e2e.sh renders. Unchanged bytes. */
+function renderChain({ points: pts, prove: out, transcriptOk }, write = (s) => process.stdout.write(s)) {
+  for (const p of pts) {
+    write(`POINT|${p.n}|${p.name}|${p.state}|${p.ok ? 'OK' : 'FAIL'}|${p.detail}\n`);
   }
-  process.stdout.write(
+  write(
     `TRANSCRIPT|${out.ok ? 'PASS' : 'FAIL'}|${transcriptOk.valid ? 'VERIFIES' : 'DOES_NOT_VERIFY'}|`
     + `${out.preimage_hash}\n`,
   );
-  const proven = points.filter((p) => p.state === PROVEN).length;
-  const modelled = points.filter((p) => p.state === MODELLED).length;
-  const carried = points.filter((p) => p.state === PROVIDER_READBACK).length;
+  const proven = pts.filter((p) => p.state === PROVEN).length;
+  const modelled = pts.filter((p) => p.state === MODELLED).length;
+  const carried = pts.filter((p) => p.state === PROVIDER_READBACK).length;
   // The third class is NAMED in the summary. Printing "8 proven, 0 modelled" over nine points
   // leaves the ninth unaccounted for, and a reader is entitled to see which column it landed in.
-  process.stdout.write(`SUMMARY|${proven} proven|${carried} carried (provider readback, unsigned)|`
-    + `${modelled} modelled|${points.filter((p) => p.ok).length}/${points.length} points OK\n`);
-
-  // A modelled point that is honestly modelled does not fail the run; a point
-  // that misbehaved does. The transcript must also still verify.
-  return points.every((p) => p.ok) && transcriptOk.valid ? 0 : 1;
+  write(`SUMMARY|${proven} proven|${carried} carried (provider readback, unsigned)|`
+    + `${modelled} modelled|${pts.filter((p) => p.ok).length}/${pts.length} points OK\n`);
 }
 
-module.exports = { main, attestationPoint, PROVEN, MODELLED };
+async function main() {
+  const result = await runChain();
+  renderChain(result);
+  return result.exitCode;
+}
+
+module.exports = {
+  main, runChain, renderChain, attestationPoint, PROVEN, MODELLED, PROVIDER_READBACK,
+};
 
 if (require.main === module) {
   main()
