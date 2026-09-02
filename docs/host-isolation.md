@@ -113,6 +113,39 @@ executor's service account (`sourceServiceAccounts`), default-deny ingress other
 **Kubernetes.** A default-deny `NetworkPolicy` in the target's namespace, plus one policy admitting
 the executor's pod label — the same "one member of both" shape as the compose file.
 
+## Per-adapter: where the raw credential lives
+
+The network shape above is generic. What differs per adapter is **which secret would let a caller
+skip the executor**, and where that secret sits. Measured from each adapter's config surface.
+
+| adapter | the raw credential | where it lives | why the agent host cannot use it | verification |
+|---|---|---|---|---|
+| **postgres** | `EXECUTOR_DATABASE_URL` — the `cr_executor` role's connection string (`demo/src/db.js:106-107`) | executor process env only; the role holds `EXECUTE` on `cr_execute_grant` and **no table DML** | not in the agent host's env, and `executor-net` is `internal` so the host cannot resolve `target-db` | `docker compose exec agent-host env \| grep -c EXECUTOR_DATABASE_URL` → `0`; then the `nc` check above |
+| **git** | filesystem write access to the bare repo at `CODERIFTS_GIT_REPO_DIR` (`demo/src/server.js:85`) | a volume mounted into the executor container only | the path is not mounted in the agent host; a ref move needs `update-ref` on that filesystem | `docker compose exec agent-host test -d "$CODERIFTS_GIT_REPO_DIR" \|\| echo "not mounted"` |
+| **http** | the origin's own write credential, behind `CODERIFTS_HTTP_BASE_URL` (`demo/src/server.js:88`) | executor env; the base URL is **server-configured, never taken from the request** — a client-supplied base URL would let a grant for one origin mutate another | the origin sits on `executor-net`; the host cannot route to it | `docker compose exec agent-host wget -T 2 -q -O- "$CODERIFTS_HTTP_BASE_URL"` → `bad address` |
+| **fs** | write permission on the target directory | the executor's mount | not mounted into the agent host | `docker compose exec agent-host test -w /target \|\| echo "not writable"` |
+
+The postgres row is the one worth reading twice: isolation is not the only control there. Even a
+caller who reached `target-db` with the `cr_executor` credential gets `42501` on raw DML, because
+that role's only grant is `EXECUTE` on the gate function. Network isolation and role separation are
+independent, and the demo runs both.
+
+## Adapter profile names vs measured guarantees
+
+A profile name is a claim. These are the claims each adapter makes and what it actually measures —
+the third column is the one that has to stay true.
+
+| adapter | claimed profile | what it measures | what the name deliberately does NOT say |
+|---|---|---|---|
+| postgres | `ENFORCING_ATOMIC` | consume + mutate + seal in ONE transaction; a deferred constraint refuses to commit a consumed grant with no attestation | — the name is the guarantee here |
+| git | `ENFORCING_EXCLUSIVE_REF_CAS` | ref-level compare-and-swap via `git update-ref`; same-ref replay refused by a reflog marker | **not** ATOMIC: no cross-ref ledger, and a crash after the ref moved is INDETERMINATE |
+| http, same resource | `ENFORCING_EXCLUSIVE_HTTP_CAS` | `If-Match` on ONE path; a 2xx after a non-matching observed ETag is `origin_ignored_if_match`, never a success | **not** ATOMIC: the origin may ignore `If-Match`, and sending it is not the origin honouring it |
+| http, cross resource | `INDETERMINATE_HTTP_CAS` | nothing single-writer — the name is the downgrade | it does not claim enforcement at all |
+
+No claim was renamed in this pass: each name already stops short of the guarantee it cannot make.
+`demo/test/adapter-wrong-paths.test.js` asserts that — including that neither git nor HTTP profile
+name contains `ATOMIC`.
+
 ## What this pattern does not prove
 
 Named in the same vocabulary as `GET /readyz`'s `does_not_prove`, and for the same reason: a
