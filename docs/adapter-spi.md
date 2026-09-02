@@ -31,10 +31,26 @@ the grant and mistyped the value must not silently receive an unbounded one.
 | **git** | `EXCLUSIVE_REF_CAS` | a ledger ref at `refs/coderifts/consumed/<hh>/<sha256(jti)>` written in the SAME `git update-ref --stdin` batch as the target CAS (`demo/src/git-atomic.js:173`, `:509`) | the claim and the ref move land together or not at all | no transaction spanning the move and the attestation; a crash after the ref moved is INDETERMINATE |
 | **http** | `INDETERMINATE` | none across resources; `If-Match` gives single-writer on ONE path (`demo/src/http-atomic.js:24-28`) | same-resource CAS, enforced on the write itself | **no cross-resource single-use.** A jti spent on `/a` can be presented on `/b`. `consumeOnce` returns `consumed: false` with `no_cross_resource_ledger` |
 
-This table is the same split the enforcement-profile names carry —
-`ENFORCING_ATOMIC` / `ENFORCING_EXCLUSIVE_REF_CAS` / `INDETERMINATE_HTTP_CAS` — and the same one in
-[host-isolation.md](host-isolation.md). Three statements of one fact, and the SPI test asserts no
-two adapters report the same strength, so they cannot drift into agreeing.
+These strengths are NOT the same thing as the enforcement-profile names, and an earlier version of
+this page said they were. They are two axes over the same adapters:
+
+- **SPI strength** — what `consumeOnce` guarantees about SINGLE USE.
+- **enforcement profile** — what the WRITE PATH guarantees about compare-and-swap and atomicity:
+  `ENFORCING_ATOMIC` (postgres), `ENFORCING_EXCLUSIVE_REF_CAS` (git),
+  `ENFORCING_EXCLUSIVE_HTTP_CAS` (http, same resource) and `INDETERMINATE_HTTP_CAS`
+  (http, cross resource).
+
+They agree everywhere they overlap, and http is where they visibly do not line up one-to-one: it has
+ONE SPI strength (`INDETERMINATE`, because there is no cross-resource ledger) and TWO profile names,
+because its write path IS single-writer on one path and is not across paths. Collapsing that into
+"the same split" listed three of the four profile names and made the same-resource guarantee
+disappear.
+
+Both axes are published together, per adapter, in
+[`adapter-strength.v1.json`](adapter-strength.v1.json) — one file so a consumer does not have to
+join two tables and guess how they relate. The profile column of
+[host-isolation.md](host-isolation.md) is the other statement of the second axis; a test asserts the
+JSON, this page and the SPI code agree.
 
 ## What `consumeOnce` reports, and what makes the claim
 

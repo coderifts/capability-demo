@@ -1,0 +1,39 @@
+{
+  "spec": "coderifts.adapter-strength.v1",
+  "$comment": "The machine-readable form of the adapter SPI strength table. TWO AXES, published together per adapter because a consumer joining them from two documents would have to guess how they relate: `strength` is what consumeOnce guarantees about SINGLE USE; `profile` is what the write path guarantees about compare-and-swap and atomicity. They agree everywhere they overlap and do not line up one-to-one on http, which has one strength and two profiles. Source of truth for the strengths is demo/src/adapter-spi.js; for the profiles, the constants named in each row. docs/adapter-spi.md and docs/host-isolation.md state the same facts in prose, and test/adapter-strength-contract.test.js asserts all three agree.",
+  "measured": "2026-09-02",
+  "strengths": {
+    "ATOMIC_TRANSACTION": "the claim and the mutation commit or roll back together",
+    "EXCLUSIVE_REF_CAS": "the claim and the target compare-and-swap land in one batch",
+    "INDETERMINATE": "this adapter cannot enforce single use; consumeOnce returns consumed:false"
+  },
+  "adapters": [
+    {
+      "adapter_id": "postgres",
+      "strength": "ATOMIC_TRANSACTION",
+      "single_use_mechanism": "INSERT consumed_grants (jti PRIMARY KEY) inside the same transaction as the mutation",
+      "mechanism_cite": "demo/sql/gate.sql:6",
+      "profile": ["ENFORCING_ATOMIC"],
+      "profile_cite": "demo/src/server.js:147",
+      "does_not_promise": "that the transaction committed as observed by anyone else; a crash between the seal and COMMIT leaves a valid signature over a mutation that never landed — that is the reconciler's question"
+    },
+    {
+      "adapter_id": "git",
+      "strength": "EXCLUSIVE_REF_CAS",
+      "single_use_mechanism": "a ledger ref at refs/coderifts/consumed/<hh>/<sha256(jti)> written in the same `git update-ref --stdin` batch as the target CAS",
+      "mechanism_cite": "demo/src/git-atomic.js:173",
+      "profile": ["ENFORCING_EXCLUSIVE_REF_CAS"],
+      "profile_cite": "demo/src/git-atomic.js:137",
+      "does_not_promise": "atomicity across the ref move and the attestation: there is no transaction spanning them, so a crash after the ref moved is INDETERMINATE, not prevented"
+    },
+    {
+      "adapter_id": "http",
+      "strength": "INDETERMINATE",
+      "single_use_mechanism": "none across resources; If-Match gives single-writer on ONE path and says nothing across paths",
+      "mechanism_cite": "demo/src/http-atomic.js:24-28",
+      "profile": ["ENFORCING_EXCLUSIVE_HTTP_CAS", "INDETERMINATE_HTTP_CAS"],
+      "profile_cite": "demo/src/http-atomic.js:114,118",
+      "does_not_promise": "cross-resource single use — a jti spent on /a can be presented on /b — and not that the origin honoured If-Match at all: a 2xx after a non-matching observed ETag is origin_ignored_if_match, never a success"
+    }
+  ]
+}
