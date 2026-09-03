@@ -1,6 +1,6 @@
 receipt-verifier 02153c9b7ffc7ff672fe5471433f3c3b01e0d694
 verify-bundle.js         190de0dda70c4d15dcd21fb6bb6b279313e48f90bf2e477463580968d0987127
-verify.js                c9a6ceac411b9f9feefb7ff4447dd7f5cf2f02a817f35caace68037d0c8e0d02
+verify.js                363e52c72ec4b913e1f3edc8e2029848feaeacb1efa6c07960fe5e5f195c23b3
 verify-grant.js          a285b021b32cc9c70c963de042154dc6be7175cdeaf722a88cc7699651a7c1ea
 verify-attest.js         035105de0f163d112038624eb2bf93cee059a565216fd8b03489964f6b0b2fa8
 verify-toolset.js        2f0987a28f3e7d3758d71f59799d1a5c6190aaa882f8f887809b2bff434e2df8
