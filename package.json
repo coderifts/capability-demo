@@ -18,5 +18,27 @@
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "files": [
+    "bin/prove-all.js",
+    "demo/prove.js",
+    "demo/e2e-chain.js",
+    "demo/gen-keys.js",
+    "demo/issue-grant.js",
+    "demo/bundle.js",
+    "demo/offline-check.js",
+    "demo/src/",
+    "demo/sql/",
+    "demo/package.json",
+    "demo/SELF-HOST.md",
+    "packages/verifier-core/",
+    "packages/middleware/src/",
+    "examples/atomic-v2/",
+    "examples/sample-transcript/",
+    "docs/adapter-strength.v1.json",
+    "README.md",
+    "LICENSE",
+    "!demo/keys",
+    "!**/*.pem"
+  ]
 }

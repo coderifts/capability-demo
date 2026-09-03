@@ -65,5 +65,37 @@ function main() {
   process.stdout.write(`demo keypairs generated in demo/keys (grant kid=${KID}, executor kid=${EXEC_KID}) — DEMO MATERIAL, never reuse\n`);
 }
 
+/**
+ * 1330 — generate ONLY when the keys are absent, so a freshly installed package works.
+ *
+ * MEASURED: demo/keys/* is gitignored (.gitignore:6) and loadExecutor (demo/src/server.js:74)
+ * readFileSync's the private key with no fallback — so `npx coderifts prove` threw on a machine
+ * that had never run gen-keys. The generator already existed; nothing called it.
+ *
+ * IDEMPOTENT AND NON-DESTRUCTIVE. If every file is present this returns `created: false` and
+ * touches nothing: a repo user's existing keys are never regenerated, so behaviour in-tree is
+ * byte-identical to before.
+ *
+ * THESE ARE DEMO KEYS AND THE KIDs SAY SO (`DEMO-KEY-DO-NOT-USE`). A transcript signed by a key
+ * the reader just generated proves the chain RUNS; it proves nothing about CodeRifts having
+ * signed anything. That distinction belongs in the transcript, not only here.
+ *
+ * NEVER COMMITTED: the directory stays gitignored, and package.json's files[] does not list it,
+ * so `npm pack` cannot carry a private key even by accident. Two independent mechanisms, because
+ * one is a convention and the other is what npm actually reads.
+ */
+function ensureKeys() {
+  const needed = [
+    'demo-private.pem', 'coderifts-keys.json',
+    'executor-private.pem', 'executor-keys.json',
+  ].map((f) => path.join(KEYS_DIR, f));
+  const missing = needed.filter((f) => !fs.existsSync(f));
+  if (missing.length === 0) return { created: false, dir: KEYS_DIR, missing: [] };
+  // Partial state is regenerated WHOLE: a half-written key set is not a starting point, and
+  // mixing a fresh executor key with a stale registry produces an UNKNOWN_KEY nobody can explain.
+  main();
+  return { created: true, dir: KEYS_DIR, missing: missing.map((f) => path.basename(f)) };
+}
+
 if (require.main === module) main();
-module.exports = { KID, EXEC_KID, KEYS_DIR };
+module.exports = { KID, EXEC_KID, KEYS_DIR, ensureKeys };

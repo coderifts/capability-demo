@@ -29,7 +29,7 @@ const { issuePostureReceipt, verifyPostureReceipt, canonicalJson } = require('./
 const { reconcile, OUTCOME } = require('./src/reconcile');
 const { parseGrantToken } = require('../packages/middleware/src/verify-grant');
 
-const PROVE_V = 'cr.prove.transcript.v1';
+const { verifyProveTranscript, PROVE_V } = require('./src/verify-transcript');
 const KEYS = path.join(__dirname, 'keys');
 const KEYOPTS = { key: path.join(KEYS, 'demo-private.pem'), keys: path.join(KEYS, 'coderifts-keys.json') };
 
@@ -445,21 +445,8 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
   }
 }
 
-function verifyProveTranscript(token, { publicKey } = {}) {
-  if (typeof token !== 'string' || !token.startsWith(`${PROVE_V}|`)) {
-    return { valid: false, status: 'PROVE_MALFORMED' };
-  }
-  const seg = token.split('|');
-  if (seg.length !== 4) return { valid: false, status: 'PROVE_MALFORMED' };
-  let preimage;
-  try { preimage = Buffer.from(seg[2], 'base64url').toString('utf8'); } catch (_) {
-    return { valid: false, status: 'PROVE_MALFORMED' };
-  }
-  const ok = crypto.verify(null, Buffer.from(preimage, 'utf8'), publicKey, Buffer.from(seg[3], 'base64url'));
-  if (!ok) return { valid: false, status: 'PROVE_INVALID_SIGNATURE' };
-  return { valid: true, status: 'PROVE_VALID', payload: JSON.parse(preimage) };
-}
-
+// 1330 — moved to ./src/verify-transcript.js so `--check` does not pull in the pg driver.
+// Re-exported below UNCHANGED: every existing caller keeps working.
 async function main() {
   const skipSeal = process.argv.includes('--skip-seal');
   const out = await runProve({ skipSeal });

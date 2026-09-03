@@ -33,7 +33,13 @@ const { runProve, verifyProveTranscript } = require('./prove');
 const { verifyAtomicExecutionAttestation } = require('./src/atomic');
 const { assembleBundle, SLOT_BY_KEY } = require('./bundle');
 // The PUBLIC grader, from the verifier repo — this file does not decide what a readback means.
-const { verifyProviderReadback } = require('../../receipt-verifier/verify-bundle.js');
+// 1330 — VENDORED, not a sibling checkout. This used to be
+//   require('../../receipt-verifier/verify-bundle.js')
+// which escapes the package root: `npm pack` cannot carry it, so an installed copy threw at load
+// before printing anything. The bytes are now in packages/verifier-core/, pinned per file in
+// VENDOR.sha256 against the receipt-verifier commit they came from, and checked by
+// demo/test/vendor-verifier-core.test.js — copying without that check is just copying.
+const { verifyProviderReadback } = require('../packages/verifier-core/verify-bundle.js');
 const { makePool, bootstrapUrl, configuredDeploymentId } = require('./src/db');
 
 const KEYS = path.join(__dirname, 'keys');

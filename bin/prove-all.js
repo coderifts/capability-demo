@@ -397,9 +397,27 @@ function check(file) {
     return 2;
   }
 
-  const { verifyProveTranscript } = require(path.join(DEMO, 'prove.js'));
+  // 1330 — the pg-free module, not prove.js. Loading prove.js here pulled in ./src/server ->
+  // ./db -> `pg`, so a fresh extract died on "Cannot find module 'pg'" while checking a signature
+  // over bytes — an operation that touches no database. Same function, same behaviour.
+  const { verifyProveTranscript } = require(path.join(DEMO, 'src', 'verify-transcript.js'));
   const { offlineReverify } = require(path.join(DEMO, 'src', 'offline-reverify.js'));
-  const reg = JSON.parse(fs.readFileSync(path.join(DEMO, 'keys', 'executor-keys.json'), 'utf8'));
+  // 1330 — `--keys <registry.json>` so a transcript can be checked against the key it was ACTUALLY
+  // signed with, not against whatever this machine happens to hold.
+  //
+  // Without it, checking someone else's transcript on a fresh install always reads
+  // PROVE_INVALID_SIGNATURE — correctly, but for a reason that has nothing to do with the
+  // transcript: ensureKeys generated a different demo key here. The default is unchanged, so an
+  // operator checking their OWN run types exactly what they typed before.
+  //
+  // WHAT A SUPPLIED REGISTRY DOES NOT DO: it does not make the transcript trustworthy. It says
+  // "these bytes were signed by that key". If the registry travelled with the transcript, that is
+  // self-attestation and is worth exactly what it sounds like.
+  const ki = process.argv.indexOf('--keys');
+  const regPath = ki !== -1 && process.argv[ki + 1]
+    ? path.resolve(process.argv[ki + 1])
+    : path.join(DEMO, 'keys', 'executor-keys.json');
+  const reg = JSON.parse(fs.readFileSync(regPath, 'utf8'));
   const publicKey = crypto.createPublicKey(reg.keys[0].public_key_pem);
 
   const off = offlineReverify(artifact.transcript_token, verifyProveTranscript, { publicKey });
@@ -444,6 +462,29 @@ function check(file) {
 // ── entry ───────────────────────────────────────────────────────────────────────────────────
 
 async function main() {
+  // 1330 — a freshly installed package has no keys: demo/keys/* is gitignored, and both the run
+  // path (loadExecutor, demo/src/server.js:74) and the check path (the executor registry read
+  // below) readFileSync them with no fallback. Generating here, once, before either path needs
+  // them, is what makes `npx coderifts prove` possible at all.
+  //
+  // Idempotent: an existing key set is left alone, so a repo user's behaviour is unchanged. The
+  // keys are DEMO keys — the kid says DEMO-KEY-DO-NOT-USE — and they are generated on the
+  // reader's machine, so a transcript they produce proves the chain RUNS, not that CodeRifts
+  // signed anything.
+  try {
+    const { ensureKeys } = require(path.join(DEMO, 'gen-keys.js'));
+    const k = ensureKeys();
+    if (k.created) {
+      line(`generated demo keys in ${k.dir} (were absent: ${k.missing.join(', ')})`);
+      line('These are DEMO keys generated on this machine. A transcript signed by them shows the');
+      line('chain runs; it is not a CodeRifts signature.');
+      line('');
+    }
+  } catch (err) {
+    line(`could not ensure demo keys: ${(err && err.message) || 'unknown'}`);
+    return 2;
+  }
+
   const argv = process.argv.slice(2);
   const ci = argv.indexOf('--check');
   if (ci !== -1) {

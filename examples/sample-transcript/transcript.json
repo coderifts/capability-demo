@@ -1,0 +1,141 @@
+{
+  "v": "cr.prove.artifact.v1",
+  "run_id": "prove-dea87c5c-c14f-4343-a030-93ba30969d4f",
+  "started_at": "2026-09-03T20:20:15.129Z",
+  "finished_at": "2026-09-03T20:20:16.058Z",
+  "verdict": "PASS",
+  "db_mode": "DATABASE_URL",
+  "provenance": {
+    "source_commit": "ea1da3f377ddf31709fd1a0cdeee5a35fd3a1683",
+    "source_commit_reason": null,
+    "working_tree_dirty": true,
+    "working_tree_dirty_reason": null,
+    "node": "v24.12.0",
+    "platform": "darwin/x64"
+  },
+  "versions": {
+    "transcript": "cr.prove.transcript.v1",
+    "artifact": "cr.prove.artifact.v1"
+  },
+  "panels": [
+    {
+      "id": "deny",
+      "name": "DENY",
+      "verdict": "PASS"
+    },
+    {
+      "id": "posture",
+      "name": "POSTURE",
+      "verdict": "PASS"
+    },
+    {
+      "id": "replay",
+      "name": "REPLAY",
+      "verdict": "PASS"
+    },
+    {
+      "id": "concurrency",
+      "name": "CONCURRENCY",
+      "verdict": "PASS"
+    },
+    {
+      "id": "authorized",
+      "name": "AUTHORIZED WRITE + VERIFY",
+      "verdict": "PASS"
+    },
+    {
+      "id": "drift",
+      "name": "DRIFT BASELINE",
+      "verdict": "PASS"
+    },
+    {
+      "id": "recovery",
+      "name": "RECOVERY",
+      "verdict": "CONFIRMED",
+      "kind": "recovery"
+    }
+  ],
+  "points": [
+    {
+      "n": 1,
+      "name": "authorize",
+      "state": "PROVEN",
+      "ok": true,
+      "detail": "an ungranted mutation is refused and a granted one is not — prove.js section (1)"
+    },
+    {
+      "n": 2,
+      "name": "grant issuance",
+      "state": "PROVEN",
+      "ok": true,
+      "detail": "a grant was issued and consumed: jti b031ef9b-de19-4f21-bb94-de609104cef2"
+    },
+    {
+      "n": 3,
+      "name": "executor credential-boundary",
+      "state": "PROVEN",
+      "ok": true,
+      "detail": "the boundary was read back out of the live catalog and signed — cr.posture.receipt.v1"
+    },
+    {
+      "n": 4,
+      "name": "nonce consume (one-use)",
+      "state": "PROVEN",
+      "ok": true,
+      "detail": "the same grant cannot be consumed twice — the ledger PK is the mechanism"
+    },
+    {
+      "n": 5,
+      "name": "CAS under concurrency",
+      "state": "PROVEN",
+      "ok": true,
+      "detail": "two racing writers, exactly one mutation"
+    },
+    {
+      "n": 6,
+      "name": "attestation",
+      "state": "PROVEN",
+      "ok": true,
+      "detail": "signature verifies and binds jti b031ef9b-de19-4f21-bb94-de609104cef2 (ATTEST_VALID); a forged signature over the same bytes is REFUSED (ATTEST_INVALID_SIGNATURE)"
+    },
+    {
+      "n": 7,
+      "name": "gate",
+      "state": "PROVEN",
+      "ok": true,
+      "detail": "cr.gate.preimage.v1 sealed in the consuming transaction; the ledger's signature IS the attestation's, and each link was checked separately"
+    },
+    {
+      "n": 8,
+      "name": "merge",
+      "state": "MODELLED",
+      "ok": true,
+      "detail": "no provider readback was supplied to this run — no provider readback was supplied to this run; supply one with CODERIFTS_PROVIDER_READBACK=<path> to fill this slot; this run models the step and does not claim it happened"
+    },
+    {
+      "n": 9,
+      "name": "deploy",
+      "state": "PROVEN",
+      "ok": true,
+      "detail": "the executor seal binds deployment demo-deployment and verifies (cr.atomic.execution.attestation.v1); a forged signature over the same bytes is REFUSED. A PUBLIC verifier for this envelope now exists — receipt-verifier verify-atomic-attestation.js — so the bundle slot grades it rather than refusing it for want of one"
+    },
+    {
+      "n": 10,
+      "name": "offline_reproducibility",
+      "state": "PROVEN",
+      "ok": true,
+      "detail": "signature re-verified (PROVE_VALID) with 21 network entry points trapped and the trap proved live first (net.connect:blocked, fetch:blocked); nothing in the verify path reached one. RESIDUAL: the trap is at the JavaScript boundary — a native addon or a pre-opened socket would evade it. This path is node:crypto over in-memory bytes plus one local keyring read, so it reaches neither"
+    }
+  ],
+  "transcript_token": "cr.prove.transcript.v1|DEMO-EXECUTOR-KEY-DO-NOT-USE|eyJkZXBsb3ltZW50X2lkIjoiZGVtby1kZXBsb3ltZW50IiwiZXhlY3V0b3Jfa2lkIjoiREVNTy1FWEVDVVRPUi1LRVktRE8tTk9ULVVTRSIsIm1lYXN1cmVkX2F0IjoiMjAyNi0wOS0wM1QyMDoyMDoxNS4zNzNaIiwic2VjdGlvbnMiOlt7ImV2aWRlbmNlIjp7ImV4ZWN1dG9yX3JvbGUiOiJjcl9leGVjdXRvciIsImV4ZWN1dG9yX3NxbHN0YXRlIjoiNDI1MDEiLCJob3N0X3JvbGUiOiJjcl9ob3N0IiwiaG9zdF9zcWxzdGF0ZSI6IjQyNTAxIn0sImlkIjoiZGVueSIsIm5hbWUiOiJERU5ZIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7InZlcmRpY3QiOiJQQVNTIiwidmVyaWZ5IjoiUE9TVFVSRV9QQVNTIn0sImlkIjoicG9zdHVyZSIsIm5hbWUiOiJQT1NUVVJFIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7ImZpcnN0IjoyMDEsInNlY29uZCI6NDA5LCJzdGF0dXMiOiJHUkFOVF9DT05TVU1FRCJ9LCJpZCI6InJlcGxheSIsIm5hbWUiOiJSRVBMQVkiLCJ2ZXJkaWN0IjoiUEFTUyJ9LHsiZXZpZGVuY2UiOnsiY29uZmxpY3QiOjE5LCJncmV3IjoxLCJvayI6MX0sImlkIjoiY29uY3VycmVuY3kiLCJuYW1lIjoiQ09OQ1VSUkVOQ1kiLCJ2ZXJkaWN0IjoiUEFTUyJ9LHsiZXZpZGVuY2UiOnsiaHR0cCI6MjAxLCJqdGkiOiJiMDMxZWY5Yi1kZTE5LTRmMjEtYmI5NC1kZTYwOTEwNGNlZjIiLCJzZWFsZWQiOnRydWUsIndpdGhfZ3JhbnQiOiJzaWduYXR1cmUgdmFsaWQgQU5EIGJvdW5kIHRvIGdyYW50IGIwMzFlZjliLWRlMTktNGYyMS1iYjk0LWRlNjA5MTA0Y2VmMiIsIndpdGhvdXRfZ3JhbnQiOiJzaWduYXR1cmUgdmFsaWQ7IGdyYW50LWJpbmRpbmcgTk9UIGNoZWNrZWQifSwiaWQiOiJhdXRob3JpemVkIiwibmFtZSI6IkFVVEhPUklaRUQgV1JJVEUgKyBWRVJJRlkiLCJ2ZXJkaWN0IjoiUEFTUyJ9LHsiZXZpZGVuY2UiOnsiYWZ0ZXJfZ3JhbnQiOiJGQUlMIiwiYWZ0ZXJfcmV2b2tlIjoiUEFTUyIsImRyaWZ0X25hbWVzIjpbImhvc3Rfcm9sZSBnYWluZWQgSU5TRVJUIG9uIGFydGljbGVzIl19LCJpZCI6ImRyaWZ0IiwibmFtZSI6IkRSSUZUIEJBU0VMSU5FIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7ImNvdW50cyI6eyJDT05GSVJNRUQiOjEsIklOREVURVJNSU5BVEUiOjAsIlJFSkVDVEVEIjowLCJSRUxFQVNFRCI6MH0sImdyYW50cyI6W3siYWRhcHRlciI6InBvc3RncmVzIiwiZXZpZGVuY2UiOnsiYXR0ZXN0X3N0YXR1cyI6IkFUVEVTVF9WQUxJRCIsImV4ZWN1dG9yX2tpZCI6IkRFTU8tRVhFQ1VUT1ItS0VZLURPLU5PVC1VU0UiLCJyZWFzb24iOiJjb25zdW1lZCwgc2VhbGVkLCBhbmQgYSBDUllQVE9HUkFQSElDQUxMWSBWRVJJRklFRCBhdHRlc3RhdGlvbiBib3VuZCB0byB0aGlzIGdyYW50IGNhcnJpZXMgdGhpcyByb3cncyBleGFjdCBwcmVpbWFnZSIsInN0YXR1cyI6InNlYWxlZCJ9LCJqdGkiOiJiMDMxZWY5Yi1kZTE5LTRmMjEtYmI5NC1kZTYwOTEwNGNlZjIiLCJvdXRjb21lIjoiQ09ORklSTUVEIn1dLCJuZWVkc19hdHRlbnRpb24iOjAsIm91dGNvbWUiOiJDT05GSVJNRUQifSwiaWQiOiJyZWNvdmVyeSIsImtpbmQiOiJyZWNvdmVyeSIsIm5hbWUiOiJSRUNPVkVSWSIsInZlcmRpY3QiOiJDT05GSVJNRUQifV0sInYiOiJjci5wcm92ZS50cmFuc2NyaXB0LnYxIiwidmVyZGljdCI6IlBBU1MifQ|Tej8I8ELzqkX5mUve6zh-uGdPDxAalDthpZRYHOvEYV-_6EIYshTdynEEXAgfW3_6ZkWW9zB3cBCPBllTCTGDA",
+  "transcript_preimage_hash": "sha256:bfb5f0a73ef5d269b53f23c1624fd617939e6f742176f468c03a6aa71ccb8591",
+  "transcript_verifies": true,
+  "ceiling": {
+    "shows": "the chain this deployment minted is internally consistent and independently checkable offline",
+    "does_not_show": [
+      "that the world changed — a verified bundle is a statement about artifacts, not about effects",
+      "that no other path wrote to the target",
+      "that an ABSENT slot is unnecessary; absence is scope, not a waiver"
+    ]
+  }
+}

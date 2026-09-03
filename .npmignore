@@ -1,0 +1,6 @@
+# 1330 — the whitelist in package.json files[] is what npm reads; this is the second, independent
+# mechanism. Keys must never reach a tarball, and one of the two guards being a convention while
+# the other is enforcement is exactly the shape that fails quietly.
+demo/keys/
+**/*.pem
+demo/test/

@@ -143,7 +143,12 @@ function main() {
     });
 
     // The verifier is the PUBLISHED one, from the receipt-verifier repo — not a local copy.
-    const verifierPath = path.join(os.homedir(), 'receipt-verifier', 'verify-atomic-attestation.js');
+    // 1330 — prefer the VENDORED verifier; fall back to a sibling checkout only if this file is
+    // being read outside a packaged copy. The skip below stays for that case.
+    const vendored = path.join(ROOT, 'packages', 'verifier-core', 'verify-atomic-attestation.js');
+    const verifierPath = fs.existsSync(vendored)
+      ? vendored
+      : path.join(os.homedir(), 'receipt-verifier', 'verify-atomic-attestation.js');
     if (!fs.existsSync(verifierPath)) {
       process.stdout.write(`   SKIPPED — public verifier not found at ${verifierPath}\n`);
       process.stdout.write('   (clone coderifts/receipt-verifier beside this repo to run hop 4)\n');
