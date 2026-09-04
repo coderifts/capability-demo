@@ -39,6 +39,33 @@ const {
   encodeAtomicExecutionAttestation, signPreimage,
 } = require(path.join(ROOT, 'demo/src/atomic.js'));
 
+// ── 1365: THE README'S FIRST COMMAND MUST WORK FROM A CLEAN CHECKOUT ────────────────────────
+//
+// MEASURED 2026-09-04 on `git archive HEAD | tar -x`: demo/keys/ ships holding only .gitkeep (the
+// directory is gitignored and excluded from files[], deliberately — a repo must not carry a
+// private key). This script then died with ENOENT on demo/keys/demo-private.pem, while the README
+// above it says "no database, no key, no network". The key half of that sentence was false.
+//
+// bin/prove-all.js already had the answer and this entrypoint did not share it: ensureKeys()
+// generates a DEMO key set on first run and returns whole. Same call, same generator, same files
+// — so the two entrypoints cannot drift into signing with different material.
+//
+// DETERMINISM IS UNAFFECTED. The generated key signs; it does not appear in the printed output.
+// What it is NOT: evidence that CodeRifts signed anything. A key the reader just generated proves
+// the chain RUNS. That distinction is stated in demo/gen-keys.js and is not weakened here.
+{
+  const { ensureKeys } = require(path.join(ROOT, 'demo/gen-keys.js'));
+  const k = ensureKeys();
+  if (k.created) {
+    process.stdout.write(
+      `   ..  generated a local DEMO key set in ${path.relative(ROOT, k.dir)} `
+      + `(${k.missing.join(', ')})\n`
+      + '       These are YOUR keys, not CodeRifts keys: they prove this chain runs, not that\n'
+      + '       anyone signed it. Never committed, never packed.\n',
+    );
+  }
+}
+
 const step = (n, what) => process.stdout.write(`\n── ${n}. ${what}\n`);
 const ok = (msg) => process.stdout.write(`   OK  ${msg}\n`);
 

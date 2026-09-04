@@ -415,10 +415,37 @@ function check(file) {
   // WHAT A SUPPLIED REGISTRY DOES NOT DO: it does not make the transcript trustworthy. It says
   // "these bytes were signed by that key". If the registry travelled with the transcript, that is
   // self-attestation and is worth exactly what it sounds like.
+  //
+  // 1367 — AND THE PACKAGE'S OWN SAMPLE TRIPPED EXACTLY THAT. Measured 2026-09-04 from
+  // `npm pack` → empty dir → install: `--check examples/sample-transcript/transcript.json` read
+  // INVALID (PROVE_INVALID_SIGNATURE), exit 1, because the default registry is the one ensureKeys
+  // had just generated on THIS machine. Correct arithmetic, useless answer — the one example we
+  // ship failed its own documented command, and a reader has no way to tell that from a real
+  // forgery.
+  //
+  // So: when no --keys is given, a registry sitting NEXT TO the transcript is used if there is
+  // one. That is not a weakening — the local demo keyring was never stronger, it was the READER's
+  // own throwaway key. What it is, is legible: the source is now printed either way, and the
+  // self-attestation caveat above is printed with it, because "signed by the key that travelled
+  // in the same folder" is a much smaller claim than "signed" and must not read as the same thing.
   const ki = process.argv.indexOf('--keys');
-  const regPath = ki !== -1 && process.argv[ki + 1]
-    ? path.resolve(process.argv[ki + 1])
-    : path.join(DEMO, 'keys', 'executor-keys.json');
+  const sidecar = path.join(path.dirname(path.resolve(file)), 'executor-keys.json');
+  let regSource;
+  let regPath;
+  if (ki !== -1 && process.argv[ki + 1]) {
+    regPath = path.resolve(process.argv[ki + 1]);
+    regSource = 'supplied with --keys';
+  } else if (fs.existsSync(sidecar)) {
+    regPath = sidecar;
+    regSource = 'found beside the transcript (SELF-ATTESTATION: the registry travelled with the '
+      + 'file it verifies, so this says "signed by that key", never "signed by CodeRifts")';
+  } else {
+    regPath = path.join(DEMO, 'keys', 'executor-keys.json');
+    regSource = 'this machine\'s local demo keyring — if the transcript came from elsewhere, '
+      + 'INVALID here means the keys differ, not that the transcript is forged. Pass --keys.';
+  }
+  process.stdout.write(`keyring              : ${regPath}\n`);
+  process.stdout.write(`                       ${regSource}\n`);
   const reg = JSON.parse(fs.readFileSync(regPath, 'utf8'));
   const publicKey = crypto.createPublicKey(reg.keys[0].public_key_pem);
 
