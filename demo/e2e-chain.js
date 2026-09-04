@@ -3,7 +3,8 @@
  * The e2e chain's NINE points, left half and right half in one run (audit-6).
  *
  * prove.js already assembles the LEFT half — authorize, grant, executor
- * boundary, nonce consume, CAS, attestation — into a signed
+ * boundary (DENY + unchanged-state read-back, not the posture catalog),
+ * nonce consume, CAS (concurrency + stale-token), attestation — into a signed
  * cr.prove.transcript.v1. This ATTACHES to that transcript; it does not rewrite
  * it. runProve() is called, its sections are read, and the right half (gate,
  * merge, deploy) is derived from the artifacts that run produced.
@@ -140,9 +141,14 @@ async function runChain({ prove = null } = {}) {
   point(2, 'grant issuance', PROVEN, authOk,
     authOk ? `a grant was issued and consumed: jti ${auth.evidence.jti}` : 'no grant reached the ledger');
 
-  const posture = sectionOf(out, 'posture');
-  point(3, 'executor credential-boundary', PROVEN, posture && posture.verdict === 'PASS',
-    'the boundary was read back out of the live catalog and signed — cr.posture.receipt.v1');
+  const denyReadback = deny && deny.verdict === 'PASS'
+    && deny.evidence && deny.evidence.host_sqlstate === '42501'
+    && deny.evidence.before_count === deny.evidence.after_count
+    && typeof deny.evidence.before_count === 'number';
+  point(3, 'executor credential-boundary', PROVEN, !!denyReadback,
+    denyReadback
+      ? `host INSERT refused SQLSTATE 42501; articles count unchanged (${deny.evidence.before_count} → ${deny.evidence.after_count})`
+      : 'deny panel missing target-side 42501 or unchanged-state read-back');
 
   const replay = sectionOf(out, 'replay');
   point(4, 'nonce consume (one-use)', PROVEN, replay && replay.verdict === 'PASS',

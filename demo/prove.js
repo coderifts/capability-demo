@@ -58,6 +58,22 @@ async function sqlstateOf(fn) {
   }
 }
 
+/** Title-scoped article count. Used as the before/after read-back the auditors require. */
+async function countTitle(pool, title) {
+  const r = await pool.query('SELECT count(*)::int c FROM articles WHERE title=$1', [title]);
+  return r.rows[0].c;
+}
+
+async function countJti(pool, jti) {
+  const r = await pool.query('SELECT count(*)::int c FROM consumed_grants WHERE jti=$1', [jti]);
+  return r.rows[0].c;
+}
+
+async function countArticles(pool) {
+  const r = await pool.query('SELECT count(*)::int c FROM articles');
+  return r.rows[0].c;
+}
+
 function grantBindingLines(token, grant, publicKey) {
   const parsed = parseGrantToken(grant);
   const without = verifyAtomicExecutionAttestation(token, { publicKey });
@@ -136,20 +152,32 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
 
     // ── (1) DENY ──────────────────────────────────────────────────────────
     // Reuses host-role-denied.test.js:40-75 — raw INSERT, SQLSTATE 42501, not Node 403.
+    // Read-back: articles count BEFORE and AFTER the denied host write, proving
+    // the state did not change. That byte is what CREDENTIAL_BOUNDARY COVERED needs.
     say('── (1) DENY');
     const hostWho = await hostPool.query('SELECT current_user AS u');
     const execWho = await executorPool.query('SELECT current_user AS u');
+    const denyHostTitle = `prove-deny-host-${Date.now()}`;
+    const denyExecTitle = `prove-deny-exec-${Date.now()}`;
+    const denyBefore = await countArticles(bootstrap);
+    const denyBeforeHost = await countTitle(bootstrap, denyHostTitle);
     const hostIns = await sqlstateOf(() =>
-      hostPool.query("INSERT INTO articles (title, body) VALUES ('prove-deny-host', 'raw')"));
+      hostPool.query('INSERT INTO articles (title, body) VALUES ($1, $2)', [denyHostTitle, 'raw']));
     const execIns = await sqlstateOf(() =>
-      executorPool.query("INSERT INTO articles (title, body) VALUES ('prove-deny-exec', 'raw')"));
+      executorPool.query('INSERT INTO articles (title, body) VALUES ($1, $2)', [denyExecTitle, 'raw']));
+    const denyAfter = await countArticles(bootstrap);
+    const denyAfterHost = await countTitle(bootstrap, denyHostTitle);
+    const denyUnchanged = denyBefore === denyAfter && denyBeforeHost === denyAfterHost
+      && denyAfterHost === 0;
     const denyOk = hostWho.rows[0].u === 'cr_host'
       && execWho.rows[0].u === 'cr_executor'
       && hostIns.sqlstate === '42501' && hostIns.node_status === undefined
-      && execIns.sqlstate === '42501' && execIns.node_status === undefined;
+      && execIns.sqlstate === '42501' && execIns.node_status === undefined
+      && denyUnchanged;
     say(`  session host=${hostWho.rows[0].u} executor=${execWho.rows[0].u}`);
     say(`  host INSERT     SQLSTATE=${hostIns.sqlstate}  (not Node 403)`);
     say(`  executor INSERT SQLSTATE=${execIns.sqlstate}  (not Node 403)`);
+    say(`  articles ${denyBefore} → ${denyAfter}  host-title ${denyBeforeHost} → ${denyAfterHost}`);
     say(denyOk ? '  PASS' : '  FAIL');
     say('');
     (denyOk ? pass : fail)('deny', 'DENY', {
@@ -157,6 +185,11 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
       executor_role: execWho.rows[0].u,
       host_sqlstate: hostIns.sqlstate,
       executor_sqlstate: execIns.sqlstate,
+      before_count: denyBefore,
+      after_count: denyAfter,
+      host_title_before: denyBeforeHost,
+      host_title_after: denyAfterHost,
+      unchanged: denyUnchanged,
     });
 
     // ── (2) POSTURE ───────────────────────────────────────────────────────
@@ -191,16 +224,22 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
     // Reuses atomic.pg.test.js:86-98 — same grant twice: 201 then 409 GRANT_CONSUMED.
     say('── (3) REPLAY');
     const replayBody = JSON.stringify({ title: `prove-replay-${Date.now()}`, body: 'once' });
+    const replayTitle = JSON.parse(replayBody).title;
     const ch3 = await challenge('');
     const g3 = mkGrant({ operation: 'publish', target_id: '', body: replayBody, state_nonce: ch3.state_nonce });
+    const replayBefore = await countTitle(bootstrap, replayTitle);
     const r1 = await req('POST', '/articles', { body: replayBody, grant: g3 });
     const r2 = await req('POST', '/articles', { body: replayBody, grant: g3 });
     const replayOk = r1.code === 201 && r2.code === 409 && r2.json && r2.json.status === 'GRANT_CONSUMED';
+    const replayAfter = await countTitle(bootstrap, replayTitle);
     say(`  1st POST ${r1.code}  2nd POST ${r2.code} ${r2.json && r2.json.status}`);
+    say(`  articles-with-title ${replayBefore} → ${replayAfter}`);
     say(replayOk ? '  PASS' : '  FAIL');
     say('');
     (replayOk ? pass : fail)('replay', 'REPLAY', {
       first: r1.code, second: r2.code, status: r2.json && r2.json.status,
+      before_count: replayBefore,
+      after_count: replayAfter,
     });
 
     // ── (4) CONCURRENCY ───────────────────────────────────────────────────
@@ -221,7 +260,136 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
     say(`  201s=${okN}  409s=${conflictN}  grew=${grew}`);
     say(concOk ? '  PASS' : '  FAIL');
     say('');
-    (concOk ? pass : fail)('concurrency', 'CONCURRENCY', { ok: okN, conflict: conflictN, grew });
+    (concOk ? pass : fail)('concurrency', 'CONCURRENCY', {
+      ok: okN, conflict: conflictN, grew, before_count: before, after_count: after,
+    });
+
+    // ── (4b) CAS-STALE ────────────────────────────────────────────────────
+    // Reuses atomic.pg.test.js:192-201 — out-of-band write between challenge
+    // and commit → 409 STATE_DRIFT, the row survives, the grant is not consumed.
+    say('── (4b) CAS-STALE');
+    const casTitle = `prove-cas-stale-${Date.now()}`;
+    const seed = await bootstrap.query(
+      'INSERT INTO articles (title, body) VALUES ($1, $2) RETURNING id',
+      [casTitle, 'before'],
+    );
+    const casId = String(seed.rows[0].id);
+    const casBefore = await bootstrap.query(
+      'SELECT count(*)::int c FROM articles WHERE id::text=$1', [casId],
+    ).then((r) => r.rows[0].c);
+    const chCas = await challenge(casId);
+    await bootstrap.query(
+      "UPDATE articles SET body='OUT-OF-BAND', updated_at=now() WHERE id::text=$1",
+      [casId],
+    );
+    const gCas = mkGrant({
+      operation: 'deploy', target_id: casId, body: '', state_nonce: chCas.state_nonce,
+    });
+    const casJti = JSON.parse(Buffer.from(gCas.split('.')[0], 'base64url')).jti;
+    const rCas = await req('DELETE', `/articles/${casId}`, { grant: gCas });
+    const casAfter = await bootstrap.query(
+      'SELECT count(*)::int c FROM articles WHERE id::text=$1', [casId],
+    ).then((r) => r.rows[0].c);
+    const casConsumed = await countJti(bootstrap, casJti);
+    const casOk = rCas.code === 409
+      && rCas.json && rCas.json.status === 'STATE_DRIFT'
+      && casBefore === 1 && casAfter === 1 && casConsumed === 0;
+    say(`  DELETE ${rCas.code} ${rCas.json && rCas.json.status}`);
+    say(`  row ${casBefore} → ${casAfter}  jti consumed=${casConsumed}`);
+    say(casOk ? '  PASS' : '  FAIL');
+    say('');
+    (casOk ? pass : fail)('cas_stale', 'CAS-STALE', {
+      status: rCas.json && rCas.json.status,
+      http: rCas.code,
+      stale_state_token: true,
+      expected_state_token: chCas.current_digest,
+      before_count: casBefore,
+      after_count: casAfter,
+      jti_consumed: casConsumed,
+      unchanged: casBefore === casAfter,
+    });
+
+    // ── (4c) NO CONSUME-ONLY ──────────────────────────────────────────────
+    // crashBeforeSeal (atomic.js) throws between gate and seal. The deferred
+    // constraint + ROLLBACK leave neither a consumed row nor the article.
+    // Recorded as a PASSING negative: the refusal happened and state rolled back.
+    say('── (4c) NO CONSUME-ONLY');
+    const skipTitle = `prove-noco-${Date.now()}`;
+    const skipBody = JSON.stringify({ title: skipTitle, body: 'nope' });
+    const chSkip = await challenge('');
+    const gSkip = mkGrant({
+      operation: 'publish', target_id: '', body: skipBody, state_nonce: chSkip.state_nonce,
+    });
+    const skipPayload = parseGrantToken(gSkip).payload;
+    const skipBefore = await countTitle(bootstrap, skipTitle);
+    const skipLedBefore = await countJti(bootstrap, skipPayload.jti);
+    let skipThrew = false;
+    let skipErr = null;
+    try {
+      await atomicExecute({
+        pool: executorPool,
+        payload: skipPayload,
+        targetId: '',
+        operation: 'publish',
+        title: skipTitle,
+        body: 'nope',
+        executor,
+        deploymentId: deployment_id,
+        crashBeforeSeal: true,
+      });
+    } catch (err) {
+      skipThrew = true;
+      skipErr = err && err.message;
+    }
+    const skipAfter = await countTitle(bootstrap, skipTitle);
+    const skipLedAfter = await countJti(bootstrap, skipPayload.jti);
+    const skipOk = skipThrew
+      && /simulated crash-before-seal/.test(String(skipErr))
+      && skipBefore === skipAfter && skipAfter === 0
+      && skipLedBefore === 0 && skipLedAfter === 0;
+    say(`  crash-before-seal threw=${skipThrew}  ${skipErr || ''}`);
+    say(`  articles-with-title ${skipBefore} → ${skipAfter}  ledger ${skipLedBefore} → ${skipLedAfter}`);
+    say(skipOk ? '  PASS' : '  FAIL');
+    say('');
+    (skipOk ? pass : fail)('no_consume_only', 'NO CONSUME-ONLY', {
+      skip_seal: true,
+      status: 'consumed_unsigned_rolled_back',
+      threw: skipThrew,
+      error: skipErr,
+      before_count: skipBefore,
+      after_count: skipAfter,
+      ledger_before: skipLedBefore,
+      ledger_after: skipLedAfter,
+      unchanged: skipBefore === skipAfter && skipLedBefore === skipLedAfter,
+    });
+
+    // ── (4d) NO MUTATION-ONLY ─────────────────────────────────────────────
+    // cr_executor raw INSERT is 42501 (gate.sql REVOKE ALL ON articles). No
+    // consume is attempted; no article appears. Mutation without consume is refused.
+    say('── (4d) NO MUTATION-ONLY');
+    const mutTitle = `prove-mutonly-${Date.now()}`;
+    const mutBefore = await countTitle(bootstrap, mutTitle);
+    const mutLedBefore = (await bootstrap.query('SELECT count(*)::int c FROM consumed_grants')).rows[0].c;
+    const mutIns = await sqlstateOf(() =>
+      executorPool.query('INSERT INTO articles (title, body) VALUES ($1, $2)', [mutTitle, 'raw']));
+    const mutAfter = await countTitle(bootstrap, mutTitle);
+    const mutLedAfter = (await bootstrap.query('SELECT count(*)::int c FROM consumed_grants')).rows[0].c;
+    const mutOk = mutIns.sqlstate === '42501' && mutIns.node_status === undefined
+      && mutBefore === mutAfter && mutAfter === 0
+      && mutLedBefore === mutLedAfter;
+    say(`  executor INSERT SQLSTATE=${mutIns.sqlstate}  (not Node 403)`);
+    say(`  articles-with-title ${mutBefore} → ${mutAfter}  ledger ${mutLedBefore} → ${mutLedAfter}`);
+    say(mutOk ? '  PASS' : '  FAIL');
+    say('');
+    (mutOk ? pass : fail)('no_mutation_only', 'NO MUTATION-ONLY', {
+      mutation_only: true,
+      sqlstate: mutIns.sqlstate,
+      before_count: mutBefore,
+      after_count: mutAfter,
+      ledger_before: mutLedBefore,
+      ledger_after: mutLedAfter,
+      unchanged: mutBefore === mutAfter && mutLedBefore === mutLedAfter,
+    });
 
     // ── (5) AUTHORIZED WRITE + VERIFY ─────────────────────────────────────
     // Reuses atomic.pg.test.js:100-137 (sealed + offline verify) and
@@ -258,7 +426,9 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
       const authBody = JSON.stringify({ title: authTitle, body: 'legit' });
       const ch5 = await challenge('');
       const g5 = mkGrant({ operation: 'publish', target_id: '', body: authBody, state_nonce: ch5.state_nonce });
+      const authBefore = await countTitle(bootstrap, authTitle);
       const posted = await req('POST', '/articles', { body: authBody, grant: g5 });
+      const authAfter = await countTitle(bootstrap, authTitle);
       const jti = JSON.parse(Buffer.from(g5.split('.')[0], 'base64url')).jti;
       const led = await bootstrap.query(
         'SELECT * FROM consumed_grants WHERE deployment_id=$1 AND jti=$2',
@@ -274,7 +444,9 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
       } else {
         say('  no attestation returned');
       }
-      authOk = posted.code === 201 && sealed && bind && bind.without_ok && bind.with_ok;
+      authOk = posted.code === 201 && sealed && bind && bind.without_ok && bind.with_ok
+        && authBefore === 0 && authAfter === 1;
+      say(`  articles-with-title ${authBefore} → ${authAfter}`);
       say(authOk ? '  PASS' : '  FAIL');
       authEvidence = {
         http: posted.code,
@@ -283,6 +455,8 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
         with_grant: bind && bind.with_grant,
         jti,
         attestation: token,
+        before_count: authBefore,
+        after_count: authAfter,
       };
       (authOk ? pass : fail)('authorized', 'AUTHORIZED WRITE + VERIFY', authEvidence);
     }
@@ -397,7 +571,7 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
     // it but never decides it: an INDETERMINATE recovery is a true outcome,
     // not a failed proof.
     const proofSections = sections.filter((s) => s.kind !== 'recovery');
-    const allPass = proofSections.length === 6 && proofSections.every((s) => s.verdict === 'PASS');
+    const allPass = proofSections.length === 9 && proofSections.every((s) => s.verdict === 'PASS');
     const summary = {
       v: PROVE_V,
       executor_kid: executor.kid,
@@ -408,7 +582,12 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
         id: s.id, name: s.name, verdict: s.verdict,
         ...(s.kind ? { kind: s.kind } : {}),
         evidence: s.id === 'authorized'
-          ? { http: s.evidence.http, sealed: s.evidence.sealed, with_grant: s.evidence.with_grant, without_grant: s.evidence.without_grant, jti: s.evidence.jti }
+          ? {
+            http: s.evidence.http, sealed: s.evidence.sealed,
+            with_grant: s.evidence.with_grant, without_grant: s.evidence.without_grant,
+            jti: s.evidence.jti,
+            before_count: s.evidence.before_count, after_count: s.evidence.after_count,
+          }
           : s.id === 'posture'
             ? { verdict: s.evidence.verdict, verify: s.evidence.verify }
             : s.evidence,
@@ -424,7 +603,7 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
       Buffer.from(signature, 'base64url'),
     );
 
-    say(`═══ VERDICT: ${allPass ? 'PASS' : 'FAIL'} (${proofSections.filter((s) => s.verdict === 'PASS').length}/6) ═══`);
+    say(`═══ VERDICT: ${allPass ? 'PASS' : 'FAIL'} (${proofSections.filter((s) => s.verdict === 'PASS').length}/9) ═══`);
     say(`signed summary: ${token.slice(0, 72)}…`);
     say(`summary verifies offline: ${sumOk}`);
     return {

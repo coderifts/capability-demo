@@ -44,15 +44,14 @@ const guard = (t) => {
 };
 
 describe('STEP 6 — prove transcript', () => {
-  test('all 6 sections PASS; signed summary verifies offline; grant-binding is explicit', async (t) => {
+  test('all 9 proof sections PASS; signed summary verifies offline; grant-binding is explicit', async (t) => {
     if (guard(t)) return;
     const out = await runProve({ silent: true });
     assert.equal(out.ok, true, out.transcript);
-    // The proof sections are still exactly 6 and still all PASS. RECOVERY is
-    // signed alongside them but carries the recovery vocabulary, not PASS/FAIL,
-    // and is excluded here so this assertion keeps meaning what it meant.
+    // Proof sections: original six plus CAS-stale / no-consume-only / no-mutation-only.
+    // RECOVERY is signed alongside them but carries the recovery vocabulary, not PASS/FAIL.
     const proof = out.sections.filter((s) => s.kind !== 'recovery');
-    assert.equal(proof.length, 6);
+    assert.equal(proof.length, 9);
     assert.ok(proof.every((s) => s.verdict === 'PASS'), JSON.stringify(proof.map((s) => [s.id, s.verdict])));
     assert.equal(out.sections.filter((s) => s.kind === 'recovery').length, 1);
     assert.ok(out.token.startsWith(`${PROVE_V}|`));
@@ -65,6 +64,58 @@ describe('STEP 6 — prove transcript', () => {
     assert.doesNotMatch(out.transcript, /^[^\n]*ATTEST_VALID[^\n]*$/m);
     assert.match(out.transcript, /signature valid; grant-binding NOT checked/);
     assert.match(out.transcript, /signature valid AND bound to grant /);
+  });
+
+  test('DENY records unchanged-state read-back (before_count === after_count, SQLSTATE 42501)', async (t) => {
+    if (guard(t)) return;
+    const out = await runProve({ silent: true });
+    const deny = out.sections.find((s) => s.id === 'deny');
+    assert.equal(deny.verdict, 'PASS');
+    assert.equal(deny.evidence.host_sqlstate, '42501');
+    assert.equal(typeof deny.evidence.before_count, 'number');
+    assert.equal(deny.evidence.before_count, deny.evidence.after_count);
+    assert.equal(deny.evidence.unchanged, true);
+    const v = verifyProveTranscript(out.token, { publicKey: loadExecutorPub() });
+    const signed = v.payload.sections.find((s) => s.id === 'deny');
+    assert.equal(signed.evidence.before_count, signed.evidence.after_count);
+  });
+
+  test('CAS-STALE: STATE_DRIFT, row survives, grant not consumed, before/after equal', async (t) => {
+    if (guard(t)) return;
+    const out = await runProve({ silent: true });
+    const cas = out.sections.find((s) => s.id === 'cas_stale');
+    assert.ok(cas, 'cas_stale panel missing');
+    assert.equal(cas.verdict, 'PASS', JSON.stringify(cas.evidence));
+    assert.equal(cas.evidence.status, 'STATE_DRIFT');
+    assert.equal(cas.evidence.stale_state_token, true);
+    assert.equal(cas.evidence.before_count, cas.evidence.after_count);
+    assert.equal(cas.evidence.jti_consumed, 0);
+    const v = verifyProveTranscript(out.token, { publicKey: loadExecutorPub() });
+    assert.ok(v.payload.sections.find((s) => s.id === 'cas_stale'));
+  });
+
+  test('NO CONSUME-ONLY: crash-before-seal rolls back article AND ledger', async (t) => {
+    if (guard(t)) return;
+    const out = await runProve({ silent: true });
+    const skip = out.sections.find((s) => s.id === 'no_consume_only');
+    assert.ok(skip, 'no_consume_only panel missing');
+    assert.equal(skip.verdict, 'PASS', JSON.stringify(skip.evidence));
+    assert.equal(skip.evidence.skip_seal, true);
+    assert.equal(skip.evidence.after_count, 0);
+    assert.equal(skip.evidence.ledger_after, 0);
+    assert.equal(skip.evidence.unchanged, true);
+  });
+
+  test('NO MUTATION-ONLY: executor raw INSERT is 42501, no article, no consume', async (t) => {
+    if (guard(t)) return;
+    const out = await runProve({ silent: true });
+    const mut = out.sections.find((s) => s.id === 'no_mutation_only');
+    assert.ok(mut, 'no_mutation_only panel missing');
+    assert.equal(mut.verdict, 'PASS', JSON.stringify(mut.evidence));
+    assert.equal(mut.evidence.mutation_only, true);
+    assert.equal(mut.evidence.sqlstate, '42501');
+    assert.equal(mut.evidence.after_count, 0);
+    assert.equal(mut.evidence.unchanged, true);
   });
 
   test('--skip-seal: prove FAILS naming the authorized-write section', async (t) => {
@@ -174,7 +225,7 @@ describe('STEP 6 — RECOVERY section', () => {
     // And when a run DOES reconcile INDETERMINATE, it stays a signed fact
     // rather than a proof failure — the property the recovery slice added.
     const proof = out.sections.filter((s) => s.kind !== 'recovery');
-    assert.equal(proof.length, 6);
+    assert.equal(proof.length, 9);
     assert.ok(proof.every((s) => s.verdict === 'PASS'));
   });
 });

@@ -183,7 +183,7 @@ async function runAll({ cwd = process.cwd() } = {}) {
   process.on('exit', teardown);
 
   try {
-    line('═══ coderifts prove — one run, ten points, six panels ═══');
+    line('═══ coderifts prove — one run, ten points, nine panels ═══');
     line(`run_id: ${run_id}`);
     line(`started_at: ${started_at}`);
     line('');
@@ -242,7 +242,7 @@ async function runAll({ cwd = process.cwd() } = {}) {
     const { CEILING } = require(path.join(DEMO, 'bundle.js'));
 
     // ── PANELS 1–6, then POINTS 1–9, on ONE prove run ───────────────────────────────────────
-    line('── panels 1–6 ─────────────────────────────────────────');
+    line('── panels (deny through drift, plus CAS/rollback negatives) ─');
     const prove = await runProve({ silent: false });
     line('');
     line('── chain points 1–9 ───────────────────────────────────');
@@ -333,7 +333,7 @@ function renderMarkdown(a) {
 | Transcript | \`${a.versions.transcript}\` · ${a.transcript_verifies ? 'verifies offline' : '**does not verify**'} |
 | Preimage | \`${a.transcript_preimage_hash}\` |
 
-## The six panels
+## The proof panels
 
 | id | panel | verdict |
 |---|---|---|
