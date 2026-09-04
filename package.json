@@ -1,6 +1,6 @@
 {
-  "name": "capability-demo",
-  "private": true,
+  "name": "@coderifts/prove",
+  "private": false,
   "version": "0.1.0",
   "description": "Reference offline enforcement for cr.exec.v1 execution grants + a demo API where mutation without a grant is 403.",
   "license": "MIT",
@@ -40,5 +40,8 @@
     "LICENSE",
     "!demo/keys",
     "!**/*.pem"
-  ]
+  ],
+  "bin": {
+    "coderifts-prove": "bin/prove-all.js"
+  }
 }
