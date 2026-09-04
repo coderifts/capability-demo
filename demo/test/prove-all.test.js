@@ -232,6 +232,31 @@ describe('the markdown artifact', () => {
     assert.match(md, /your\*\* deployment behaves this way|\*\*your\*\* deployment/);
   });
 
+  it('1313 L3: the legend names all five classes, and an OFFLINE point maps to the OFFLINE line', () => {
+    const { CEILING } = require('../bundle.js');
+    const md = runner.renderMarkdown({
+      v: runner.ARTIFACT_V,
+      run_id: 'r', started_at: 'a', finished_at: 'b', verdict: 'PASS', db_mode: 'throwaway-docker',
+      provenance: { source_commit: 'abc', source_commit_reason: null, working_tree_dirty: false,
+        working_tree_dirty_reason: null, node: 'v24', platform: 'darwin/arm64' },
+      versions: { transcript: 'cr.prove.transcript.v1', artifact: runner.ARTIFACT_V },
+      panels: [{ id: 'deny', name: 'DENY', verdict: 'PASS' }],
+      points: [
+        { n: 1, name: 'authorize', state: 'PROVEN', ok: true, detail: 'd' },
+        { n: 10, name: 'offline_reproducibility', state: 'OFFLINE', ok: true,
+          detail: 'trap live; verify path did not reach the network' },
+      ],
+      transcript_token: 't', transcript_preimage_hash: 'sha256:x', transcript_verifies: true,
+      ceiling: CEILING,
+    });
+    for (const cls of ['PROVEN', 'PROVIDER_READBACK', 'OFFLINE', 'MODELLED', 'NOT_ESTABLISHED']) {
+      assert.match(md, new RegExp(`- \\*\\*${cls}\\*\\* —`), `legend missing ${cls}`);
+    }
+    assert.match(md, /\| 10 \| offline_reproducibility \| `OFFLINE` \|/);
+    assert.match(md, /\*\*OFFLINE\*\* — construction of the verify path plus a control-probe that the path cannot reach the network/);
+    assert.match(md, /No signature is the grade, and no database is read/);
+  });
+
   it('a dirty working tree is SAID, not quietly omitted', () => {
     const { CEILING } = require('../bundle.js');
     const base = {

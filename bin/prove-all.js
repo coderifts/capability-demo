@@ -349,6 +349,8 @@ ${a.points.map(row).join('\n')}
 
 - **PROVEN** — rests on a signature this run verified, or a database state this run read back.
 - **PROVIDER_READBACK** — a real read of a real host, **unsigned**. Honest evidence; not a signature.
+- **OFFLINE** — construction of the verify path plus a control-probe that the path cannot reach the network.
+  No signature is the grade, and no database is read.
 - **MODELLED** — this deployment has no producer for the artifact, so there is nothing to verify.
   The point says what would have to exist. Printing it as PROVEN would be an overclaim.
 - **NOT_ESTABLISHED** — the run could not support the claim. It is not a failure of the system
