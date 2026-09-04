@@ -19,6 +19,15 @@ twice, and a seal that verifies with the network unplugged.
 node examples/atomic-v2/run.js
 ```
 
+Re-verify a committed sample in CI (no database, no network) — copy `.github/workflows/prove.yml`:
+
+```bash
+node bin/prove-all.js --check examples/sample-transcript/transcript.json \
+  --keys examples/sample-transcript/executor-keys.json
+```
+
+Authorized vs blocked on one screen: `node examples/currently-authorized/run.js`.
+
 Four hops asserted end to end: authorize request shape, grant issuance, one-use consumption, seal
 verification — plus a control that a forged signature over identical bytes is refused. Nothing is
 narrated; every line is a check. Start here.

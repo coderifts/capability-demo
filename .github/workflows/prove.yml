@@ -1,0 +1,26 @@
+# Don't trust us — re-verify the committed sample transcript offline.
+# Copy-paste this file into .github/workflows/ on any checkout of this repo.
+#
+# No database, no network, no API key. The command is the same one an adopter
+# runs locally:
+#   node bin/prove-all.js --check examples/sample-transcript/transcript.json \
+#     --keys examples/sample-transcript/executor-keys.json
+name: prove
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Re-verify the sample transcript (offline)
+        run: node bin/prove-all.js --check examples/sample-transcript/transcript.json --keys examples/sample-transcript/executor-keys.json

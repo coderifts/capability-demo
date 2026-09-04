@@ -8,6 +8,12 @@ verified — with each hop asserted rather than narrated.
 node examples/atomic-v2/run.js
 ```
 
+Determinism (who audits the decider): run it twice and diff — the stdout is byte-identical. Anyone re-runs the decision and gets the same verdict.
+
+```bash
+node examples/atomic-v2/run.js > /tmp/a.txt && node examples/atomic-v2/run.js > /tmp/b.txt && diff -q /tmp/a.txt /tmp/b.txt
+```
+
 No network, no API key, no database. The authorize *response* is minted locally by
 `demo/issue-grant.js`; the authorize **request shape** is the real one, and that is the part a
 framework caller has to get right.
