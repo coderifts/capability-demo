@@ -202,3 +202,19 @@ describe('the prove artifact carries the correlation (conformance vendoring need
     assert.equal(verifyCorrelation(c, publicKey).valid, true, 'the carried correlation verifies');
   });
 });
+
+describe('the FULL prove-all run carries the correlation (regression guard)', () => {
+  it('bin/prove-all.js runs to completion — the artifact-assembly step does not throw', () => {
+    const cp = require('child_process');
+    const r = cp.spawnSync('node', ['bin/prove-all.js'], {
+      cwd: require('path').join(__dirname, '..'), encoding: 'utf8',
+      env: { ...process.env },
+    });
+    // A green module test did NOT catch that chain.correlation was referenced as a bare
+    // `correlation` and crashed runAll after printing PASS. This asserts the full entry point.
+    // The regression was a ReferenceError in artifact assembly AFTER points ran — that is the
+    // guard, not the exit code (without a database prove-all exits 3 = Postgres required, a clean
+    // prerequisite message the pg-fix added, not a crash).
+    assert.ok(!/ReferenceError/.test(r.stderr || ''), `ReferenceError in the full run: ${(r.stderr||'').slice(-400)}`);
+  });
+});
