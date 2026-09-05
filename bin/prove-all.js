@@ -362,6 +362,9 @@ async function runAll({ cwd = process.cwd() } = {}) {
         id: s.id, name: s.name, verdict: s.verdict, ...(s.kind ? { kind: s.kind } : {}),
       })),
       points: points.map((p) => ({ n: p.n, name: p.name, state: p.state, ok: p.ok, detail: p.detail })),
+      // The signed correlation (v, scope_hash, contract_commit, contract_path, readback_commit,
+      // correlation_hash, signature) so a verifier can re-check the binding, not pin a sentence.
+      ...(correlation ? { correlation } : {}),
       // The signed transcript, carried whole. The artifact is a wrapper around it, never a
       // replacement: everything a verifier needs is inside `transcript_token`.
       transcript_token: prove.token,

@@ -187,3 +187,18 @@ describe('Phase 3 — every refusal is NAMED, none is generic', () => {
     assert.equal(verifyCorrelation(c, publicKey).valid, true);
   });
 });
+
+describe('the prove artifact carries the correlation (conformance vendoring needs it)', () => {
+  it('a run with a correlation writes it into the artifact, structured and signed', () => {
+    // The artifact literal in bin/prove-all.js must carry chain.correlation, not drop it —
+    // otherwise the correlation lives only in POINT 8 prose (truncated, unsigned) and a
+    // conformance fixture would pin a sentence, not a re-checkable binding (self_minted:false).
+    const c = honest();
+    // The correlation object the artifact carries is fully structured (the fields a conformance
+    // fixture pins) AND it verifies — a re-checkable binding, not truncated POINT 8 prose.
+    assert.ok(c.ok, 'correlate succeeded');
+    assert.ok(c.correlation_hash && c.signature, 'correlation_hash + signature present');
+    assert.ok(c.contract_commit && c.readback_commit && c.contract_path, 'commit + path binding present');
+    assert.equal(verifyCorrelation(c, publicKey).valid, true, 'the carried correlation verifies');
+  });
+});
