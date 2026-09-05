@@ -35,6 +35,13 @@ describe('prove.yml — the copy-paste CI snippet', () => {
     assert.ok(fs.existsSync(KEYS), 'sample keys must be committed');
   });
 
+  it('the committed sample was produced from a clean checkout', () => {
+    const art = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
+    assert.equal(art.provenance.working_tree_dirty, false);
+    assert.equal(art.verdict, 'PASS');
+    assert.equal(art.provenance.source_commit.startsWith('3a34079'), true);
+  });
+
   it('the command the workflow runs succeeds locally', () => {
     const r = spawnSync(process.execPath, [
       BIN, '--check', SAMPLE, '--keys', KEYS,
