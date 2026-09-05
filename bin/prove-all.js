@@ -562,7 +562,13 @@ function check(file) {
     : null;
   const mismatches = [];
   if (signed) {
-    if (signed.verdict === 'PASS' && artifact.verdict !== 'PASS' && artifact.points.every((p) => p.ok)) {
+    // A FAIL artifact with OK points and a PASS transcript is a mismatch UNLESS authorization
+    // -continuity explains it: the continuity conjunct legitimately fails the verdict while every
+    // point is individually OK (the server grant did not flow through). That is a MEANINGFUL FAIL,
+    // not an inconsistency — the artifact carries continuity.continuous:false to say so.
+    const continuityExplainsFail = artifact.continuity && artifact.continuity.continuous === false;
+    if (signed.verdict === 'PASS' && artifact.verdict !== 'PASS' && artifact.points.every((p) => p.ok)
+        && !continuityExplainsFail) {
       mismatches.push('the artifact says FAIL while every point is OK and the transcript says PASS');
     }
     if (signed.verdict !== 'PASS' && artifact.verdict === 'PASS') {
