@@ -621,7 +621,18 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
       Buffer.from(signature, 'base64url'),
     );
 
-    say(`═══ VERDICT: ${allPass ? 'PASS' : 'FAIL'} (${proofSections.filter((s) => s.verdict === 'PASS').length}/9) ═══`);
+    // ── 1416 — TWO DIFFERENT NINES, NOW LABELLED (Peter-approved public output change) ──────
+    //
+    // This line used to read `═══ VERDICT: PASS (9/9) ═══`, and bin/prove-all.js:340 ends the same
+    // output with `═══ VERDICT: FAIL ═══`. They are not in conflict — this counts the DB-chain's
+    // nine executor sections, that one grades the ten chain points — but a reader has no way to
+    // know, and "PASS (9/9)" is quotable out of a run that failed. Measured on a Phase-2 run with
+    // an uncorrelated readback: both lines appear, one above the other.
+    //
+    // The word VERDICT now belongs to exactly one line in the output: the artifact's.
+    say(`═══ DB-CHAIN: ${proofSections.filter((s) => s.verdict === 'PASS').length}/9 sections `
+      + `${allPass ? 'PASS' : 'FAIL'} ═══   (executor sections — NOT the chain verdict; `
+      + 'see the artifact VERDICT at the end)');
     say(`signed summary: ${token.slice(0, 72)}…`);
     say(`summary verifies offline: ${sumOk}`);
     return {

@@ -267,6 +267,32 @@ async function runAll({ cwd = process.cwd() } = {}) {
     // ── PANELS 1–6, then POINTS 1–9, on ONE prove run ───────────────────────────────────────
     line('── panels (deny through drift, plus CAS/rollback negatives) ─');
     const prove = await runProve({ silent: false });
+    // ── PHASE 3 — THE NETWORKED SEGMENT, LABELLED AND BOUNDED ───────────────────────────────
+    //
+    // Two phases, and the split is stated in the output rather than left to a reader's trust:
+    //
+    //   [ISSUANCE]  may touch the network — the live POST /api/v1/preflight when CODERIFTS_API_KEY
+    //               is set (demo/src/authorize-issue.js), otherwise the recorded server grant.
+    //   [READBACK]  may touch the network — the provider observation. Supplied as a file here, so
+    //               this run reads bytes captured elsewhere and reaches nothing itself.
+    //   [VERIFY]    reaches nothing, and it is PROVED rather than promised: POINT 10 runs the
+    //               verification inside 21 traps with the trap shown live first.
+    //
+    // Naming the networked half is the point. A run that quietly did its issuance inside the same
+    // breath as its verification could still print "offline" truthfully about the narrow step it
+    // trapped, which is how an offline claim starts covering less than a reader assumes.
+    // [ISSUANCE] is already printed above by authorize-issue.js, with the capture timestamp and
+    // the endpoint — a second line saying the same thing differently is worse than one line.
+    // These two complete the split.
+    const readbackSupplied = !!process.env.CODERIFTS_PROVIDER_READBACK;
+    line('');
+    line('── phase split ────────────────────────────────────────────');
+    line(`[READBACK] ${readbackSupplied
+      ? `SUPPLIED — ${process.env.CODERIFTS_PROVIDER_READBACK} (captured elsewhere; this run reads bytes and reaches nothing)`
+      : 'ABSENT — no provider observation was supplied; POINT 8 stays modelled'}`);
+    line('[VERIFY]   everything below is checked offline — POINT 10 proves the traps were live,');
+    line('           and the correlation + scope recompute run inside them, not beside them');
+
     line('');
     line('── chain points 1–9 ───────────────────────────────────');
     const chain = await runChain({ prove });
@@ -277,7 +303,37 @@ async function runAll({ cwd = process.cwd() } = {}) {
       const reg = JSON.parse(fs.readFileSync(path.join(DEMO, 'keys', 'executor-keys.json'), 'utf8'));
       return crypto.createPublicKey(reg.keys[0].public_key_pem);
     })();
-    const off = offlineReverify(prove.token, verifyProveTranscript, { publicKey: executorPublicKey });
+    // ── PHASE 3 — WHAT THE TRAP COVERS ──────────────────────────────────────────────────────
+    //
+    // MEASURED before changing it: the 21-trap wrapped `verifyProveTranscript` alone, so POINT 10
+    // proved that ONE signature check needs no network. The correlation, the scope_hash recompute
+    // and the executor attestation ran outside it and were simply never networked — true, but
+    // unproven, which is the distinction this codebase draws everywhere else.
+    //
+    // They now run INSIDE the same trap, from the captured artifact. Nothing about the networked
+    // segment moved: the live authorize and the readback capture stay outside and stay labelled.
+    // What changed is that "offline verify" now names the whole verification, not one part of it.
+    const off = offlineReverify(prove.token, (token, opts) => {
+      const transcript = verifyProveTranscript(token, opts);
+      if (!transcript || transcript.valid !== true) return transcript;
+
+      // Re-derive rather than re-read: a recorded value the verifier trusts is not verified.
+      const { contractPayload: cp } = require(path.join(DEMO, 'src', 'governed-contract.js'));
+      const { computeScopeHash: csh } = require(path.join(REPO, 'packages', 'middleware', 'src', 'verify-grant.js'));
+      const recomputed = csh({ operation: 'publish', target_id: '', after_payload: cp() });
+      const correlation = chain.correlation || null;
+      if (correlation) {
+        const { verifyCorrelation: vc } = require(path.join(DEMO, 'src', 'contract-correlation.js'));
+        const cv = vc(correlation, opts.publicKey);
+        if (!cv.valid) {
+          return { valid: false, status: 'PROVE_CORRELATION_INVALID', reason: cv.reason };
+        }
+        if (correlation.scope_hash !== recomputed) {
+          return { valid: false, status: 'PROVE_SCOPE_DRIFT', reason: 'scope_hash_recompute_mismatch' };
+        }
+      }
+      return transcript;
+    }, { publicKey: executorPublicKey });
     const point10 = {
       n: 10,
       name: 'offline_reproducibility',

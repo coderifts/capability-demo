@@ -288,6 +288,7 @@ async function runChain({ prove = null } = {}) {
     };
   }
 
+  let producedCorrelation = null;
   const readbackPath = process.env.CODERIFTS_PROVIDER_READBACK || null;
   let readback = null;
   let readbackError = null;
@@ -315,6 +316,10 @@ async function runChain({ prove = null } = {}) {
     // Any one missing keeps the point MODELLED with the gap named. Nothing is graded up because
     // the other two passed.
     const corr = gradedOk ? correlateMerge(readback) : null;
+    // Phase 3 — carried out of the chain so the OFFLINE verify phase can re-check it under the
+    // 21-trap. Exported, not printed: the point's detail already says it in prose, and a second
+    // copy in the output would be a value nobody recomputes.
+    if (corr && corr.ok && corr.correlation) producedCorrelation = corr.correlation;
     const proven = gradedOk && !!corr && corr.ok === true && corr.verified === true;
 
     point(8, 'merge', proven ? PROVEN : MODELLED, proven,
@@ -380,7 +385,7 @@ async function runChain({ prove = null } = {}) {
   // A modelled point that is honestly modelled does not fail the run; a point
   // that misbehaved does. The transcript must also still verify.
   const exitCode = points.every((p) => p.ok) && transcriptOk.valid ? 0 : 1;
-  return { points: points.slice(), prove: out, transcriptOk, exitCode };
+  return { points: points.slice(), prove: out, transcriptOk, exitCode, correlation: producedCorrelation };
 }
 
 /** The POINT/TRANSCRIPT/SUMMARY lines run-e2e.sh renders. Unchanged bytes. */
