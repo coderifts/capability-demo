@@ -42,6 +42,12 @@ const { assembleBundle, SLOT_BY_KEY } = require('./bundle');
 // demo/test/vendor-verifier-core.test.js — copying without that check is just copying.
 const { verifyProviderReadback } = require('../packages/verifier-core/verify-bundle.js');
 const { makePool, bootstrapUrl, configuredDeploymentId } = require('./src/db');
+// PATH A+ Phase 2 — the correlation the vendored grader cannot express (it reads no commit).
+const {
+  contractSourceCommit, correlate, verifyCorrelation,
+  DOES_NOT_PROVE: CORRELATION_DOES_NOT_PROVE,
+} = require('./src/contract-correlation');
+const { CONTRACT_PATH, contractPayload } = require('./src/governed-contract');
 
 const KEYS = path.join(__dirname, 'keys');
 const GATE_PREIMAGE_V = 'cr.gate.preimage.v1';
@@ -69,6 +75,13 @@ function executorRegistry() {
 }
 function executorPublicKey() {
   return crypto.createPublicKey(executorRegistry().keys[0].public_key_pem);
+}
+/**
+ * PATH A+ Phase 2 — the same executor key, private half. Read the same way as the public half so
+ * the pair cannot drift apart: one generator (gen-keys), one directory, two files.
+ */
+function executorPrivateKey() {
+  return crypto.createPrivateKey(fs.readFileSync(path.join(KEYS, 'executor-private.pem'), 'utf8'));
 }
 const sectionOf = (out, id) => out.sections.find((s) => s.id === id);
 
@@ -242,6 +255,39 @@ async function runChain({ prove = null } = {}) {
   });
   // 1293 — a provider readback fills point 8 when one is SUPPLIED. Absent, the point stays
   // MODELLED and nothing is synthesised to fill it.
+  /**
+   * PATH A+ Phase 2 — the three checks, in one place, each able to refuse on its own.
+   *
+   * The keys are the run's own (ensureKeys), so the signature proves the correlation was made by
+   * THIS run and not edited afterwards. It does not make the readback any more trustworthy — that
+   * limit is printed with the point and is not softened by having a signature next to it.
+   */
+  function correlateMerge(rb) {
+    const commit = contractSourceCommit(CONTRACT_PATH);
+    if (!commit.ok) return { ok: false, reason: commit.reason, detail: commit.detail };
+
+    const { computeScopeHash } = require('../packages/middleware/src/verify-grant.js');
+    const scopeHash = computeScopeHash({
+      operation: 'publish', target_id: '', after_payload: contractPayload(),
+    });
+
+    const correlation = correlate({
+      scopeHash, contractCommit: commit, readback: rb, privateKey: executorPrivateKey(),
+    });
+    if (!correlation.ok) return correlation;
+
+    // Verified from the FIELDS, not trusted because it was just produced. A recorded hash nobody
+    // recomputes is decoration, and this one is the whole claim.
+    const check = verifyCorrelation(correlation, executorPublicKey());
+    return {
+      ok: true,
+      verified: check.valid,
+      reason: check.valid ? null : check.reason,
+      detail: check.valid ? null : 'the correlation did not re-verify from its own fields',
+      correlation,
+    };
+  }
+
   const readbackPath = process.env.CODERIFTS_PROVIDER_READBACK || null;
   let readback = null;
   let readbackError = null;
@@ -256,14 +302,37 @@ async function runChain({ prove = null } = {}) {
       ? { valid: false, status: 'READBACK_UNREADABLE', reason: readbackError }
       : verifyProviderReadback(readback);
     const gradedOk = graded.status === 'PROVIDER_READBACK';
-    point(8, 'merge', gradedOk ? PROVIDER_READBACK : MODELLED, gradedOk,
-      gradedOk
+
+    // ── PHASE 2 (PATH A+) — STRUCTURE IS NOT CORRELATION ──────────────────────────────────
+    //
+    // The vendored grader above answers "is this a well-formed readback". It reads no commit
+    // field at all (verify-bundle.js:94-140), so a readback for an unrelated commit graded
+    // exactly like a correlated one. That is the collage the E2E verdict named, moved inside the
+    // transcript — and it is why PROVEN now needs all three of:
+    //   (a) the contract is commit-bound on a CLEAN tree
+    //   (b) readback.commit === that commit
+    //   (c) a signed correlation over scope_hash + both commits verifies
+    // Any one missing keeps the point MODELLED with the gap named. Nothing is graded up because
+    // the other two passed.
+    const corr = gradedOk ? correlateMerge(readback) : null;
+    const proven = gradedOk && !!corr && corr.ok === true && corr.verified === true;
+
+    point(8, 'merge', proven ? PROVEN : MODELLED, proven,
+      proven
         ? `required check ${JSON.stringify(graded.payload.required_check)} bound to integration `
           + `${graded.payload.integration_id}; rollup ${graded.payload.rollup_state}; observed `
-          + `${graded.payload.observed_at} — CARRIED provider evidence, UNSIGNED: it attests that `
-          + 'a readback was recorded, never that the recorded values are true'
-        : `a provider readback was supplied but is not gradeable (${graded.status}`
-          + `${graded.reason ? ': ' + graded.reason : ''}) — the point stays modelled`);
+          + `${graded.payload.observed_at}. CORRELATED: the readback names commit `
+          + `${corr.correlation.readback_commit.slice(0, 12)}, which is the commit the governed `
+          + `contract (${corr.correlation.contract_path}) belongs to, and the correlation is `
+          + `SIGNED (${corr.correlation.correlation_hash.slice(0, 19)}…) so neither end can be `
+          + 'edited alone. STILL WITNESS-ATTESTED, NOT PROVIDER-SIGNED: the readback is an '
+          + 'unsigned document, and no pull request was merged under this grant (that is PATH B).'
+        : !gradedOk
+          ? `a provider readback was supplied but is not gradeable (${graded.status}`
+            + `${graded.reason ? ': ' + graded.reason : ''}) — the point stays modelled`
+          : `the readback grades ${graded.status} but is NOT correlated to the governed contract `
+            + `(${corr ? corr.reason : 'no_correlation'}${corr && corr.detail ? ': ' + corr.detail : ''})`
+            + ' — structure without commit-equality is the collage this point exists to refuse');
   } else {
     const key = 'merge_evidence';
     const named = bundle.manifest.absent.find((a) => a.slot === key);

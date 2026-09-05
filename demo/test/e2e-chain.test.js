@@ -88,13 +88,24 @@ describe('e2e chain — modelled is labelled modelled, never proven', () => {
     assert.equal(points.filter((p) => p.state === 'MODELLED').length, 1);
   });
 
-  test('a supplied readback fills merge as PROVIDER_READBACK — never as PROVEN', (t) => {
+  test('PHASE 2: an UNCORRELATED readback never reaches PROVEN, however well-formed', (t) => {
     if (guard(t)) return;
     const fs = require('node:fs');
     const os = require('node:os');
     const path = require('node:path');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'readback-'));
     const file = path.join(dir, 'readback.json');
+    // THIS TEST CHANGED WITH PATH A+ PHASE 2, and the concern it was written for is kept.
+    //
+    // It used to assert "a readback fills merge as PROVIDER_READBACK — never as PROVEN", guarding
+    // against an unsigned carried document sharing a column with a checked signature. Phase 2 does
+    // not dissolve that guard; it adds two gates the old grading had no way to express — the
+    // readback must name the COMMIT the governed contract belongs to, and a SIGNED correlation over
+    // scope_hash + both commits must verify. The unsigned-ness is still printed with the point.
+    //
+    // So the assertion moves from "never PROVEN" to "never PROVEN WITHOUT the correlation", which
+    // is the same protection stated against what can now happen. This document carries no commit
+    // at all — the shape that used to grade PROVIDER_READBACK.
     fs.writeFileSync(file, JSON.stringify({
       provider: 'github',
       required_check: 'CodeRifts / contract-gate (Action)',
@@ -105,12 +116,10 @@ describe('e2e chain — modelled is labelled modelled, never proven', () => {
     }));
     const { points } = runChain({ CODERIFTS_PROVIDER_READBACK: file });
     const merge = points.find((p) => p.name === 'merge');
-    // The class distinction is the point: an unsigned readback must never share a column with a
-    // checked signature.
-    assert.equal(merge.state, 'PROVIDER_READBACK');
-    assert.notEqual(merge.state, 'PROVEN');
-    assert.match(merge.detail, /UNSIGNED/);
-    assert.equal(points.filter((p) => p.state === 'MODELLED').length, 0);
+    assert.notEqual(merge.state, 'PROVEN', 'structure alone must not reach PROVEN');
+    assert.equal(merge.state, 'MODELLED');
+    assert.match(merge.detail, /NOT correlated to the governed contract/);
+    assert.match(merge.detail, /readback_commit_absent/);
   });
 
   test('an ungradeable readback leaves merge MODELLED — it is not forced into a class', (t) => {
