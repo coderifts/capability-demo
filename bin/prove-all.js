@@ -346,7 +346,12 @@ async function runAll({ cwd = process.cwd() } = {}) {
     );
 
     const points = [...chain.points, point10];
-    const allOk = points.every((p) => p.ok) && prove.ok && chain.transcriptOk.valid;
+    // AUTHORIZATION CONTINUITY IS A CONJUNCT, not a footnote. Measured while wiring it: the
+    // CONTINUITY|FAIL line printed and the artifact still said PASS, because the verdict was built
+    // only from the points — and every point WAS true. That is the whole shape of the defect this
+    // gate exists for, reproduced one layer up.
+    const continuous = !chain.continuity || chain.continuity.continuous === true;
+    const allOk = points.every((p) => p.ok) && prove.ok && chain.transcriptOk.valid && continuous;
 
     // ── ARTIFACT ────────────────────────────────────────────────────────────────────────────
     const artifact = {
@@ -362,6 +367,9 @@ async function runAll({ cwd = process.cwd() } = {}) {
         id: s.id, name: s.name, verdict: s.verdict, ...(s.kind ? { kind: s.kind } : {}),
       })),
       points: points.map((p) => ({ n: p.n, name: p.name, state: p.state, ok: p.ok, detail: p.detail })),
+      // Carried so a verifier reads the identities rather than the prose: which grant was issued,
+      // which was consumed, which scope the correlation bound.
+      ...(chain.continuity ? { continuity: chain.continuity } : {}),
       // The signed correlation (v, scope_hash, contract_commit, contract_path, readback_commit,
       // correlation_hash, signature) so a verifier can re-check the binding, not pin a sentence.
       ...(chain.correlation ? { correlation: chain.correlation } : {}),

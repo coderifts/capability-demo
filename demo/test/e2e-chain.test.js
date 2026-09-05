@@ -62,14 +62,24 @@ describe('e2e chain — the nine points', () => {
     for (const p of points) assert.equal(p.ok, 'OK', `point ${p.n} (${p.name}): ${p.detail}`);
   });
 
-  test('a clean run exits 0 and the transcript verifies', (t) => {
+  test('the run REFUSES exit 0 while the chain carries two grants — named, not silent', (t) => {
     if (guard(t)) return;
+    // INVERTED, and the inversion is the finding. This asserted `code === 0` for "a clean run".
+    // MEASURED: the run is not clean — POINT 1 records a SERVER grant (jti d33032a5, kid
+    // 2026-07-k1) while POINTS 2-7 consume a locally minted one. Every point passed and the
+    // sentence they compose did not, which is exactly what the continuity gate now refuses.
+    //
+    // The transcript still verifies and the nine points still hold; what changed is that the run
+    // no longer reports success over a discontinuous authorization. When a server grant over the
+    // governed contract exists (one live authorize), this returns to 0 — and the assertion below
+    // is written so it will FAIL LOUDLY at that point rather than silently keep passing.
     const { code, stdout } = runChain();
-    assert.equal(code, 0);
-    assert.match(stdout, /^TRANSCRIPT\|PASS\|VERIFIES\|sha256:/m);
-    // The summary names THREE columns now: the carried class is counted separately so nine
-    // points always add up on the line a reader sees.
+    assert.match(stdout, /^TRANSCRIPT\|PASS\|VERIFIES\|sha256:/m, 'the transcript itself still verifies');
     assert.match(stdout, /^SUMMARY\|8 proven\|0 carried \(provider readback, unsigned\)\|1 modelled\|9\/9 points OK$/m);
+    assert.match(stdout, /^CONTINUITY\|FAIL\|authorization_not_continuous \(consume_jti_mismatch\)/m,
+      'the gap must be named on its own line');
+    assert.equal(code, 1,
+      'if this is 0, the chain became continuous — update this test and delete the gap from the report');
   });
 });
 

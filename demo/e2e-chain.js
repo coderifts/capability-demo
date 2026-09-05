@@ -48,6 +48,7 @@ const {
   DOES_NOT_PROVE: CORRELATION_DOES_NOT_PROVE,
 } = require('./src/contract-correlation');
 const { CONTRACT_PATH, contractPayload } = require('./src/governed-contract');
+const { assessContinuity, continuityLine } = require('./src/authorization-continuity');
 
 const KEYS = path.join(__dirname, 'keys');
 const GATE_PREIMAGE_V = 'cr.gate.preimage.v1';
@@ -385,13 +386,45 @@ async function runChain({ prove = null } = {}) {
   // A modelled point that is honestly modelled does not fail the run; a point
   // that misbehaved does. The transcript must also still verify.
   const exitCode = points.every((p) => p.ok) && transcriptOk.valid ? 0 : 1;
-  return { points: points.slice(), prove: out, transcriptOk, exitCode, correlation: producedCorrelation };
+  // ── AUTHORIZATION CONTINUITY ───────────────────────────────────────────────────────────────
+  //
+  // Every point above can pass while the chain still describes TWO grants: a server authorize at
+  // POINT 1 and a locally minted grant at POINTS 2-7. Measured on this very artifact — issuance
+  // d33032a5 vs consumed 2d7c88a2. Each point was true; the sentence they add up to was not.
+  //
+  // This gate does not create continuity. It refuses to let its absence read as its presence, and
+  // it fails the run when they diverge — the same fail-closed rule the rest of this chain uses.
+  const authSec = sectionOf(out, 'authorized');
+  const continuity = assessContinuity({
+    issuance: out.issuance || null,
+    consumedJti: authSec && authSec.evidence ? authSec.evidence.jti : null,
+    attestationJti: authSec && authSec.evidence ? authSec.evidence.jti : null,
+    correlation: producedCorrelation,
+  });
+  // NOT a point. The points are 1-9 and several readers depend on that shape (the conformance
+  // measure counts them, tests assert the numbering). Continuity is a statement ABOUT the run, so
+  // it travels as its own field and its own line — inserting a tenth pseudo-point would have made
+  // the chain lie about its own arity to say something true.
+
+  return {
+    points: points.slice(),
+    prove: out,
+    transcriptOk,
+    exitCode: continuity.continuous ? exitCode : 1,
+    correlation: producedCorrelation,
+    continuity,
+  };
 }
 
 /** The POINT/TRANSCRIPT/SUMMARY lines run-e2e.sh renders. Unchanged bytes. */
-function renderChain({ points: pts, prove: out, transcriptOk }, write = (s) => process.stdout.write(s)) {
+function renderChain({ points: pts, prove: out, transcriptOk, continuity }, write = (s) => process.stdout.write(s)) {
   for (const p of pts) {
     write(`POINT|${p.n}|${p.name}|${p.state}|${p.ok ? 'OK' : 'FAIL'}|${p.detail}\n`);
+  }
+  // Printed on its OWN line, above the summary, because it is the one statement that can be false
+  // while every point above it is true.
+  if (continuity) {
+    write(`CONTINUITY|${continuity.continuous ? 'OK' : 'FAIL'}|${continuityLine(continuity)}\n`);
   }
   write(
     `TRANSCRIPT|${out.ok ? 'PASS' : 'FAIL'}|${transcriptOk.valid ? 'VERIFIES' : 'DOES_NOT_VERIFY'}|`

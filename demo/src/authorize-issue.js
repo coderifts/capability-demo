@@ -44,11 +44,22 @@ const DEFAULT_REQUEST = Object.freeze({
     repository: 'coderifts/demo',
     branch: 'main',
   },
+  // THE GOVERNED CONTRACT, not a toy diff.
+  //
+  // MEASURED 2026-09-06: this used to send `title: t`, 1.0.0 → 1.0.1. The server hashed THAT into
+  // the grant's scope_hash, so the recorded grant (jti d33032a5, scope sha256:2a43c1b8…) can never
+  // authorize the executor's contract write — the same payload under the same operation/target
+  // hashes to sha256:eb1ec9e7…. That mismatch is why the chain carries two grants: POINT 1's
+  // server grant could not be consumed, so POINTS 2-7 minted their own.
+  //
+  // Pointing the request at the contract does NOT by itself make the chain continuous — the
+  // recorded fixture was captured under the old request and is unchanged. It makes the NEXT live
+  // authorize (CODERIFTS_API_KEY set) mint a grant the executor can actually consume.
   artifacts: [{
     id: 'openapi.yaml',
     type: 'openapi',
-    before: 'openapi: 3.0.0\ninfo:\n  title: t\n  version: 1.0.0\npaths: {}\n',
-    after: 'openapi: 3.0.0\ninfo:\n  title: t\n  version: 1.0.1\npaths: {}\n',
+    before: '',
+    after: require('./governed-contract').canonicalContractBytes(),
   }],
 });
 
