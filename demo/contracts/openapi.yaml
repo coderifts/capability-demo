@@ -1,0 +1,27 @@
+openapi: 3.0.3
+info:
+  title: Articles API
+  version: 1.0.0
+paths:
+  /articles:
+    post:
+      operationId: createArticle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Article'
+      responses:
+        '201':
+          description: created
+components:
+  schemas:
+    Article:
+      type: object
+      required: [title, body]
+      properties:
+        title:
+          type: string
+        body:
+          type: string
