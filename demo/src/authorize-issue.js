@@ -16,13 +16,19 @@
  * The local data-plane (prove.js mkGrant → DEMO-KEY) is unchanged: the demo
  * executor cannot consume a CodeRifts server grant (no deployment_id, different
  * kid). POINT 1 is the authorize verdict; panels 2–6 remain local executor proofs.
+ *
+ * 1401 bi-version VERIFY: parseGrantAny + verifyExecutionGrantAnyVersion accept
+ * cr.exec.v1 and cr.exec.v2 (different shapes, not a superset). That is format
+ * acceptance so a 2026-09-18 implicit v2 default still verifies offline. It is
+ * NOT the correlated E2E chain (conformance END_TO_END stays 6/7). The executor
+ * consume path and mkGrant data-plane stay v1.
  */
 
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const {
-  verifyExecutionGrant, parseGrantToken, receiptDigest,
+  verifyExecutionGrantAnyVersion, parseGrantToken, parseGrantTokenV2, receiptDigest,
 } = require('../../packages/middleware/src/verify-grant');
 
 const FIXTURE_DIR = path.join(__dirname, '..', 'fixtures', 'recorded-authorize');
@@ -61,15 +67,57 @@ function loadRecorded(dir = FIXTURE_DIR) {
   return JSON.parse(fs.readFileSync(path.join(dir, 'issuance.json'), 'utf8'));
 }
 
+/** v1 parse, or v2 on unsupported_version. Malformed stays the v1 reason. */
+function parseGrantAny(token) {
+  const v1 = parseGrantToken(token);
+  if (v1.ok || v1.reason !== 'unsupported_version') return v1;
+  return parseGrantTokenV2(token);
+}
+
+function receiptField(payload) {
+  return payload.receipt_digest || payload.receipt_hash;
+}
+
+function issuedAtMs(payload) {
+  return Date.parse(payload.iat || payload.not_before);
+}
+
+function summarizeGrant(payload) {
+  if (!payload) return null;
+  if (payload.v === 'cr.exec.v2') {
+    return {
+      v: payload.v,
+      kid: payload.kid,
+      grant_id: payload.grant_id,
+      not_before: payload.not_before,
+      expires_at: payload.expires_at,
+      operation: payload.operation,
+      target_uri: payload.target_uri,
+      receipt_hash: payload.receipt_hash,
+    };
+  }
+  return {
+    v: payload.v,
+    kid: payload.kid,
+    jti: payload.jti,
+    iat: payload.iat,
+    exp: payload.exp,
+    operation: payload.operation,
+    target_id: payload.target_id,
+    scope_hash: payload.scope_hash,
+    receipt_digest: payload.receipt_digest,
+  };
+}
+
 function verifyIssued(issued, opts = {}) {
   const keys = opts.keys || loadIssuerKeys(opts.dir);
-  const parsed = parseGrantToken(issued.execution_grant);
+  const parsed = parseGrantAny(issued.execution_grant);
   if (!parsed.ok) {
     return { valid: false, status: parsed.status, reason: parsed.reason, payload: parsed.payload };
   }
-  const iatMs = Date.parse(parsed.payload.iat);
+  const iatMs = issuedAtMs(parsed.payload);
   const now = Number.isFinite(opts.now) ? opts.now : (Number.isFinite(iatMs) ? iatMs + 1000 : Date.now());
-  const result = verifyExecutionGrant(issued.execution_grant, {
+  const result = verifyExecutionGrantAnyVersion(issued.execution_grant, {
     publicKey: keys.publicKey,
     keyKid: keys.kid,
     keyStatus: keys.status,
@@ -80,7 +128,7 @@ function verifyIssued(issued, opts = {}) {
     },
   });
   const receiptOk = issued.chain_receipt
-    ? receiptDigest(issued.chain_receipt) === parsed.payload.receipt_digest
+    ? receiptDigest(issued.chain_receipt) === receiptField(parsed.payload)
     : false;
   const notDemo = parsed.payload.kid && parsed.payload.kid !== DEMO_KID;
   return {
@@ -113,7 +161,7 @@ function fromRecorded(dir = FIXTURE_DIR) {
 
 function extractLive(body, capturedAt, endpoint) {
   const grant = body && body.execution_grant;
-  const parsed = typeof grant === 'string' ? parseGrantToken(grant) : { ok: false };
+  const parsed = typeof grant === 'string' ? parseGrantAny(grant) : { ok: false };
   const dr = (body && body.decision_result) || {};
   return {
     source: 'live',
@@ -126,17 +174,7 @@ function extractLive(body, capturedAt, endpoint) {
     verdict_fingerprint: body && body.verdict_fingerprint,
     execution_grant: grant,
     chain_receipt: body && body.chain_receipt,
-    grant: parsed.ok ? {
-      v: parsed.payload.v,
-      kid: parsed.payload.kid,
-      jti: parsed.payload.jti,
-      iat: parsed.payload.iat,
-      exp: parsed.payload.exp,
-      operation: parsed.payload.operation,
-      target_id: parsed.payload.target_id,
-      scope_hash: parsed.payload.scope_hash,
-      receipt_digest: parsed.payload.receipt_digest,
-    } : null,
+    grant: parsed.ok ? summarizeGrant(parsed.payload) : null,
     does_not_prove: [
       'that a later authorize call would ALLOW the same change — this issuance is a point-in-time server verdict',
       'that the grant remains executable after exp — offline verify uses now=iat',
@@ -214,7 +252,7 @@ function evaluateIssuance(issued, opts = {}) {
     verdict_fingerprint: issued.verdict_fingerprint,
     execution_action: issued.execution_action,
     decision: issued.decision,
-    jti: issued.grant && issued.grant.jti,
+    jti: issued.grant && (issued.grant.jti || issued.grant.grant_id),
     kid: issued.grant && issued.grant.kid,
     captured_at: issued.captured_at,
     does_not_prove: issued.does_not_prove,
@@ -229,6 +267,7 @@ module.exports = {
   DEFAULT_REQUEST,
   loadIssuerKeys,
   loadRecorded,
+  parseGrantAny,
   verifyIssued,
   issueAuthorize,
   evaluateIssuance,

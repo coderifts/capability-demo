@@ -79,6 +79,29 @@ describe('authorize issuance — recorded server grant', () => {
     }
   });
 
+  it('a cr.exec.v2 issuer token verifies offline (format-accept, not E2E 7/7)', () => {
+    // 1401 bi-version: the 2026-09-18 implicit default mints v2. POINT 1 must verify that
+    // format offline. This is signature + receipt_hash + clock — not a correlated single-run
+    // chain (conformance END_TO_END stays 6/7). Vector: committed app issuer bytes.
+    const VECTOR = JSON.parse(fs.readFileSync(
+      path.join(__dirname, '..', '..', 'packages', 'middleware', 'test', 'fixtures-grant-v2.json'),
+      'utf8',
+    ));
+    const publicKey = crypto.createPublicKey(VECTOR.public_key_pem);
+    const payload = JSON.parse(Buffer.from(VECTOR.token.split('.')[0], 'base64url').toString('utf8'));
+    assert.equal(payload.v, 'cr.exec.v2');
+    const now = Date.parse(payload.not_before) + 1000;
+    const v = verifyIssued(
+      { execution_grant: VECTOR.token, chain_receipt: 'receipt-token-abc' },
+      { keys: { publicKey, kid: VECTOR.kid, status: 'active' }, now },
+    );
+    assert.equal(v.status, 'GRANT_CURRENT', v.reason);
+    assert.equal(v.valid, true);
+    assert.equal(v.ok, true);
+    assert.equal(v.receipt_digest_ok, true);
+    assert.equal(v.payload.v, 'cr.exec.v2');
+  });
+
   it('pin hashes match the vendored bytes', () => {
     const pin = JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, 'pin.json'), 'utf8'));
     for (const a of pin.artifacts) {
