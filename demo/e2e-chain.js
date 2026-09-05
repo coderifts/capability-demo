@@ -133,8 +133,13 @@ async function runChain({ prove = null } = {}) {
   const transcriptOk = verifyProveTranscript(out.token, { publicKey: executorPublicKey() });
 
   const deny = sectionOf(out, 'deny');
-  point(1, 'authorize', PROVEN, deny && deny.verdict === 'PASS',
-    'an ungranted mutation is refused and a granted one is not — prove.js section (1)');
+  const iss = out.issuance;
+  const issOk = !!(iss && iss.ok && iss.decision_id && iss.verify && iss.verify.ok);
+  point(1, 'authorize', PROVEN, issOk,
+    issOk
+      ? `server-issued ${iss.kid} grant jti ${iss.jti} decision_id ${iss.decision_id} `
+        + `${iss.verify.status} at issuance (not DEMO-KEY); source=${iss.source}`
+      : 'POINT 1 has no server-issued grant — a local mkGrant is not an authorize verdict');
 
   const auth = sectionOf(out, 'authorized');
   const authOk = !!(auth && auth.verdict === 'PASS' && auth.evidence.jti && auth.evidence.attestation);

@@ -28,6 +28,7 @@
     "demo/bundle.js",
     "demo/offline-check.js",
     "demo/src/",
+    "demo/fixtures/",
     "demo/sql/",
     "demo/package.json",
     "demo/SELF-HOST.md",

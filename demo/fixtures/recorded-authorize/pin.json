@@ -1,0 +1,40 @@
+{
+  "schema": "cr.conformance.recorded-pin.v1",
+  "claim": "server_authorize_issuance",
+  "producer": {
+    "name": "app.coderifts.com",
+    "repo": "https://app.coderifts.com",
+    "version": "capture:2026-09-05T15:21:21Z",
+    "digest": "kid:2026-07-k1",
+    "generator": "POST /api/v1/preflight include_execution_grant"
+  },
+  "subject": {
+    "name": "execution_grant",
+    "version": "cr.exec.v1",
+    "digest": "sha256:018c28aba2752ecdd4720d519e2e2d2ed28db65b8738f34ba2b5a90c099d874c"
+  },
+  "artifacts": [
+    {
+      "path": "issuance.json",
+      "role": "positive",
+      "sha256": "018c28aba2752ecdd4720d519e2e2d2ed28db65b8738f34ba2b5a90c099d874c",
+      "bytes": 2877,
+      "source": "live authorize 2026-09-05"
+    },
+    {
+      "path": "issuer-keys.json",
+      "role": "negative",
+      "sha256": "5725f4a41e3a6c815e6b2b35624fc6b68ae304e0d4549c37c9e106e8582fe133",
+      "bytes": 280,
+      "source": "GET https://app.coderifts.com/.well-known/coderifts-keys.json"
+    }
+  ],
+  "inputs_sha256": "sha256:31525620e295ddadbb79cb95c975431d5f05393b2dc3a13b07933fa03099e020",
+  "provenance_from_artifact": {
+    "run_id": "authorize-d33032a5-29a7-462e-bfc8-f988099d1773",
+    "observed_at": "2026-09-05T15:21:21Z",
+    "freshness": "HISTORICAL",
+    "oidc_attested": false
+  },
+  "note": "Server-signed cr.exec.v1 grant from a live authorize. Conformance/prove does not mint this. kid is 2026-07-k1 (CodeRifts well-known), not DEMO-KEY-DO-NOT-USE."
+}

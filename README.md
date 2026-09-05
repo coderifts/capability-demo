@@ -257,8 +257,19 @@ Clock-skew leeway is 30 s, matching ID104 receipt verification.
 
 ## Where the grants come from
 
-`demo/issue-grant.js` signs grants locally with the DEMO key. It **stands in for the
-CodeRifts authorize response** so the demo needs no CodeRifts service. The real flow:
+POINT 1 of the flagship transcript is a **server authorize**, not a local mint.
+`demo/src/authorize-issue.js` POSTs `preflight_mode=authorize` +
+`include_execution_grant: true` to `https://app.coderifts.com/api/v1/preflight` when
+`CODERIFTS_API_KEY` is set (labelled `[ISSUANCE]`, outside the 21-trap). Without a
+key it verifies a **recorded** server-signed grant (kid `2026-07-k1`, captured
+2026-09-05) offline against the pinned well-known keyring, `now=iat`. That grant is
+not `DEMO-KEY-DO-NOT-USE`.
+
+`demo/issue-grant.js` still signs **data-plane** grants locally with the DEMO key
+so the local executor can consume them (replay, CAS, authorized write). Those
+panels prove Postgres enforcement; they are not the authorize verdict.
+
+The real authorize flow:
 
 ```
 POST /api/v1/preflight
@@ -432,7 +443,8 @@ target, and request body — verified with no network access.
    and pin the file; do not fetch per request, or you give up the offline property. Note
    `Cache-Control: max-age=3600` and that rotation is additive — add the new key, keep the
    old until its grants have expired.
-2. **Real grants.** Replace `demo/issue-grant.js` with the authorize call above. Wire
+2. **Real grants.** POINT 1 already uses the authorize call (live or recorded server
+   grant). Data-plane panels still mint DEMO-KEY grants the local executor can consume.
    `include_execution_grant: true` and forward the returned `execution_grant` to the
    boundary as `CodeRifts-Execution-Grant`.
 3. **Label coverage honestly.** If you report enforcement upstream, label it

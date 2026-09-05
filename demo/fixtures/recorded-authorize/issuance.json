@@ -1,0 +1,38 @@
+{
+  "schema": "cr.prove.authorize-issuance.v1",
+  "captured_at": "2026-09-05T15:21:21Z",
+  "endpoint": "https://app.coderifts.com/api/v1/preflight",
+  "producer": "CodeRifts authorize (live POST, include_execution_grant)",
+  "decision": "ALLOW",
+  "execution_action": "CONTINUE",
+  "decision_id": "dec_d253c182-8cac-4fe4-9ba9-b2e6a12edd9f",
+  "verdict_fingerprint": "sha256:8266961000b48df3209f457f0a2a7c7eadc6ed3d71471753b195aa9f40ed9bbe",
+  "execution_grant": "eyJ2IjoiY3IuZXhlYy52MSIsImtpZCI6IjIwMjYtMDctazEiLCJyZWNlaXB0X2RpZ2VzdCI6InNoYTI1NjpmNzE4NmE2MWI2ZjdkOTVlM2MwYjNlMDNiNjQxZDNiYTllZmJiODZkNmNkMjkxYjg0ZDkxNjBjYzI4OGYwN2VkIiwic2NvcGVfaGFzaCI6InNoYTI1NjoyYTQzYzFiODdlYzc5MzcxOTk2OWI3MmUwOWM4ODc2NmM3Yzk2OTYyODc2ZmNhYWQ4ZTc4M2JjOWY3MWFjMDI3IiwiYXVkaWVuY2UiOiJ2Ojc5Yzc0NDFkMDU2NiIsIm9wZXJhdGlvbiI6InB1Ymxpc2giLCJ0YXJnZXRfaWQiOiJzaGEyNTY6ZTFhYTY2Y2FkNTBlM2EzMjgwOGNkNzk1ODQ0MmEyMzI0YzRkNzEzZmY5MmUwNDJjOTUyM2U3YzMyMDA2ZThmYSIsImp0aSI6ImQzMzAzMmE1LTI5YTctNDYyZS1iZmM4LWY5ODgwOTlkMTc3MyIsImlhdCI6IjIwMjYtMDktMDVUMTU6MjE6MjFaIiwiZXhwIjoiMjAyNi0wOS0wNVQxNToyNjoyMVoifQ.bXznVvfYxGWlge6rdOFizssFWVWV61Ly512e0ydzSqGA_xRAzXAL0zJ6xN3RPjfe8igq5mxY7VhZx9lwT0U1Dg",
+  "chain_receipt": "eyJ2Ijo0LCJraWQiOiIyMDI2LTA3LWsxIiwiZnAiOiJzaGEyNTY6ODI2Njk2MTAwMGI0OGRmMzIwOWY0NTdmMGEyYTdjN2VhZGM2ZWQzZDcxNDcxNzUzYjE5NWFhOWY0MGVkOWJiZSIsInByZXYiOiJudWxsIiwiY2FsbGVyIjoiYnVuZGxlIiwidHMiOiIyMDI2LTA5LTA1VDE1OjIxOjIxLjE4N1oiLCJyZWciOiIiLCJpciI6IiIsImV4cGlyZXNfYXQiOiIyMDI2LTA5LTA1VDE5OjIxOjIxWiIsImJoIjoic2hhMjU2OjY2ODgxNDhkN2EwMjNjMzNkYzQ2N2E2YmQ0Y2FhZWZiODZlZGY2ZWQwNmVmYTRjMWY3NDVjZWRkNmQ4NTM5MGMifQ.wC8V4ZED5RTF3zBKVpR8mbbZanaC4xizLrmqC63jqVVHc6YKwPHYdEDmFKe7Ys7w2qo0ZVU9AGBvZQpxN9XZAg",
+  "grant": {
+    "v": "cr.exec.v1",
+    "kid": "2026-07-k1",
+    "jti": "d33032a5-29a7-462e-bfc8-f988099d1773",
+    "iat": "2026-09-05T15:21:21Z",
+    "exp": "2026-09-05T15:26:21Z",
+    "operation": "publish",
+    "target_id": "sha256:e1aa66cad50e3a32808cd7958442a2324c4d713ff92e042c9523e7c32006e8fa",
+    "scope_hash": "sha256:2a43c1b87ec793719969b72e09c88766c7c96962876fcaad8e783bc9f71ac027",
+    "receipt_digest": "sha256:f7186a61b6f7d95e3c0b3e03b641d3ba9efbb86d6cd291b84d9160cc288f07ed"
+  },
+  "request": {
+    "preflight_mode": "authorize",
+    "include_execution_grant": true,
+    "context": {
+      "operation": "publish",
+      "environment": "production",
+      "repository": "coderifts/demo",
+      "branch": "main"
+    }
+  },
+  "does_not_prove": [
+    "that a current authorize call would ALLOW the same change today — issuance was live at captured_at, not re-verified against the live server",
+    "that the grant is currently executable — exp is short-lived; offline verify uses now=iat to check the signature as of issuance",
+    "that this grant authorizes a mutation on the local demo executor — it is a CodeRifts server grant (kid 2026-07-k1), not a DEMO-KEY data-plane grant"
+  ]
+}

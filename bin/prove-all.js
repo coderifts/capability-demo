@@ -288,6 +288,19 @@ async function runAll({ cwd = process.cwd() } = {}) {
       transcript_token: prove.token,
       transcript_preimage_hash: prove.preimage_hash,
       transcript_verifies: chain.transcriptOk.valid,
+      issuance: prove.issuance ? {
+        source: prove.issuance.source,
+        captured_at: prove.issuance.captured_at,
+        decision_id: prove.issuance.decision_id,
+        verdict_fingerprint: prove.issuance.verdict_fingerprint,
+        kid: prove.issuance.kid,
+        jti: prove.issuance.jti,
+        verify_status: prove.issuance.verify && prove.issuance.verify.status,
+        execution_grant: prove.issuance.issued && prove.issuance.issued.execution_grant,
+        chain_receipt: prove.issuance.issued && prove.issuance.issued.chain_receipt,
+        grant: prove.issuance.issued && prove.issuance.issued.grant,
+        does_not_prove: prove.issuance.does_not_prove,
+      } : null,
       // Reused verbatim from demo/bundle.js — the ceiling is not restated in this file's words,
       // because a second wording of the same limit is a second thing that can drift.
       ceiling: CEILING,
@@ -470,6 +483,15 @@ function check(file) {
     if (signedPanels !== artifactPanels) {
       mismatches.push(`panel count differs: ${artifactPanels} in the artifact, ${signedPanels} signed`);
     }
+  }
+
+  // POINT 1 server grant, when the artifact carries it. Verified offline against the
+  // pinned well-known keyring (now=iat). Absent on transcripts from before this field.
+  if (artifact.issuance && artifact.issuance.execution_grant) {
+    const { evaluateIssuance } = require(path.join(DEMO, 'src', 'authorize-issue.js'));
+    const ev = evaluateIssuance(artifact.issuance);
+    line(`server grant (POINT 1): ${ev.ok ? 'GRANT_CURRENT at iat' : 'FAIL'} kid=${ev.kid} decision_id=${ev.decision_id}`);
+    if (!ev.ok) mismatches.push('POINT 1 server grant did not verify GRANT_CURRENT at iat');
   }
 
   line(`transcript signature : ${off.valid ? 'VALID' : 'INVALID'} (${off.status})`);

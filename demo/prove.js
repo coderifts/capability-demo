@@ -22,6 +22,7 @@ const {
 } = require('./src/db');
 const { buildApp, loadExecutor } = require('./src/server');
 const { issue } = require('./issue-grant');
+const { issueAuthorize, evaluateIssuance } = require('./src/authorize-issue');
 const {
   atomicExecute, verifyAtomicExecutionAttestation, signPreimage, sha256hex,
 } = require('./src/atomic');
@@ -98,6 +99,10 @@ function grantBindingLines(token, grant, publicKey) {
 /**
  * Run the six panel proofs against live Postgres. Reuses host-role-denied,
  * posture.js, atomicExecute, issue-grant, buildApp — does not reimplement them.
+ *
+ * POINT 1 authorize is NOT issue-grant.js. Issuance (live or recorded server
+ * grant) runs first, labelled [ISSUANCE], outside the 21-trap. mkGrant below
+ * remains the local DEMO-KEY issuer the executor can consume.
  */
 async function runProve({ skipSeal = false, silent = false } = {}) {
   const measured_at = new Date().toISOString();
@@ -117,6 +122,19 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
   say(`deployment_id: ${deployment_id}`);
   say('');
 
+  // ── [ISSUANCE] server authorize — BEFORE any local mint, OUTSIDE the 21-trap.
+  const issued = await issueAuthorize();
+  say(issued.log);
+  const issuance = evaluateIssuance(issued);
+  if (issuance.ok) {
+    say(`  kid=${issuance.kid} jti=${issuance.jti} decision_id=${issuance.decision_id}`);
+    say(`  verdict_fingerprint=${issuance.verdict_fingerprint}`);
+    say(`  offline verify ${issuance.verify.status} at iat (not DEMO-KEY)`);
+  } else {
+    say(`  ISSUANCE VERIFY FAIL ${issuance.verify && issuance.verify.status} ${issuance.verify && issuance.verify.reason || issued.error || ''}`);
+  }
+  say('');
+
   const bootstrap = makePool(bootstrapUrl());
   let hostPool;
   let executorPool;
@@ -131,7 +149,7 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
     } catch (err) {
       say(`postgres unreachable at ${bootstrapUrl()}: ${err && err.message}`);
       say('═══ VERDICT: FAIL (catalog unreachable) ═══');
-      return { ok: false, sections, transcript: log.join('\n'), token: null };
+      return { ok: false, issuance, sections, transcript: log.join('\n'), token: null };
     }
     await migrate(bootstrap);
     hostPool = makePool(hostUrl());
@@ -608,6 +626,7 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
     say(`summary verifies offline: ${sumOk}`);
     return {
       ok: allPass,
+      issuance,
       sections,
       summary,
       token,
