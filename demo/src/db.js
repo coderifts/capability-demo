@@ -16,7 +16,43 @@
  * migrate() must run as the bootstrap role (CREATE ROLE / ALTER OWNER / CREATE FUNCTION).
  */
 
-const { Pool } = require('pg');
+/**
+ * 1367B — `pg` is NOT a dependency of this package, and that is the 1330 decision, not an omission.
+ *
+ * MEASURED 2026-09-07 from `npm pack` → empty dir → install: requiring this module without `pg`
+ * threw MODULE_NOT_FOUND and the CLI printed the raw stack, ending at `db.js:19`. A reader cannot
+ * tell that from a broken package — and it IS a supported configuration: the documented npx path
+ * is `--check`, which needs no database and works offline (measured: exit 0 with no pg installed).
+ *
+ * So the missing module is turned into a statement about what this command needs, and the two
+ * things a reader can actually do are named. Every entry point that reaches Postgres goes through
+ * this module, so catching it here covers prove.js, e2e-chain.js, reconcile-cli.js and
+ * audit-export.js at once rather than once per binary.
+ *
+ * ONLY the missing-pg case is translated. Any other load failure — a broken native build, a
+ * corrupt install — keeps its original error, because a clean message over an unknown fault is how
+ * a real defect gets read as a configuration choice.
+ */
+const PG_MISSING = 'CR_PG_MISSING';
+
+let Pool;
+try {
+  ({ Pool } = require('pg'));
+} catch (err) {
+  if (!err || err.code !== 'MODULE_NOT_FOUND' || !/'pg'/.test(String(err.message))) throw err;
+  const e = new Error(
+    'Postgres is required for the full transcript run, and the `pg` driver is not installed.\n'
+    + '\n'
+    + '  This is the documented shape, not a broken install:\n'
+    + '    coderifts-prove --check <transcript.json>   offline, no database, no key — works now\n'
+    + '    the FULL run                                needs Postgres; see SELF-HOST.md\n'
+    + '\n'
+    + '  To run the full chain: follow SELF-HOST.md (docker compose brings up Postgres), or\n'
+    + '  `npm install pg` against a database you already have.',
+  );
+  e.code = PG_MISSING;
+  throw e;
+}
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -159,6 +195,7 @@ async function currentDigest(client, targetId) {
 }
 
 module.exports = {
+  PG_MISSING,
   DDL,
   ROLES_SQL,
   GATE_SQL,

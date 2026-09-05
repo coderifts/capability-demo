@@ -93,7 +93,30 @@ function haveDocker() {
  * The port is random rather than the compose file's fixed 55432 so this cannot collide with a
  * compose stack the developer already has up.
  */
+/**
+ * 1367B — the driver is checked BEFORE the container.
+ *
+ * MEASURED: without this, a machine with docker but no `pg` booted a throwaway Postgres, ran the
+ * healthcheck, and only then failed on the missing driver. Nothing was left behind — teardown
+ * runs — but a container spun up for a run that could never start is a cost paid to learn
+ * something knowable in a millisecond. A precondition belongs before the side effect it gates.
+ *
+ * `require.resolve` and not `require`: this only asks whether the module is FINDABLE. Loading it
+ * is db.js's job, and db.js is where the actionable message lives — one place, not two.
+ */
+function assertPgDriverAvailable() {
+  try {
+    require.resolve('pg');
+  } catch (err) {
+    if (!err || err.code !== 'MODULE_NOT_FOUND') throw err;
+    // Raised through db.js so the wording exists in exactly one file.
+    // eslint-disable-next-line global-require, import/no-dynamic-require
+    require(path.join(DEMO, 'src', 'db.js'));
+  }
+}
+
 function startThrowawayPostgres(say) {
+  assertPgDriverAvailable();
   const name = `cr-prove-${crypto.randomBytes(6).toString('hex')}`;
   const password = crypto.randomBytes(18).toString('base64url');
   say(`booting a throwaway Postgres (${name}) — it will be removed when this run ends`);
@@ -555,5 +578,17 @@ module.exports = { runAll, check, renderMarkdown, refuseProdUrl, ARTIFACT_V, PRO
 if (require.main === module) {
   main()
     .then((code) => process.exit(code))
-    .catch((e) => { process.stderr.write(`${(e && e.stack) || e}\n`); process.exit(2); });
+    .catch((e) => {
+      // 1367B — a MISSING PREREQUISITE is not a crash, and printing it as one told the reader the
+      // package was broken when it was doing exactly what docs/1330 says. db.js raises CR_PG_MISSING
+      // with the two things a reader can do; a stack frame ending in `db.js:19` adds nothing to it.
+      // Everything else keeps its stack, because an unknown fault dressed as a tidy message is how
+      // a real defect gets mistaken for a configuration choice.
+      if (e && e.code === 'CR_PG_MISSING') {
+        process.stderr.write(`${e.message}\n`);
+        process.exit(3);
+      }
+      process.stderr.write(`${(e && e.stack) || e}\n`);
+      process.exit(2);
+    });
 }
