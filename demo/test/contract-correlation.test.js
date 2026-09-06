@@ -39,11 +39,85 @@ function readbackFor(commit, extra = {}) {
 }
 
 describe('Phase 2 — the contract is commit-bound, on a CLEAN tree', () => {
-  it('a committed contract resolves to HEAD and names its repo-relative path', () => {
+  it('a committed contract resolves to ITS OWN last commit, not the repo HEAD', () => {
+    // 1464. This used to return `rev-parse HEAD`, and the test only asserted "40 hex" — so the
+    // field named for the contract could hold a repository state and nothing noticed. MEASURED on
+    // this tree: 91 commits in the repository, exactly ONE of them touching the contract, so
+    // contract_commit moved ninety times for a contract that changed once.
     const r = contractSourceCommit(CONTRACT_PATH);
     assert.equal(r.ok, true, JSON.stringify(r));
     assert.match(r.commit, /^[0-9a-f]{40}$/);
     assert.equal(r.path, 'demo/contracts/openapi.yaml');
+
+    const own = execFileSync('git', ['log', '-1', '--format=%H', '--', r.path], {
+      cwd: path.join(__dirname, '..', '..'), encoding: 'utf8',
+    }).trim();
+    assert.equal(r.commit, own, 'the contract commit must be the file\'s own last commit');
+
+    // AND NOT THE REPO HEAD — asserted only while the two genuinely differ, which is the state
+    // that can tell the two implementations apart. When the contract is the most recent change
+    // they coincide legitimately, and demanding a difference would fail an honest tree.
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: path.join(__dirname, '..', '..'), encoding: 'utf8',
+    }).trim();
+    if (head !== own) {
+      assert.notEqual(r.commit, head, 'contract_commit must not be the repository state');
+    }
+  });
+
+  it('an unrelated commit does NOT move contract_commit', () => {
+    // The property the change exists for, proved in a throwaway repository rather than by
+    // committing to this one.
+    const os = require('node:os');
+    const fs2 = require('node:fs');
+    const dir = fs2.mkdtempSync(path.join(os.tmpdir(), 'cc-'));
+    const g = (...a) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8' }).trim();
+    try {
+      g('init', '-q', '.');
+      g('config', 'user.email', 't@t');
+      g('config', 'user.name', 't');
+      fs2.mkdirSync(path.join(dir, 'c'));
+      const contract = path.join(dir, 'c', 'openapi.yaml');
+      fs2.writeFileSync(contract, 'a: 1\n');
+      g('add', 'c/openapi.yaml');
+      g('commit', '-q', '-m', 'the contract');
+      const before = contractSourceCommit(contract);
+      assert.equal(before.ok, true, JSON.stringify(before));
+
+      fs2.writeFileSync(path.join(dir, 'README.md'), 'x');
+      g('add', 'README.md');
+      g('commit', '-q', '-m', 'unrelated');
+
+      const after = contractSourceCommit(contract);
+      assert.equal(after.commit, before.commit, 'an unrelated commit moved the contract commit');
+      assert.notEqual(after.commit, g('rev-parse', 'HEAD'),
+        'the repo HEAD moved and the contract commit must not have followed it');
+    } finally {
+      fs2.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a STAGED but never-committed contract is refused — measured to hit the dirty guard', () => {
+    // The `contract_uncommitted` backstop exists for an empty `git log`, and this records which
+    // guard actually fires: `git status --porcelain` reports a staged file, so the dirty guard is
+    // reached first. Pinning the reason means a future reordering that changes it is visible.
+    const os = require('node:os');
+    const fs2 = require('node:fs');
+    const dir = fs2.mkdtempSync(path.join(os.tmpdir(), 'cc-staged-'));
+    const g = (...a) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8' }).trim();
+    try {
+      g('init', '-q', '.');
+      g('config', 'user.email', 't@t');
+      g('config', 'user.name', 't');
+      const contract = path.join(dir, 'openapi.yaml');
+      fs2.writeFileSync(contract, 'a: 1\n');
+      g('add', 'openapi.yaml');
+      const r = contractSourceCommit(contract);
+      assert.equal(r.ok, false);
+      assert.equal(r.reason, 'contract_working_tree_dirty');
+    } finally {
+      fs2.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('REFUSES when the contract file is dirty — no correlation to a state that exists nowhere', () => {

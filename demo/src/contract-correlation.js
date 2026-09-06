@@ -47,6 +47,7 @@
 
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const CORRELATION_V = 'cr.exec.correlation.v1';
@@ -69,12 +70,25 @@ function git(args, cwd) {
  * @returns {{ok:true,commit:string,path:string}|{ok:false,reason:string,detail:string}}
  */
 function contractSourceCommit(contractPath) {
-  const dir = path.dirname(contractPath);
+  // REAL PATHS ON BOTH SIDES, or the relative path is nonsense.
+  //
+  // MEASURED while adding the file-commit tests: `git rev-parse --show-toplevel` returns a
+  // canonical path, and a caller's path may cross a symlink — on macOS every `mkdtemp` directory
+  // does, `/var` being a link to `/private/var`. `path.relative` between the two then produces a
+  // `../../../..` escape, `ls-files` finds nothing, and a perfectly tracked contract is reported
+  // `contract_untracked`. Wrong answer, confident reason code.
+  //
+  // Pre-existing and unrelated to what this function returns; fixed here because it is the same
+  // three lines and a caller cannot work around it.
+  const resolved = (() => {
+    try { return fs.realpathSync(contractPath); } catch (_) { return contractPath; }
+  })();
+  const dir = path.dirname(resolved);
   let root;
   try { root = git(['rev-parse', '--show-toplevel'], dir); } catch (err) {
     return { ok: false, reason: 'not_a_git_repository', detail: (err && err.message) || 'git failed' };
   }
-  const rel = path.relative(root, contractPath);
+  const rel = path.relative(root, resolved);
 
   let tracked = '';
   try { tracked = git(['ls-files', '--error-unmatch', '--', rel], root); } catch (_) { tracked = ''; }
@@ -101,7 +115,42 @@ function contractSourceCommit(contractPath) {
     };
   }
 
-  return { ok: true, commit: git(['rev-parse', 'HEAD'], root), path: rel };
+  // ── THE CONTRACT'S OWN COMMIT, NOT THE REPOSITORY'S STATE ───────────────────────────────
+  //
+  // This returned `rev-parse HEAD`. MEASURED on this tree: 91 commits in the repository, and
+  // exactly ONE of them touched demo/contracts/openapi.yaml — so `contract_commit` moved ninety
+  // times for a contract that changed once, and every unrelated commit invalidated a correlation
+  // that did not depend on it.
+  //
+  // Worse than the churn: the field was NAMED for the contract and held a repository state. A
+  // reader comparing two correlations of the SAME contract bytes would see different commits and
+  // reasonably conclude the contract had changed.
+  //
+  // `git log -1 -- <path>` is the contract's identity: it moves when, and only when, the contract
+  // does. The guards above are unchanged and still do the work they always did — an untracked file
+  // belongs to no commit, and a dirty one names bytes that exist in no commit.
+  const commit = git(['log', '-1', '--format=%H', '--', rel], root);
+  if (!commit) {
+    // A BACKSTOP, and measured to be unreachable today — which is why it says so rather than
+    // implying it handles a case it does not.
+    //
+    // The obvious candidate is a file staged with `git add` and never committed: `ls-files`
+    // accepts it and `git log` is empty for it. Measured: `git status --porcelain` reports a
+    // staged file as a change, so the dirty guard above fires FIRST and returns
+    // contract_working_tree_dirty. Every other tracked-and-clean file has a commit by definition.
+    //
+    // It stays because the alternative is returning an empty string as a commit id. A previous
+    // version could not reach this at all — `rev-parse HEAD` always names something — so the empty
+    // case is new with the file-scoped query, and fail-closed is the right answer to a value we
+    // could not compute.
+    return {
+      ok: false,
+      reason: 'contract_uncommitted',
+      detail: `${rel} is tracked but has no commit of its own -- it was staged and never `
+        + 'committed, so there is no commit that contains these bytes to correlate a merge to.',
+    };
+  }
+  return { ok: true, commit, path: rel };
 }
 
 /** The exact bytes signed. Order is fixed and versioned; a reader can rebuild it from the fields. */
