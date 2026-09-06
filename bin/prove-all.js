@@ -596,6 +596,37 @@ function check(file) {
     if (!ev.ok) mismatches.push('POINT 1 server grant did not verify GRANT_CURRENT at iat');
   }
 
+  // AUTHORIZATION CONTINUITY, from the recorded block — RE-DERIVED, not echoed.
+  //
+  // 1413 measured that `--check` printed nothing about the one property the chain exists to
+  // establish: whether the grant the server issued is the grant the executor consumed. A reader
+  // checking the shipped sample saw a valid signature and no way to tell a continuous capture from
+  // the two-grant collage that preceded it.
+  //
+  // The three identities are compared here rather than `continuous` being trusted, so a file
+  // asserting continuity while its own identities disagree is named. And the tense is stated: a
+  // signature over recorded bytes says the CAPTURE recorded a continuous authorization. It cannot
+  // say this run is continuous now — a cr.exec.v2 ATOMIC grant binds a nonce that exists only in
+  // the run that minted it, so continuity is a live-only measurement and this is its record.
+  if (artifact.continuity) {
+    const ids = artifact.continuity.identities || {};
+    const one = ids.issued_jti
+      && ids.consumed_jti === ids.issued_jti
+      && ids.attestation_jti === ids.issued_jti;
+    if (artifact.continuity.continuous === true && !one) {
+      mismatches.push('the artifact claims authorization continuity but its recorded issued, '
+        + 'consumed and attested jti are not one value');
+    }
+    line(`authorization (recorded): ${artifact.continuity.continuous === true && one
+      ? `CONTINUOUS — one grant ${String(ids.issued_jti).slice(0, 12)} issued, consumed and attested`
+      : `NOT CONTINUOUS (${artifact.continuity.reason || 'no reason recorded'})`}`);
+    line('                       RECORDED, not re-run: this says the capture recorded a continuous');
+    line('                       authorization, never that anything is continuous now.');
+  } else {
+    line('authorization (recorded): NOT STATED — this artifact predates the continuity block, so it');
+    line('                       says nothing either way about one grant flowing through.');
+  }
+
   line(`transcript signature : ${off.valid ? 'VALID' : 'INVALID'} (${off.status})`);
   line(`verified offline     : ${off.proven ? 'yes' : 'NOT ESTABLISHED'} — ${off.detail}`);
   line(`internal consistency : ${mismatches.length === 0 ? 'OK' : 'MISMATCH'}`);

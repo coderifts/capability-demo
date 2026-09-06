@@ -1,10 +1,15 @@
 # Don't trust us — re-verify the committed sample transcript offline.
-# Copy-paste this file into .github/workflows/ on any checkout of this repo.
+# Copy-paste the `check` job into .github/workflows/ on any checkout of this repo.
 #
 # No database, no network, no API key. The command is the same one an adopter
 # runs locally:
 #   node bin/prove-all.js --check examples/sample-transcript/transcript.json \
 #     --keys examples/sample-transcript/executor-keys.json
+#
+# The second job is OURS, not an adopter's: it packs the tarball and asserts the
+# sample that actually SHIPS is current. 0.1.4 bumped the version and left the
+# sample at a pre-continuity capture; `check` above passed throughout, because it
+# reads the checkout and a checkout is not the artifact.
 name: prove
 
 on:
@@ -24,3 +29,16 @@ jobs:
           node-version: '20'
       - name: Re-verify the sample transcript (offline)
         run: node bin/prove-all.js --check examples/sample-transcript/transcript.json --keys examples/sample-transcript/executor-keys.json
+
+  packed-sample:
+    # RELEASE PARITY. Runs on every push, not only at publish time: a stale sample is
+    # cheapest to notice in the commit that made it stale, and `prepublishOnly` only
+    # ever fires for whoever runs `npm publish`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: The sample that ships is current (unpacks the real .tgz)
+        run: node scripts/check-packed-sample.js

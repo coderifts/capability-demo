@@ -55,13 +55,33 @@ const DEFAULT_REQUEST = Object.freeze({
   // Pointing the request at the contract does NOT by itself make the chain continuous — the
   // recorded fixture was captured under the old request and is unchanged. It makes the NEXT live
   // authorize (CODERIFTS_API_KEY set) mint a grant the executor can actually consume.
-  artifacts: [{
-    id: 'openapi.yaml',
-    type: 'openapi',
-    before: '',
-    after: require('./governed-contract').canonicalContractBytes(),
-  }],
+  artifacts: [],
 });
+
+/**
+ * The default request's artifacts, built ON DEMAND.
+ *
+ * MEASURED 2026-09-06 by unpacking the actual tarball: `after` used to be evaluated here at module
+ * scope, so requiring this file read demo/contracts/openapi.yaml — and `--check` requires this file
+ * to verify POINT 1's grant. A signature check over recorded bytes therefore died with ENOENT on
+ * any install where the contract was absent, which was every published one until the same round
+ * added demo/contracts/ to `files`.
+ *
+ * Shipping the contract fixes that install. Building the artifacts lazily is why a future one
+ * cannot break a verification that never needed the file: the read now happens when a request is
+ * actually being sent, not when the module is loaded.
+ */
+function defaultRequest() {
+  return {
+    ...DEFAULT_REQUEST,
+    artifacts: [{
+      id: 'openapi.yaml',
+      type: 'openapi',
+      before: '',
+      after: require('./governed-contract').canonicalContractBytes(),
+    }],
+  };
+}
 
 function loadIssuerKeys(dir = FIXTURE_DIR) {
   const registry = JSON.parse(fs.readFileSync(path.join(dir, 'issuer-keys.json'), 'utf8'));
@@ -223,7 +243,7 @@ async function issueAuthorize(opts = {}) {
         Authorization: `Bearer ${key}`,
         'X-API-Key': key,
       },
-      body: JSON.stringify(opts.request || DEFAULT_REQUEST),
+      body: JSON.stringify(opts.request || defaultRequest()),
     });
     const body = await res.json().catch(() => null);
     if (res.status !== 200 || !body || typeof body.execution_grant !== 'string') {
@@ -288,6 +308,7 @@ module.exports = {
   DEFAULT_ENDPOINT,
   DEMO_KID,
   DEFAULT_REQUEST,
+  defaultRequest,
   loadIssuerKeys,
   loadRecorded,
   parseGrantAny,

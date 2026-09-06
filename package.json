@@ -1,7 +1,7 @@
 {
   "name": "@coderifts/prove",
   "private": false,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Reference offline enforcement for cr.exec.v1 execution grants + a demo API where mutation without a grant is 403.",
   "license": "MIT",
   "workspaces": [
@@ -14,7 +14,9 @@
     "test:all": "npm test && npm run test:pg",
     "prove": "node demo/prove.js",
     "prove:all": "node bin/prove-all.js",
-    "prove:check": "node bin/prove-all.js --check"
+    "prove:check": "node bin/prove-all.js --check",
+    "check:packed": "node scripts/check-packed-sample.js",
+    "prepublishOnly": "node scripts/check-packed-sample.js"
   },
   "engines": {
     "node": ">=20"
@@ -30,6 +32,7 @@
     "demo/src/",
     "demo/fixtures/",
     "demo/sql/",
+    "demo/contracts/",
     "demo/package.json",
     "demo/SELF-HOST.md",
     "packages/verifier-core/",

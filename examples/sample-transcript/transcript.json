@@ -1,12 +1,12 @@
 {
   "v": "cr.prove.artifact.v1",
-  "run_id": "prove-fb5c23bd-5fbd-4af3-9544-14c609a07456",
-  "started_at": "2026-09-05T08:45:05.020Z",
-  "finished_at": "2026-09-05T08:45:12.678Z",
+  "run_id": "prove-f982a065-8824-434a-abcd-33939badca60",
+  "started_at": "2026-09-06T09:46:33.484Z",
+  "finished_at": "2026-09-06T09:46:37.919Z",
   "verdict": "PASS",
   "db_mode": "throwaway-docker",
   "provenance": {
-    "source_commit": "3a34079c25ec32de2ba1c146ba134dd00e6cdd0f",
+    "source_commit": "a39a407e2a87254bf6a5f15fb066e89b0585fc98",
     "source_commit_reason": null,
     "working_tree_dirty": false,
     "working_tree_dirty_reason": null,
@@ -76,14 +76,14 @@
       "name": "authorize",
       "state": "PROVEN",
       "ok": true,
-      "detail": "an ungranted mutation is refused and a granted one is not — prove.js section (1)"
+      "detail": "server-issued 2026-07-k1 grant jti db6c39c2-1cd8-4e7b-9dd4-c0a502c6e2ca decision_id dec_dc002942-3caf-4d14-9342-2d5c93910415 GRANT_CURRENT at issuance (not DEMO-KEY); source=live"
     },
     {
       "n": 2,
       "name": "grant issuance",
       "state": "PROVEN",
       "ok": true,
-      "detail": "a grant was issued and consumed: jti 622cb9fd-1134-45df-b8ba-1ea9331c7282"
+      "detail": "a grant was issued and consumed: jti db6c39c2-1cd8-4e7b-9dd4-c0a502c6e2ca"
     },
     {
       "n": 3,
@@ -111,7 +111,7 @@
       "name": "attestation",
       "state": "PROVEN",
       "ok": true,
-      "detail": "signature verifies and binds jti 622cb9fd-1134-45df-b8ba-1ea9331c7282 (ATTEST_VALID); a forged signature over the same bytes is REFUSED (ATTEST_INVALID_SIGNATURE)"
+      "detail": "signature verifies and binds jti db6c39c2-1cd8-4e7b-9dd4-c0a502c6e2ca (ATTEST_VALID); a forged signature over the same bytes is REFUSED (ATTEST_INVALID_SIGNATURE)"
     },
     {
       "n": 7,
@@ -123,9 +123,9 @@
     {
       "n": 8,
       "name": "merge",
-      "state": "MODELLED",
+      "state": "PROVEN",
       "ok": true,
-      "detail": "no provider readback was supplied to this run — no provider readback was supplied to this run; supply one with CODERIFTS_PROVIDER_READBACK=<path> to fill this slot; this run models the step and does not claim it happened"
+      "detail": "required check \"CodeRifts / contract-gate\" bound to integration 2860592; rollup success; observed 2026-09-06T09:46:33Z. CORRELATED: the readback names commit a39a407e2a87, which is the commit the governed contract (demo/contracts/openapi.yaml) belongs to, and the correlation is SIGNED (sha256:4f6dc6b9d3f0…) so neither end can be edited alone. STILL WITNESS-ATTESTED, NOT PROVIDER-SIGNED: the readback is an unsigned document, and no pull request was merged under this grant (that is PATH B)."
     },
     {
       "n": 9,
@@ -142,9 +142,62 @@
       "detail": "signature re-verified (PROVE_VALID) with 21 network entry points trapped and the trap proved live first (net.connect:blocked, fetch:blocked); nothing in the verify path reached one. RESIDUAL: the trap is at the JavaScript boundary — a native addon or a pre-opened socket would evade it. This path is node:crypto over in-memory bytes plus one local keyring read, so it reaches neither"
     }
   ],
-  "transcript_token": "cr.prove.transcript.v1|DEMO-EXECUTOR-KEY-DO-NOT-USE|eyJkZXBsb3ltZW50X2lkIjoiZGVtby1kZXBsb3ltZW50IiwiZXhlY3V0b3Jfa2lkIjoiREVNTy1FWEVDVVRPUi1LRVktRE8tTk9ULVVTRSIsIm1lYXN1cmVkX2F0IjoiMjAyNi0wOS0wNVQwODo0NToxMS40NzdaIiwic2VjdGlvbnMiOlt7ImV2aWRlbmNlIjp7ImFmdGVyX2NvdW50IjowLCJiZWZvcmVfY291bnQiOjAsImV4ZWN1dG9yX3JvbGUiOiJjcl9leGVjdXRvciIsImV4ZWN1dG9yX3NxbHN0YXRlIjoiNDI1MDEiLCJob3N0X3JvbGUiOiJjcl9ob3N0IiwiaG9zdF9zcWxzdGF0ZSI6IjQyNTAxIiwiaG9zdF90aXRsZV9hZnRlciI6MCwiaG9zdF90aXRsZV9iZWZvcmUiOjAsInVuY2hhbmdlZCI6dHJ1ZX0sImlkIjoiZGVueSIsIm5hbWUiOiJERU5ZIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7InZlcmRpY3QiOiJQQVNTIiwidmVyaWZ5IjoiUE9TVFVSRV9QQVNTIn0sImlkIjoicG9zdHVyZSIsIm5hbWUiOiJQT1NUVVJFIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7ImFmdGVyX2NvdW50IjoxLCJiZWZvcmVfY291bnQiOjAsImZpcnN0IjoyMDEsInNlY29uZCI6NDA5LCJzdGF0dXMiOiJHUkFOVF9DT05TVU1FRCJ9LCJpZCI6InJlcGxheSIsIm5hbWUiOiJSRVBMQVkiLCJ2ZXJkaWN0IjoiUEFTUyJ9LHsiZXZpZGVuY2UiOnsiYWZ0ZXJfY291bnQiOjEsImJlZm9yZV9jb3VudCI6MCwiY29uZmxpY3QiOjE5LCJncmV3IjoxLCJvayI6MX0sImlkIjoiY29uY3VycmVuY3kiLCJuYW1lIjoiQ09OQ1VSUkVOQ1kiLCJ2ZXJkaWN0IjoiUEFTUyJ9LHsiZXZpZGVuY2UiOnsiYWZ0ZXJfY291bnQiOjEsImJlZm9yZV9jb3VudCI6MSwiZXhwZWN0ZWRfc3RhdGVfdG9rZW4iOiJzaGEyNTY6ZDM3ZmZjNjAzYTY2MGI1Y2NiZmRhODM1YzI0YzU0ZTNlMjg4ODM1MGI0OGIzMmYzMWMyYzA2YzM1YzdlZTU0MiIsImh0dHAiOjQwOSwianRpX2NvbnN1bWVkIjowLCJzdGFsZV9zdGF0ZV90b2tlbiI6dHJ1ZSwic3RhdHVzIjoiU1RBVEVfRFJJRlQiLCJ1bmNoYW5nZWQiOnRydWV9LCJpZCI6ImNhc19zdGFsZSIsIm5hbWUiOiJDQVMtU1RBTEUiLCJ2ZXJkaWN0IjoiUEFTUyJ9LHsiZXZpZGVuY2UiOnsiYWZ0ZXJfY291bnQiOjAsImJlZm9yZV9jb3VudCI6MCwiZXJyb3IiOiJzaW11bGF0ZWQgY3Jhc2gtYmVmb3JlLXNlYWwiLCJsZWRnZXJfYWZ0ZXIiOjAsImxlZGdlcl9iZWZvcmUiOjAsInNraXBfc2VhbCI6dHJ1ZSwic3RhdHVzIjoiY29uc3VtZWRfdW5zaWduZWRfcm9sbGVkX2JhY2siLCJ0aHJldyI6dHJ1ZSwidW5jaGFuZ2VkIjp0cnVlfSwiaWQiOiJub19jb25zdW1lX29ubHkiLCJuYW1lIjoiTk8gQ09OU1VNRS1PTkxZIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7ImFmdGVyX2NvdW50IjowLCJiZWZvcmVfY291bnQiOjAsImxlZGdlcl9hZnRlciI6MiwibGVkZ2VyX2JlZm9yZSI6MiwibXV0YXRpb25fb25seSI6dHJ1ZSwic3Fsc3RhdGUiOiI0MjUwMSIsInVuY2hhbmdlZCI6dHJ1ZX0sImlkIjoibm9fbXV0YXRpb25fb25seSIsIm5hbWUiOiJOTyBNVVRBVElPTi1PTkxZIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7ImFmdGVyX2NvdW50IjoxLCJiZWZvcmVfY291bnQiOjAsImh0dHAiOjIwMSwianRpIjoiNjIyY2I5ZmQtMTEzNC00NWRmLWI4YmEtMWVhOTMzMWM3MjgyIiwic2VhbGVkIjp0cnVlLCJ3aXRoX2dyYW50Ijoic2lnbmF0dXJlIHZhbGlkIEFORCBib3VuZCB0byBncmFudCA2MjJjYjlmZC0xMTM0LTQ1ZGYtYjhiYS0xZWE5MzMxYzcyODIiLCJ3aXRob3V0X2dyYW50Ijoic2lnbmF0dXJlIHZhbGlkOyBncmFudC1iaW5kaW5nIE5PVCBjaGVja2VkIn0sImlkIjoiYXV0aG9yaXplZCIsIm5hbWUiOiJBVVRIT1JJWkVEIFdSSVRFICsgVkVSSUZZIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7ImFmdGVyX2dyYW50IjoiRkFJTCIsImFmdGVyX3Jldm9rZSI6IlBBU1MiLCJkcmlmdF9uYW1lcyI6WyJob3N0X3JvbGUgZ2FpbmVkIElOU0VSVCBvbiBhcnRpY2xlcyJdfSwiaWQiOiJkcmlmdCIsIm5hbWUiOiJEUklGVCBCQVNFTElORSIsInZlcmRpY3QiOiJQQVNTIn0seyJldmlkZW5jZSI6eyJjb3VudHMiOnsiQ09ORklSTUVEIjoxLCJJTkRFVEVSTUlOQVRFIjowLCJSRUpFQ1RFRCI6MCwiUkVMRUFTRUQiOjB9LCJncmFudHMiOlt7ImFkYXB0ZXIiOiJwb3N0Z3JlcyIsImV2aWRlbmNlIjp7ImF0dGVzdF9zdGF0dXMiOiJBVFRFU1RfVkFMSUQiLCJleGVjdXRvcl9raWQiOiJERU1PLUVYRUNVVE9SLUtFWS1ETy1OT1QtVVNFIiwicmVhc29uIjoiY29uc3VtZWQsIHNlYWxlZCwgYW5kIGEgQ1JZUFRPR1JBUEhJQ0FMTFkgVkVSSUZJRUQgYXR0ZXN0YXRpb24gYm91bmQgdG8gdGhpcyBncmFudCBjYXJyaWVzIHRoaXMgcm93J3MgZXhhY3QgcHJlaW1hZ2UiLCJzdGF0dXMiOiJzZWFsZWQifSwianRpIjoiNjIyY2I5ZmQtMTEzNC00NWRmLWI4YmEtMWVhOTMzMWM3MjgyIiwib3V0Y29tZSI6IkNPTkZJUk1FRCJ9XSwibmVlZHNfYXR0ZW50aW9uIjowLCJvdXRjb21lIjoiQ09ORklSTUVEIn0sImlkIjoicmVjb3ZlcnkiLCJraW5kIjoicmVjb3ZlcnkiLCJuYW1lIjoiUkVDT1ZFUlkiLCJ2ZXJkaWN0IjoiQ09ORklSTUVEIn1dLCJ2IjoiY3IucHJvdmUudHJhbnNjcmlwdC52MSIsInZlcmRpY3QiOiJQQVNTIn0|u0pyf0J1KTn5hy49QflwK_8blDuMk3Sx1lWQr2v_7Gf4V1ERINkKBidW0OUQ1fvnMITSJPhoHD7t6ZY3Koc3AA",
-  "transcript_preimage_hash": "sha256:597694b1968265f5a4126e7da5e8e05eb5aef79e9a9f559ad1fb00d2b40ab2fa",
+  "continuity": {
+    "continuous": true,
+    "code": null,
+    "reason": null,
+    "detail": null,
+    "identities": {
+      "issued_jti": "db6c39c2-1cd8-4e7b-9dd4-c0a502c6e2ca",
+      "consumed_jti": "db6c39c2-1cd8-4e7b-9dd4-c0a502c6e2ca",
+      "attestation_jti": "db6c39c2-1cd8-4e7b-9dd4-c0a502c6e2ca",
+      "issued_scope_hash": "sha256:3475e74d2656e43b32526af7e90ddab7fef292cd38cbbf4f8365c57d50ffd55d",
+      "correlation_scope_hash": "sha256:3475e74d2656e43b32526af7e90ddab7fef292cd38cbbf4f8365c57d50ffd55d"
+    }
+  },
+  "correlation": {
+    "ok": true,
+    "v": "cr.exec.correlation.v1",
+    "scope_hash": "sha256:3475e74d2656e43b32526af7e90ddab7fef292cd38cbbf4f8365c57d50ffd55d",
+    "contract_commit": "a39a407e2a87254bf6a5f15fb066e89b0585fc98",
+    "contract_path": "demo/contracts/openapi.yaml",
+    "readback_commit": "a39a407e2a87254bf6a5f15fb066e89b0585fc98",
+    "correlation_hash": "sha256:4f6dc6b9d3f0432322631af57719006423fbdb8fe34ff1d2572ec92cf519f19c",
+    "signature": "68K_BZYJ004hzSMCWv-74G2mmn9_WoCKJdwZ2F2ltVcdcyW91xsTinJoe8W8B7yI0GjIlGA9NvQU09jH0cvUCg"
+  },
+  "transcript_token": "cr.prove.transcript.v1|DEMO-EXECUTOR-KEY-DO-NOT-USE|eyJkZXBsb3ltZW50X2lkIjoiZGVtby1kZXBsb3ltZW50IiwiZXhlY3V0b3Jfa2lkIjoiREVNTy1FWEVDVVRPUi1LRVktRE8tTk9ULVVTRSIsIm1lYXN1cmVkX2F0IjoiMjAyNi0wOS0wNlQwOTo0NjozNi40NjNaIiwic2VjdGlvbnMiOlt7ImV2aWRlbmNlIjp7ImFmdGVyX2NvdW50IjowLCJiZWZvcmVfY291bnQiOjAsImV4ZWN1dG9yX3JvbGUiOiJjcl9leGVjdXRvciIsImV4ZWN1dG9yX3NxbHN0YXRlIjoiNDI1MDEiLCJob3N0X3JvbGUiOiJjcl9ob3N0IiwiaG9zdF9zcWxzdGF0ZSI6IjQyNTAxIiwiaG9zdF90aXRsZV9hZnRlciI6MCwiaG9zdF90aXRsZV9iZWZvcmUiOjAsInVuY2hhbmdlZCI6dHJ1ZX0sImlkIjoiZGVueSIsIm5hbWUiOiJERU5ZIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7InZlcmRpY3QiOiJQQVNTIiwidmVyaWZ5IjoiUE9TVFVSRV9QQVNTIn0sImlkIjoicG9zdHVyZSIsIm5hbWUiOiJQT1NUVVJFIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7ImFmdGVyX2NvdW50IjoxLCJiZWZvcmVfY291bnQiOjAsImZpcnN0IjoyMDEsInNlY29uZCI6NDA5LCJzdGF0dXMiOiJHUkFOVF9DT05TVU1FRCJ9LCJpZCI6InJlcGxheSIsIm5hbWUiOiJSRVBMQVkiLCJ2ZXJkaWN0IjoiUEFTUyJ9LHsiZXZpZGVuY2UiOnsiYWZ0ZXJfY291bnQiOjEsImJlZm9yZV9jb3VudCI6MCwiY29uZmxpY3QiOjE5LCJncmV3IjoxLCJvayI6MX0sImlkIjoiY29uY3VycmVuY3kiLCJuYW1lIjoiQ09OQ1VSUkVOQ1kiLCJ2ZXJkaWN0IjoiUEFTUyJ9LHsiZXZpZGVuY2UiOnsiYWZ0ZXJfY291bnQiOjEsImJlZm9yZV9jb3VudCI6MSwiZXhwZWN0ZWRfc3RhdGVfdG9rZW4iOiJzaGEyNTY6NmY2ZDFhZjExZmM2ZGM2NzQwOTU1YjBkODc5Yzk0NTRhNGQzMWQ3YzQ4ODM1ZTI2ZWUwYTM2YTMyYmU4YmU3ZiIsImh0dHAiOjQwOSwianRpX2NvbnN1bWVkIjowLCJzdGFsZV9zdGF0ZV90b2tlbiI6dHJ1ZSwic3RhdHVzIjoiU1RBVEVfRFJJRlQiLCJ1bmNoYW5nZWQiOnRydWV9LCJpZCI6ImNhc19zdGFsZSIsIm5hbWUiOiJDQVMtU1RBTEUiLCJ2ZXJkaWN0IjoiUEFTUyJ9LHsiZXZpZGVuY2UiOnsiYWZ0ZXJfY291bnQiOjAsImJlZm9yZV9jb3VudCI6MCwiZXJyb3IiOiJzaW11bGF0ZWQgY3Jhc2gtYmVmb3JlLXNlYWwiLCJsZWRnZXJfYWZ0ZXIiOjAsImxlZGdlcl9iZWZvcmUiOjAsInNraXBfc2VhbCI6dHJ1ZSwic3RhdHVzIjoiY29uc3VtZWRfdW5zaWduZWRfcm9sbGVkX2JhY2siLCJ0aHJldyI6dHJ1ZSwidW5jaGFuZ2VkIjp0cnVlfSwiaWQiOiJub19jb25zdW1lX29ubHkiLCJuYW1lIjoiTk8gQ09OU1VNRS1PTkxZIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7ImFmdGVyX2NvdW50IjowLCJiZWZvcmVfY291bnQiOjAsImxlZGdlcl9hZnRlciI6MiwibGVkZ2VyX2JlZm9yZSI6MiwibXV0YXRpb25fb25seSI6dHJ1ZSwic3Fsc3RhdGUiOiI0MjUwMSIsInVuY2hhbmdlZCI6dHJ1ZX0sImlkIjoibm9fbXV0YXRpb25fb25seSIsIm5hbWUiOiJOTyBNVVRBVElPTi1PTkxZIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7ImFmdGVyX2NvdW50IjoxLCJiZWZvcmVfY291bnQiOjAsImh0dHAiOjIwMSwianRpIjoiZGI2YzM5YzItMWNkOC00ZTdiLTlkZDQtYzBhNTAyYzZlMmNhIiwic2VhbGVkIjp0cnVlLCJ3aXRoX2dyYW50Ijoic2lnbmF0dXJlIHZhbGlkIEFORCBib3VuZCB0byBncmFudCBkYjZjMzljMi0xY2Q4LTRlN2ItOWRkNC1jMGE1MDJjNmUyY2EiLCJ3aXRob3V0X2dyYW50Ijoic2lnbmF0dXJlIHZhbGlkOyBncmFudC1iaW5kaW5nIE5PVCBjaGVja2VkIn0sImlkIjoiYXV0aG9yaXplZCIsIm5hbWUiOiJBVVRIT1JJWkVEIFdSSVRFICsgVkVSSUZZIiwidmVyZGljdCI6IlBBU1MifSx7ImV2aWRlbmNlIjp7ImFmdGVyX2dyYW50IjoiRkFJTCIsImFmdGVyX3Jldm9rZSI6IlBBU1MiLCJkcmlmdF9uYW1lcyI6WyJob3N0X3JvbGUgZ2FpbmVkIElOU0VSVCBvbiBhcnRpY2xlcyJdfSwiaWQiOiJkcmlmdCIsIm5hbWUiOiJEUklGVCBCQVNFTElORSIsInZlcmRpY3QiOiJQQVNTIn0seyJldmlkZW5jZSI6eyJjb3VudHMiOnsiQ09ORklSTUVEIjoxLCJJTkRFVEVSTUlOQVRFIjowLCJSRUpFQ1RFRCI6MCwiUkVMRUFTRUQiOjB9LCJncmFudHMiOlt7ImFkYXB0ZXIiOiJwb3N0Z3JlcyIsImV2aWRlbmNlIjp7ImF0dGVzdF9zdGF0dXMiOiJBVFRFU1RfVkFMSUQiLCJleGVjdXRvcl9raWQiOiJERU1PLUVYRUNVVE9SLUtFWS1ETy1OT1QtVVNFIiwicmVhc29uIjoiY29uc3VtZWQsIHNlYWxlZCwgYW5kIGEgQ1JZUFRPR1JBUEhJQ0FMTFkgVkVSSUZJRUQgYXR0ZXN0YXRpb24gYm91bmQgdG8gdGhpcyBncmFudCBjYXJyaWVzIHRoaXMgcm93J3MgZXhhY3QgcHJlaW1hZ2UiLCJzdGF0dXMiOiJzZWFsZWQifSwianRpIjoiZGI2YzM5YzItMWNkOC00ZTdiLTlkZDQtYzBhNTAyYzZlMmNhIiwib3V0Y29tZSI6IkNPTkZJUk1FRCJ9XSwibmVlZHNfYXR0ZW50aW9uIjowLCJvdXRjb21lIjoiQ09ORklSTUVEIn0sImlkIjoicmVjb3ZlcnkiLCJraW5kIjoicmVjb3ZlcnkiLCJuYW1lIjoiUkVDT1ZFUlkiLCJ2ZXJkaWN0IjoiQ09ORklSTUVEIn1dLCJ2IjoiY3IucHJvdmUudHJhbnNjcmlwdC52MSIsInZlcmRpY3QiOiJQQVNTIn0|oNoBdpjwsq40AAjBFB2Wx79pMHVgzXEdaoldg9KAx7_FIrw-6lF5xHq0HdlWiRUPuFvGOav8QVz2LrXa-CGFCg",
+  "transcript_preimage_hash": "sha256:06620bfb8f4099f1c964565cca9ece53a11cae90a018af14eb26cec2f4e8e76e",
   "transcript_verifies": true,
+  "issuance": {
+    "source": "live",
+    "captured_at": "2026-09-06T09:46:36.625Z",
+    "decision_id": "dec_dc002942-3caf-4d14-9342-2d5c93910415",
+    "verdict_fingerprint": "sha256:e37a46ff0c4e8a0cb0d65e91fffcad14de21ccbae6f855d4960b9a02a60eec49",
+    "kid": "2026-07-k1",
+    "jti": "db6c39c2-1cd8-4e7b-9dd4-c0a502c6e2ca",
+    "verify_status": "GRANT_CURRENT",
+    "execution_grant": "eyJ2IjoiY3IuZXhlYy52MiIsImtpZCI6IjIwMjYtMDctazEiLCJncmFudF9pZCI6ImRiNmMzOWMyLTFjZDgtNGU3Yi05ZGQ0LWMwYTUwMmM2ZTJjYSIsInJlY2VpcHRfaGFzaCI6InNoYTI1Njo3YmNmMTEwMzU3NzU0ZDVhNzMwNWQ5NDgwZDdmMDk2MTViYzJmODBiMjNkNjUyMGRlYmEzODkwNzdkNmU2YWRmIiwidGVuYW50X2lkIjoiZGVmYXVsdCIsImV4ZWN1dG9yX2lkIjoiZGVtby1kZXBsb3ltZW50IiwiYWRhcHRlcl9pZCI6InBvc3RncmVzLmF0b21pYyIsIm9wZXJhdGlvbiI6InB1Ymxpc2giLCJ0YXJnZXRfdXJpIjoiZGI6Ly9kZW1vLWRlcGxveW1lbnQvYXJ0aWNsZXMiLCJleHBlY3RlZF9zdGF0ZV90b2tlbiI6InNoYTI1Njo4MTQ2NDJlNDkxYjYxZWQxYTA2NjZlYzZkZWM1YjM4Mjg3MWUyNDZmZmU1NDU0MDNmYjA1MmYyYTlhNzI1Yzg4IiwiYWZ0ZXJfcGF5bG9hZF9oYXNoIjoic2hhMjU2OjM0NzVlNzRkMjY1NmU0M2IzMjUyNmFmN2U5MGRkYWI3ZmVmMjkyY2QzOGNiYmY0ZjgzNjVjNTdkNTBmZmQ1NWQiLCJub25jZV9oYXNoIjoic2hhMjU2OjIwMTU1NDcyNDYwY2E2ZmY5N2JkNWQ1ZTkyMzgyMDI1MGQxODFiNzQ1ZmVjZTZlMzY3NzRmZmQ4ZjlhY2MwYTgiLCJwb2xpY3lfaGFzaCI6InNoYTI1NjplM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1IiwiYXVkaWVuY2VfaGFzaCI6InNoYTI1NjozZWRhZjM1MjYxNjYzODM1OTZiYWYzODA2Y2FjY2QwNjM2MTBjMDIzNmVkY2M3ZGM3MTk0YjQ2MGYyZTE4ODAxIiwibm90X2JlZm9yZSI6IjIwMjYtMDktMDZUMDk6NDY6MzdaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMDZUMDk6NTE6MzdaIiwibWF4X2F0dGVtcHRzIjoxfQ.tMTTd4N6rkWF6PIZgGcHXwLLMnf61BLpTWIREszmL0aTIPEgBTojyjadwH6-DU8RLLQXRUVEqYLnLgzWdKdECw",
+    "chain_receipt": "eyJ2Ijo0LCJraWQiOiIyMDI2LTA3LWsxIiwiZnAiOiJzaGEyNTY6ZTM3YTQ2ZmYwYzRlOGEwY2IwZDY1ZTkxZmZmY2FkMTRkZTIxY2NiYWU2Zjg1NWQ0OTYwYjlhMDJhNjBlZWM0OSIsInByZXYiOiJudWxsIiwiY2FsbGVyIjoiYnVuZGxlIiwidHMiOiIyMDI2LTA5LTA2VDA5OjQ2OjM3LjUwOFoiLCJyZWciOiIiLCJpciI6IiIsImV4cGlyZXNfYXQiOiIyMDI2LTA5LTA2VDEzOjQ2OjM3WiIsImJoIjoic2hhMjU2OmRiOGFhYTIxMGU4OTk1ZTkwZWJlNGYwNDA2ODViZjkxMDQ5OWYxMzBkMDExYjllYmQwOWQ1MmI1NTdkMWJmZjEifQ.14aFIeXD98vE5EpD_ZW_R6_uAeLnBAL15zRWJz5N7Mpa3-KuVKY8czzVDmnvYsUcD_l_gQFZqlq9SDxF9BL2Cg",
+    "grant": {
+      "v": "cr.exec.v2",
+      "kid": "2026-07-k1",
+      "grant_id": "db6c39c2-1cd8-4e7b-9dd4-c0a502c6e2ca",
+      "not_before": "2026-09-06T09:46:37Z",
+      "expires_at": "2026-09-06T09:51:37Z",
+      "operation": "publish",
+      "target_uri": "db://demo-deployment/articles",
+      "receipt_hash": "sha256:7bcf110357754d5a7305d9480d7f09615bc2f80b23d6520deba389077d6e6adf",
+      "expected_state_token": "sha256:814642e491b61ed1a0666ec6dec5b382871e246ffe545403fb052f2a9a725c88",
+      "nonce_hash": "sha256:20155472460ca6ff97bd5d5e923820250d181b745fece6e36774ffd8f9acc0a8",
+      "after_payload_hash": "sha256:3475e74d2656e43b32526af7e90ddab7fef292cd38cbbf4f8365c57d50ffd55d",
+      "scope_hash": "sha256:3475e74d2656e43b32526af7e90ddab7fef292cd38cbbf4f8365c57d50ffd55d"
+    },
+    "does_not_prove": [
+      "that a later authorize call would ALLOW the same change — this issuance is a point-in-time server verdict",
+      "that the grant remains executable after exp — offline verify uses now=iat",
+      "that this grant authorizes a mutation on the local demo executor — it is a CodeRifts server grant, not a DEMO-KEY data-plane grant"
+    ]
+  },
   "ceiling": {
     "shows": "the chain this deployment minted is internally consistent and independently checkable offline",
     "does_not_show": [

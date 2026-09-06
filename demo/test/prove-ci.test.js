@@ -35,11 +35,57 @@ describe('prove.yml — the copy-paste CI snippet', () => {
     assert.ok(fs.existsSync(KEYS), 'sample keys must be committed');
   });
 
-  it('the committed sample was produced from a clean checkout', () => {
+  it('the committed sample was produced from a clean checkout, and is CURRENT', () => {
     const art = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
     assert.equal(art.provenance.working_tree_dirty, false);
     assert.equal(art.verdict, 'PASS');
-    assert.equal(art.provenance.source_commit.startsWith('3a34079'), true);
+    // A 40-hex commit, not a NAMED one. This assertion used to pin the prefix `3a34079`, and 1413
+    // measured what that pin was worth: the sample went stale — no continuity block, POINT 8
+    // MODELLED, an older grant — and this test stayed green, because the commit it named had not
+    // changed. Pinning provenance says where an artifact came from; it says nothing about whether
+    // what it records is still the truth. So the identity is checked as a shape, and freshness is
+    // checked as CONTENT, below.
+    assert.match(art.provenance.source_commit, /^[0-9a-f]{40}$/);
+  });
+
+  it('the committed sample records the v2 ATOMIC continuity chain, not a pre-continuity capture', () => {
+    // The 1413 assertions, held against the working tree. scripts/check-packed-sample.js holds the
+    // same ones against the actual tarball — deliberately both: this one fails in the commit that
+    // makes the sample stale, that one fails if `files` stops shipping it.
+    const art = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
+    assert.ok(art.continuity, 'the sample must carry a continuity block');
+    assert.equal(art.continuity.continuous, true);
+    const ids = art.continuity.identities || {};
+    assert.ok(ids.issued_jti, 'the sample must record the issued grant id');
+    assert.equal(ids.consumed_jti, ids.issued_jti, 'consumed jti must be the issued one');
+    assert.equal(ids.attestation_jti, ids.issued_jti, 'attested jti must be the issued one');
+    assert.equal(art.issuance.grant.v, 'cr.exec.v2');
+    const p8 = (art.points || []).find((p) => p.n === 8);
+    assert.equal(p8 && p8.state, 'PROVEN');
+    assert.deepEqual((art.points || []).filter((p) => p.state === 'MODELLED').map((p) => p.n), []);
+  });
+
+  it('--check REPORTS the recorded continuity, and refuses a file that misstates it', () => {
+    // The line a reader actually sees. It is re-derived from the three identities rather than read
+    // off `continuous`, so this also proves the report is a check and not an echo.
+    const good = spawnSync(process.execPath, [BIN, '--check', SAMPLE, '--keys', KEYS], { encoding: 'utf8', cwd: ROOT });
+    assert.equal(good.status, 0, good.stdout + good.stderr);
+    assert.match(good.stdout, /authorization \(recorded\): CONTINUOUS/);
+    assert.match(good.stdout, /RECORDED, not re-run/);
+
+    const os = require('node:os');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prove-cont-'));
+    try {
+      const art = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
+      art.continuity.identities.consumed_jti = '00000000-0000-4000-8000-000000000000';
+      const f = path.join(tmp, 'transcript.json');
+      fs.writeFileSync(f, JSON.stringify(art));
+      const bad = spawnSync(process.execPath, [BIN, '--check', f, '--keys', KEYS], { encoding: 'utf8', cwd: ROOT });
+      assert.equal(bad.status, 1, 'a file claiming continuity it does not have must not pass');
+      assert.match(bad.stdout, /claims authorization continuity but its recorded issued, consumed and attested jti are not one value/);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   it('the command the workflow runs succeeds locally', () => {
