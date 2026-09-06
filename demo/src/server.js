@@ -301,8 +301,25 @@ function buildApp({
           executor,
           deploymentId: deployment_id,
           operation: payload.operation,
-          title: req.body && req.body.title,
-          body: req.body && req.body.body,
+          // BINDING 1 — the RAW body is the governed object when one is posted raw.
+          //
+          // MEASURED (capability-express/src/index.js:22): `after_payload := the RAW request body
+          // bytes, exactly as received`, and the server's scope_hash is over exactly those bytes.
+          // A `{title, body}` JSON wrapper therefore hashes to something the issuer never signed —
+          // which is why a grant issued over a contract could never authorize a wrapped write.
+          //
+          // captureRawBody already runs on this route and parses `req.body` ONLY for
+          // application/json. So a raw post (application/yaml, text/plain) leaves req.body
+          // undefined and req.rawBody holding the contract, and the bytes the guard hashed are the
+          // bytes written. The title then cannot come from the body — it comes from a header.
+          //
+          // The JSON path is unchanged: every existing panel keeps working, and this is additive.
+          title: (req.body && req.body.title) != null
+            ? req.body.title
+            : (req.get('x-coderifts-object-id') || null),
+          body: (req.body && req.body.body) != null
+            ? req.body.body
+            : (req.rawBody ? req.rawBody.toString('utf8') : undefined),
         });
       observed = {
         profile,

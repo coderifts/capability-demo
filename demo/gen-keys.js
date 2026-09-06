@@ -36,7 +36,20 @@ function main() {
         'DEMO KEY REGISTRY — generated locally by demo/gen-keys.js. Not a CodeRifts key. '
         + 'Shape matches https://app.coderifts.com/.well-known/coderifts-keys.json so the '
         + 'middleware reads production-shaped input.',
-      keys: [{ kid: KID, public_key_pem: pubPem, status: 'active', valid_from: null, retired_at: null }],
+      // BINDING 2 — the SERVER issuer key travels with the demo key, not instead of it.
+      //
+      // MEASURED: this keyring held only DEMO-KEY-DO-NOT-USE, so a grant signed by the CodeRifts
+      // issuer (kid 2026-07-k1) verified as UNKNOWN_KEY — the executor could not have consumed a
+      // server grant even if one were presented. The issuer half is public key material, pinned in
+      // demo/fixtures/recorded-authorize/issuer-keys.json and already trusted by the offline
+      // verify path; carrying it here lets the SAME executor verify both.
+      //
+      // Both, deliberately: dropping DEMO-KEY would break every local panel, and the point of the
+      // keyring is which signatures are ACCEPTED, not which one is preferred.
+      keys: [
+        { kid: KID, public_key_pem: pubPem, status: 'active', valid_from: null, retired_at: null },
+        ...issuerKeys(),
+      ],
     }, null, 2) + '\n',
   );
   // ── Executor key (customer-held, per cr.exec.attest.v1) ──────────────────────────
@@ -84,6 +97,24 @@ function main() {
  * so `npm pack` cannot carry a private key even by accident. Two independent mechanisms, because
  * one is a convention and the other is what npm actually reads.
  */
+/**
+ * The pinned CodeRifts issuer key(s). Read from the recorded-authorize fixture rather than
+ * re-declared, so there is one copy: a second literal is how a keyring starts disagreeing with the
+ * grants it is supposed to check.
+ */
+function issuerKeys() {
+  const file = path.join(__dirname, 'fixtures', 'recorded-authorize', 'issuer-keys.json');
+  if (!fs.existsSync(file)) return [];
+  const reg = JSON.parse(fs.readFileSync(file, 'utf8'));
+  return (reg.keys || []).map((k) => ({
+    kid: k.kid,
+    public_key_pem: k.public_key_pem,
+    status: k.status || 'active',
+    valid_from: k.valid_from || null,
+    retired_at: k.retired_at || null,
+  }));
+}
+
 function ensureKeys() {
   const needed = [
     'demo-private.pem', 'coderifts-keys.json',
