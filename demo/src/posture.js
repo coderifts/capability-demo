@@ -38,7 +38,7 @@ const TRIGGER = 'trg_consumed_grants_forbid_unsigned';
 
 /** Identity arguments as returned by pg_get_function_identity_arguments (measured). */
 const FN_IDENTITY = Object.freeze({
-  cr_execute_grant: 'p_jti text, p_scope_hash text, p_state_nonce text, p_target_id text, p_operation text, p_title text, p_body text, p_deployment_id text',
+  cr_execute_grant: 'p_jti text, p_scope_hash text, p_state_nonce text, p_target_id text, p_operation text, p_title text, p_body text, p_deployment_id text, p_expected_state_token text',
   cap_seal: 'p_deployment_id text, p_jti text, p_preimage_hash text, p_signature text',
   // Read from the deployed catalog, not transcribed from seal.sql: the DDL says
   // `timestamptz` and `integer`, and pg_get_function_identity_arguments renders

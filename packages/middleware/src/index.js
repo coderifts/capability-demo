@@ -30,8 +30,21 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const { verifyExecutionGrant, computeScopeHash } = require('./verify-grant');
+const {
+  verifyExecutionGrant, verifyExecutionGrantAnyVersion, computeScopeHash, peekKid,
+  GRANT_VERSION_V2,
+} = require('./verify-grant');
 const { buildDenyRemedy, denyErrorForReason } = require('./deny-remedy.js');
+
+/** True when the token's own `v` says cr.exec.v2. Reads, never trusts — the signature still decides. */
+function peekVersionIsV2(token) {
+  if (typeof token !== 'string') return false;
+  const seg = token.split('.');
+  if (seg.length !== 2 || !seg[0]) return false;
+  try {
+    return JSON.parse(Buffer.from(seg[0], 'base64url').toString('utf8')).v === GRANT_VERSION_V2;
+  } catch (_) { return false; }
+}
 
 /** Reference convention established by this package (spec is silent on transport). */
 const DEFAULT_HEADER = 'coderifts-execution-grant';
@@ -80,9 +93,37 @@ function captureRawBody(opts = {}) {
   };
 }
 
-function loadPublicKey({ publicKeyPem, keysFile, kid }) {
+/**
+ * Resolve the pinned key material ONCE, at construction. Still no request-time I/O.
+ *
+ * ── WHY THIS IS A KEYRING AND NO LONGER A SINGLE KEY ────────────────────────────────────────
+ *
+ * MEASURED 2026-09-06. This function used to answer a keys FILE with ONE key — `keys.find(first
+ * active)` — and the guard checked every signature against that one. So a registry listing two
+ * active issuers silently trusted only whichever appeared first, and a grant from the second came
+ * back UNKNOWN_KEY / unknown_kid: a refusal that reads as "I do not know that signer" while the
+ * signer was sitting in the file the operator pointed at.
+ *
+ * That is a bug and it had already bitten: the previous round added the CodeRifts issuer key to
+ * the demo's registry so a server-signed grant would verify, the file listed both, and the guard
+ * went on pinning `DEMO-KEY-DO-NOT-USE` alone.
+ *
+ * The keyring is what a registry with N entries always claimed to mean. What CHANGES for an
+ * existing deployment: a second active entry is now honoured. Anyone who wants exactly one signer
+ * says so with `kid` — that path is unchanged and now the only way to express it.
+ *
+ * A RETIRED entry stays in the ring rather than being filtered out, so a token signed by it is
+ * refused as `retired_kid` and not as `unknown_kid`. Same verdict, a true reason.
+ *
+ * @returns {{byKid: Map<string,{publicKey: crypto.KeyObject, kid: string|null, status: string}>,
+ *            any: {publicKey: crypto.KeyObject, kid: string|null, status: string}|null}}
+ *          `any` is the un-named key of a `publicKeyPem` construction: it matches whatever kid a
+ *          token claims, exactly as before. A keys FILE never produces one.
+ */
+function loadKeyring({ publicKeyPem, keysFile, kid }) {
   if (publicKeyPem) {
-    return { publicKey: crypto.createPublicKey(publicKeyPem), kid: kid || null, status: 'active' };
+    const one = { publicKey: crypto.createPublicKey(publicKeyPem), kid: kid || null, status: 'active' };
+    return { byKid: new Map(kid ? [[kid, one]] : []), any: one };
   }
   if (keysFile) {
     // Same registry SHAPE as .well-known/coderifts-keys.json, read from disk at
@@ -91,14 +132,18 @@ function loadPublicKey({ publicKeyPem, keysFile, kid }) {
     const doc = JSON.parse(fs.readFileSync(keysFile, 'utf8'));
     const keys = doc && Array.isArray(doc.keys) ? doc.keys : null;
     if (!keys || keys.length === 0) throw new Error(`requireExecutionGrant: no keys[] in ${keysFile}`);
-    const entry = kid ? keys.find((k) => k.kid === kid) : keys.find((k) => (k.status || 'active') === 'active');
-    if (!entry) throw new Error(`requireExecutionGrant: no usable key in ${keysFile}${kid ? ` for kid ${kid}` : ''}`);
-    if (!entry.public_key_pem) throw new Error(`requireExecutionGrant: entry ${entry.kid} has no public_key_pem`);
-    return {
-      publicKey: crypto.createPublicKey(entry.public_key_pem),
-      kid: entry.kid || null,
-      status: entry.status || 'active',
-    };
+    const usable = kid ? keys.filter((k) => k.kid === kid) : keys;
+    if (usable.length === 0) throw new Error(`requireExecutionGrant: no usable key in ${keysFile} for kid ${kid}`);
+    const byKid = new Map();
+    for (const entry of usable) {
+      if (!entry.public_key_pem) throw new Error(`requireExecutionGrant: entry ${entry.kid} has no public_key_pem`);
+      byKid.set(String(entry.kid), {
+        publicKey: crypto.createPublicKey(entry.public_key_pem),
+        kid: entry.kid || null,
+        status: entry.status || 'active',
+      });
+    }
+    return { byKid, any: null };
   }
   throw new Error('requireExecutionGrant: publicKeyPem or keysFile is required');
 }
@@ -126,12 +171,13 @@ function requireExecutionGrant(options = {}) {
     publicKeyPem, keysFile, kid, audience,
     operationMap = {},
     targetId = (req) => (req.params && req.params.id != null ? String(req.params.id) : ''),
+    targetUri,
     header = DEFAULT_HEADER,
     now,
   } = options;
 
   // Resolved ONCE at construction. No request-time key I/O, ever.
-  const pinned = loadPublicKey({ publicKeyPem, keysFile, kid });
+  const keyring = loadKeyring({ publicKeyPem, keysFile, kid });
   const headerName = String(header).toLowerCase();
 
   // The 403 body, plus the next step when the caller can act on one.
@@ -175,17 +221,44 @@ function requireExecutionGrant(options = {}) {
       }));
     }
 
-    const result = verifyExecutionGrant(token, {
+    // Which pinned key checks this signature: the one whose kid the token claims. A token
+    // claiming a kid nobody pinned resolves to nothing and is refused BY the verifier (no
+    // publicKey → UNKNOWN_KEY), not by an early return here, so the refusal keeps one shape.
+    const claimedKid = peekKid(token);
+    const pinned = (claimedKid && keyring.byKid.get(claimedKid)) || keyring.any || {};
+
+    // VERSION-DISPATCHED INTENT. v1 and v2 bind the same request through different fields, so the
+    // intent has to be spelled in each version's own vocabulary:
+    //
+    //   v1  scope_hash over (operation ⨝ target_id ⨝ after_payload) — one hash, three facts.
+    //   v2  after_payload_hash over the body ALONE; the target is `target_uri`, a different
+    //       namespace from v1's target_id.
+    //
+    // So v2 gets `after_payload` and NOT `target_id`: passing this route's target_id as a
+    // target_uri would compare a bare row id against a scheme:// URI and fail every time, and
+    // silently dropping the comparison would be worse. v2's target_uri is checked only when the
+    // caller configures `targetUri` — stated in the README as the one binding v1 has and an
+    // unconfigured v2 mount does not.
+    const isV2 = peekVersionIsV2(token);
+    const wantedTargetUri = typeof targetUri === 'function' ? targetUri(req) : targetUri;
+    const result = verifyExecutionGrantAnyVersion(token, {
       publicKey: pinned.publicKey,
       keyKid: pinned.kid,
       keyStatus: pinned.status,
       now: typeof now === 'function' ? now() : undefined,
-      intended: {
-        audience: audience || '',
-        operation,
-        target_id: targetId(req),
-        after_payload: afterPayload,
-      },
+      intended: isV2
+        ? {
+          audience: audience || '',
+          operation,
+          after_payload: afterPayload,
+          ...(wantedTargetUri ? { target_uri: String(wantedTargetUri) } : {}),
+        }
+        : {
+          audience: audience || '',
+          operation,
+          target_id: targetId(req),
+          after_payload: afterPayload,
+        },
     });
 
     if (!result.valid) {

@@ -124,10 +124,86 @@ function signingInput(body) {
   return parts.join('|');
 }
 
-/** ATOMIC iff a non-empty state_nonce is carried. */
+/** sha256 of the empty string — what v2 writes into a hash slot the issuer had no value for. */
+const EMPTY_SHA256 = `sha256:${sha256hex('')}`;
+
+/**
+ * ATOMIC iff the grant is bound to a state nonce.
+ *
+ * The two versions say that differently and the difference is the whole point of this function:
+ *
+ *   v1 carries the RAW `state_nonce`, so presence is the test.
+ *   v2 carries `nonce_hash` and never the preimage. The field is ALWAYS present — the issuer
+ *       writes sha256('') when it was given no nonce (execution-grant-v2.js:164) — so presence
+ *       proves nothing and the test is `!== sha256('')`.
+ *
+ * MEASURED 2026-09-06 against a live cr.exec.v2 grant: reading v2 with the v1 rule returns
+ * BEARER, and server.js refuses every BEARER. That is why a real server grant could not reach
+ * the executor at all — not a signature problem, a vocabulary one.
+ */
 function grantProfile(payload) {
-  return payload && payload.state_nonce != null && String(payload.state_nonce).length > 0
+  if (!payload) return 'BEARER';
+  if (payload.v === GRANT_VERSION_V2) {
+    return payload.nonce_hash != null && String(payload.nonce_hash) !== EMPTY_SHA256
+      ? 'ATOMIC' : 'BEARER';
+  }
+  return payload.state_nonce != null && String(payload.state_nonce).length > 0
     ? 'ATOMIC' : 'BEARER';
+}
+
+/**
+ * One vocabulary for the executor, so nothing downstream has to branch on a version.
+ *
+ * v1 and v2 are DIFFERENT SHAPES, not a superset (verify-grant.js:28), and the executor needs
+ * four facts from either: which grant this is, what it scoped, which deployment may run it, and
+ * how the state nonce is bound. Spelling those four out at every call site is how one of them
+ * ends up reading a v1 field off a v2 payload and silently getting `undefined` — which, for a
+ * one-use ledger keyed on the grant id, would mean every v2 grant consuming as the same NULL row.
+ *
+ * `nonce_hash` is returned WITHOUT the preimage on purpose: a v2 grant does not carry one. The
+ * caller must obtain the raw nonce from the party that holds it and check the hash itself.
+ */
+function normalizeGrant(payload) {
+  if (!payload) return null;
+  if (payload.v === GRANT_VERSION_V2) {
+    return {
+      version: GRANT_VERSION_V2,
+      jti: payload.grant_id,
+      scope_hash: payload.after_payload_hash,
+      deployment_id: payload.executor_id == null ? '' : String(payload.executor_id),
+      operation: payload.operation,
+      state_nonce: null,
+      nonce_hash: payload.nonce_hash,
+      expected_state_token: payload.expected_state_token,
+    };
+  }
+  return {
+    version: GRANT_VERSION,
+    jti: payload.jti,
+    scope_hash: payload.scope_hash,
+    deployment_id: payload.deployment_id == null ? '' : String(payload.deployment_id),
+    operation: payload.operation,
+    state_nonce: payload.state_nonce,
+    nonce_hash: null,
+    // v1 has no signed state expectation. Empty means "not asserted", never "expect empty".
+    expected_state_token: '',
+  };
+}
+
+/**
+ * The kid a token CLAIMS, read without verifying anything.
+ *
+ * Only ever used to choose which pinned public key to check the signature against. A forged kid
+ * selects a key whose signature then fails — it cannot select "no check".
+ */
+function peekKid(token) {
+  if (typeof token !== 'string' || token.length === 0) return null;
+  const seg = token.split('.');
+  if (seg.length !== 2 || !seg[0]) return null;
+  try {
+    const body = JSON.parse(Buffer.from(seg[0], 'base64url').toString('utf8'));
+    return body && typeof body.kid === 'string' && body.kid.length > 0 ? body.kid : null;
+  } catch (_) { return null; }
 }
 
 function fieldHasDelimiter(body) {
@@ -473,6 +549,9 @@ module.exports = {
   verifyExecutionGrantV2,
   verifyExecutionGrantAnyVersion,
   grantProfile,
+  normalizeGrant,
+  peekKid,
+  EMPTY_SHA256,
   OPTIONAL_SIGNED_FIELDS,
   SIGNING_PREFIX,
   CLOCK_SKEW_LEEWAY_MS,

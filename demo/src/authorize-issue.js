@@ -105,6 +105,13 @@ function summarizeGrant(payload) {
       operation: payload.operation,
       target_uri: payload.target_uri,
       receipt_hash: payload.receipt_hash,
+      expected_state_token: payload.expected_state_token,
+      nonce_hash: payload.nonce_hash,
+      after_payload_hash: payload.after_payload_hash,
+      // ALIAS, not a second fact. v2's scope binding IS after_payload_hash; the continuity gate
+      // and the correlation both ask a grant for `scope_hash`, and teaching each of them to say
+      // "…or after_payload_hash if v2" is how one of them ends up forgetting.
+      scope_hash: payload.after_payload_hash,
     };
   }
   return {
@@ -265,6 +272,11 @@ function evaluateIssuance(issued, opts = {}) {
     decision: issued.decision,
     jti: issued.grant && (issued.grant.jti || issued.grant.grant_id),
     kid: issued.grant && issued.grant.kid,
+    // CARRIED, not summarised away. The continuity gate asks the issuance for `grant.scope_hash`
+    // to compare against what the correlation bound; this object dropped `grant`, so that leg read
+    // `undefined` and passed vacuously while the two jti legs did the work. A silent null is the
+    // one thing a gate like this must not produce.
+    grant: issued.grant || null,
     captured_at: issued.captured_at,
     does_not_prove: issued.does_not_prove,
     issued,

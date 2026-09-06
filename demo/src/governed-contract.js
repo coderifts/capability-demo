@@ -73,16 +73,57 @@ function contractPayload(opts = {}) {
   return JSON.stringify({ title: id, body: bytes });
 }
 
+/**
+ * The AFTER side of the governed change — the bytes an authorized publish writes.
+ *
+ * MEASURED 2026-09-06: a live authorize whose artifact has `before === after` is refused HTTP 400.
+ * There is no change to govern, so there is no grant to issue, and a governed object therefore
+ * cannot be "the file exactly as committed" — it has to be a proposed next version.
+ *
+ * The change is a response description, deliberately the smallest thing that is still a real
+ * OpenAPI edit: the point of the chain is which BYTES were authorized and written, not how
+ * dramatic the diff was. A larger edit would grade REQUIRE_APPROVAL and prove nothing extra.
+ */
+function proposedContractBytes(file = CONTRACT_PATH) {
+  const base = canonicalContractBytes(file);
+  const out = base.replace('description: created\n', 'description: created successfully\n');
+  if (out === base) throw new Error('proposedContractBytes: the contract no longer contains the governed line');
+  return out;
+}
+
 /** A DIFFERENT contract, for the negative: same shape, one byte of meaning changed. */
 function mutatedContractPayload(opts = {}) {
   const bytes = canonicalContractBytes().replace('version: 1.0.0', 'version: 1.0.1');
   return contractPayload({ ...opts, bytes });
 }
 
+/**
+ * THE SCOPE OF THE GOVERNED CHANGE, in the vocabulary the issuing grant used.
+ *
+ *   cr.exec.v1  scope_hash = sha256(operation ⨝ target_id ⨝ after_payload)   — three facts
+ *   cr.exec.v2  after_payload_hash = sha256(after_payload)                   — the body ALONE
+ *
+ * ONE definition on purpose. This value is recomputed independently by the chain (to compare
+ * against what the correlation bound) and by POINT 10 (to re-derive it inside the offline trap).
+ * They were two copies of the v1 formula; when the run started issuing v2 grants, one was fixed
+ * and the other reported PROVE_SCOPE_DRIFT about a scope that had not drifted. A hash used as a
+ * cross-check must not have two spellings.
+ *
+ * @param {string} grantVersion  the `v` of the grant that authorized the change
+ */
+function governedScopeHash(grantVersion) {
+  const { computeScopeHash } = require('../../packages/middleware/src/verify-grant.js');
+  return grantVersion === 'cr.exec.v2'
+    ? contractDigest(proposedContractBytes())
+    : computeScopeHash({ operation: 'publish', target_id: '', after_payload: contractPayload() });
+}
+
 module.exports = {
   CONTRACT_PATH,
   canonicalContractBytes,
+  proposedContractBytes,
   contractDigest,
   contractPayload,
+  governedScopeHash,
   mutatedContractPayload,
 };

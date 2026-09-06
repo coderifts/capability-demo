@@ -318,9 +318,15 @@ async function runAll({ cwd = process.cwd() } = {}) {
       if (!transcript || transcript.valid !== true) return transcript;
 
       // Re-derive rather than re-read: a recorded value the verifier trusts is not verified.
-      const { contractPayload: cp } = require(path.join(DEMO, 'src', 'governed-contract.js'));
-      const { computeScopeHash: csh } = require(path.join(REPO, 'packages', 'middleware', 'src', 'verify-grant.js'));
-      const recomputed = csh({ operation: 'publish', target_id: '', after_payload: cp() });
+      //
+      // The SHAPE follows the issued grant's version — v1 hashes operation ⨝ target ⨝ body, v2
+      // hashes the body alone. This used to hardcode v1 while the chain had moved to v2, so a
+      // correct correlation was reported as PROVE_SCOPE_DRIFT. governedScopeHash is the single
+      // definition both sides now call.
+      const { governedScopeHash: gsh } = require(path.join(DEMO, 'src', 'governed-contract.js'));
+      const recomputed = gsh(
+        prove.issuance && prove.issuance.grant ? prove.issuance.grant.v : null,
+      );
       const correlation = chain.correlation || null;
       if (correlation) {
         const { verifyCorrelation: vc } = require(path.join(DEMO, 'src', 'contract-correlation.js'));

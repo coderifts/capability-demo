@@ -17,8 +17,12 @@ ALTER TABLE attestations ADD COLUMN IF NOT EXISTS deployment_id TEXT NOT NULL DE
 ALTER TABLE consumed_grants DROP CONSTRAINT IF EXISTS consumed_grants_pkey;
 ALTER TABLE consumed_grants ADD PRIMARY KEY (deployment_id, jti);
 
--- Arity change: 7-arg (STEP 2/3) → 8-arg with p_deployment_id.
+-- Arity change: 7-arg (STEP 2/3) → 8-arg with p_deployment_id → 9-arg with
+-- p_expected_state_token. Each old signature is dropped by name: CREATE OR REPLACE cannot change
+-- an argument list, it OVERLOADS, and two live overloads of a gate is exactly the ambiguity this
+-- function exists to remove.
 DROP FUNCTION IF EXISTS cr_execute_grant(text, text, text, text, text, text, text);
+DROP FUNCTION IF EXISTS cr_execute_grant(text, text, text, text, text, text, text, text);
 
 CREATE OR REPLACE FUNCTION cr_execute_grant(
   p_jti text,
@@ -28,7 +32,14 @@ CREATE OR REPLACE FUNCTION cr_execute_grant(
   p_operation text,
   p_title text,
   p_body text,
-  p_deployment_id text
+  p_deployment_id text,
+  -- The state the ISSUER signed this grant against (cr.exec.v2 expected_state_token). Checked
+  -- inside the same lock as the CAS, because the executor role cannot read state_challenges at
+  -- all (REVOKE below) and a check outside SECURITY DEFINER would have to be taken on trust.
+  --
+  -- EMPTY MEANS NOT ASSERTED, never "expect the empty digest". cr.exec.v1 signs no state
+  -- expectation, so every v1 call passes '' here and reaches byte-identical behaviour.
+  p_expected_state_token text DEFAULT ''
 ) RETURNS TABLE (
   ok boolean,
   status text,
@@ -96,6 +107,17 @@ BEGIN
     RETURN NEXT; RETURN;
   END IF;
 
+  -- (1b) The SIGNED expectation. STATE_DRIFT above compares the challenge to the world; this
+  -- compares the GRANT to the challenge. They are different failures: drift means the state moved
+  -- under a correct grant, this means the issuer signed against a state this executor never
+  -- offered — a grant minted for somebody else's challenge.
+  IF p_expected_state_token IS NOT NULL AND p_expected_state_token <> ''
+     AND p_expected_state_token IS DISTINCT FROM ch.current_digest THEN
+    ok := false; status := 'STATE_TOKEN_MISMATCH'; reason := 'expected_state_token_mismatch'; http := 409;
+    challenged_digest := ch.current_digest; current_digest_out := p_expected_state_token;
+    RETURN NEXT; RETURN;
+  END IF;
+
   -- (2) Ledger. PK is the one-use mechanism (atomic.js:73-85).
   BEGIN
     INSERT INTO public.consumed_grants (deployment_id, jti, scope_hash, target_profile, status)
@@ -158,9 +180,9 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION cr_execute_grant(text, text, text, text, text, text, text, text) OWNER TO cr_owner;
-REVOKE ALL ON FUNCTION cr_execute_grant(text, text, text, text, text, text, text, text) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION cr_execute_grant(text, text, text, text, text, text, text, text) TO cr_executor;
+ALTER FUNCTION cr_execute_grant(text, text, text, text, text, text, text, text, text) OWNER TO cr_owner;
+REVOKE ALL ON FUNCTION cr_execute_grant(text, text, text, text, text, text, text, text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION cr_execute_grant(text, text, text, text, text, text, text, text, text) TO cr_executor;
 
 -- STEP 2: executor may no longer write tables directly. Gate only.
 REVOKE ALL ON TABLE articles FROM cr_executor;

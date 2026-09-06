@@ -47,7 +47,7 @@ const {
   contractSourceCommit, correlate, verifyCorrelation,
   DOES_NOT_PROVE: CORRELATION_DOES_NOT_PROVE,
 } = require('./src/contract-correlation');
-const { CONTRACT_PATH, contractPayload } = require('./src/governed-contract');
+const { CONTRACT_PATH, governedScopeHash } = require('./src/governed-contract');
 const { assessContinuity, continuityLine } = require('./src/authorization-continuity');
 
 const KEYS = path.join(__dirname, 'keys');
@@ -267,10 +267,18 @@ async function runChain({ prove = null } = {}) {
     const commit = contractSourceCommit(CONTRACT_PATH);
     if (!commit.ok) return { ok: false, reason: commit.reason, detail: commit.detail };
 
-    const { computeScopeHash } = require('../packages/middleware/src/verify-grant.js');
-    const scopeHash = computeScopeHash({
-      operation: 'publish', target_id: '', after_payload: contractPayload(),
-    });
+    // THE SCOPE IS THE BYTES THAT WERE WRITTEN, in the vocabulary the grant used.
+    //
+    //   cr.exec.v1  scope_hash = sha256(operation ⨝ target_id ⨝ after_payload)
+    //   cr.exec.v2  after_payload_hash = sha256(after_payload) — the body ALONE
+    //
+    // Computing the v1 shape for a v2 run produced a hash the issued grant never carried, so the
+    // continuity check compared two different things and could only ever report a mismatch. Both
+    // are derived here from the contract bytes; neither is copied from the grant, so the
+    // comparison downstream is still a comparison and not an echo.
+    const scopeHash = governedScopeHash(
+      out.issuance && out.issuance.grant ? out.issuance.grant.v : null,
+    );
 
     const correlation = correlate({
       scopeHash, contractCommit: commit, readback: rb, privateKey: executorPrivateKey(),
@@ -395,10 +403,30 @@ async function runChain({ prove = null } = {}) {
   // This gate does not create continuity. It refuses to let its absence read as its presence, and
   // it fails the run when they diverge — the same fail-closed rule the rest of this chain uses.
   const authSec = sectionOf(out, 'authorized');
+  // THE ATTESTATION LEG READS THE ATTESTATION, not the field next to it.
+  //
+  // Both jtis used to come from `evidence.jti` — one value compared with itself, which passes
+  // whatever the attestation actually says. The executor's seal carries the grant id in its own
+  // signed preimage (`cr.gate.preimage.v1|<jti>|<deployment>|…`, gate.sql), so reading it there
+  // makes this leg a comparison. An absent or unreadable attestation yields null and the gate
+  // refuses, rather than falling back to the value that would have made it pass.
+  const attestationJti = (() => {
+    const token = authSec && authSec.evidence ? authSec.evidence.attestation : null;
+    if (typeof token !== 'string') return null;
+    // cr.atomic.execution.attestation.v1 | <executor kid> | base64url(preimage) | <signature>
+    // — PIPE-delimited (atomic.js encodeAtomicExecutionAttestation), not dot-delimited like a
+    // grant token. Reading it with the grant's delimiter yields one segment and a silent null.
+    const seg = token.split('|');
+    if (seg.length !== 4 || !seg[2]) return null;
+    try {
+      const fields = Buffer.from(seg[2], 'base64url').toString('utf8').split('|');
+      return fields[0] === 'cr.gate.preimage.v1' && fields[1] ? fields[1] : null;
+    } catch (_) { return null; }
+  })();
   const continuity = assessContinuity({
     issuance: out.issuance || null,
     consumedJti: authSec && authSec.evidence ? authSec.evidence.jti : null,
-    attestationJti: authSec && authSec.evidence ? authSec.evidence.jti : null,
+    attestationJti,
     correlation: producedCorrelation,
   });
   // NOT a point. The points are 1-9 and several readers depend on that shape (the conformance

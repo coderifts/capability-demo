@@ -21,6 +21,11 @@ const {
   makePool, migrate, bootstrapUrl, hostUrl, executorUrl, configuredDeploymentId,
 } = require('./src/db');
 const { buildApp, loadExecutor } = require('./src/server');
+const { canonicalContractBytes, proposedContractBytes } = require('./src/governed-contract');
+const {
+  acquireServerGrant, consumeServerGrant, haveLiveIssuer, OBJECT_ID,
+} = require('./src/server-grant');
+const { normalizeGrant } = require('../packages/middleware/src/verify-grant');
 const { issue } = require('./issue-grant');
 const { issueAuthorize, evaluateIssuance } = require('./src/authorize-issue');
 const {
@@ -76,13 +81,18 @@ async function countArticles(pool) {
 }
 
 function grantBindingLines(token, grant, publicKey) {
-  const parsed = parseGrantToken(grant);
+  // VERSION-AGNOSTIC. parseGrantToken reads cr.exec.v1 only, so a v2 grant parsed here came back
+  // `ok: false` and the binding line said "grant-binding FAILED" about a grant that was fine.
+  // normalizeGrant gives both versions the same four fields; the attestation check itself is
+  // unchanged and still refuses a token bound to a different grant.
+  const parsed = parseGrantAnyVersion(grant);
   const without = verifyAtomicExecutionAttestation(token, { publicKey });
   const withGrant = verifyAtomicExecutionAttestation(token, {
     publicKey,
     intended: { grant: parsed.ok ? parsed.payload : null },
   });
-  const jti = parsed.ok ? parsed.payload.jti : '';
+  const norm = parsed.ok ? normalizeGrant(parsed.payload) : null;
+  const jti = norm ? norm.jti : '';
   return {
     without_grant: without.valid
       ? 'signature valid; grant-binding NOT checked'
@@ -94,6 +104,18 @@ function grantBindingLines(token, grant, publicKey) {
     with_ok: withGrant.valid === true && parsed.ok === true,
     jti,
   };
+}
+
+/** Decode a grant token of either version WITHOUT verifying it — display and binding-intent only. */
+function parseGrantAnyVersion(token) {
+  if (typeof token !== 'string') return { ok: false, payload: null };
+  const seg = token.split('.');
+  if (seg.length !== 2 || !seg[0]) return { ok: false, payload: null };
+  try {
+    return { ok: true, payload: JSON.parse(Buffer.from(seg[0], 'base64url').toString('utf8')) };
+  } catch (_) {
+    return { ok: false, payload: null };
+  }
 }
 
 /**
@@ -122,18 +144,29 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
   say(`deployment_id: ${deployment_id}`);
   say('');
 
-  // ── [ISSUANCE] server authorize — BEFORE any local mint, OUTSIDE the 21-trap.
-  const issued = await issueAuthorize();
-  say(issued.log);
-  const issuance = evaluateIssuance(issued);
-  if (issuance.ok) {
-    say(`  kid=${issuance.kid} jti=${issuance.jti} decision_id=${issuance.decision_id}`);
-    say(`  verdict_fingerprint=${issuance.verdict_fingerprint}`);
-    say(`  offline verify ${issuance.verify.status} at iat (not DEMO-KEY)`);
-  } else {
-    say(`  ISSUANCE VERIFY FAIL ${issuance.verify && issuance.verify.status} ${issuance.verify && issuance.verify.reason || issued.error || ''}`);
-  }
-  say('');
+  // ── [ISSUANCE] server authorize.
+  //
+  // CHALLENGE FIRST, so this can no longer run before the executor is listening. A cr.exec.v2
+  // ATOMIC grant binds sha256(state_nonce), and only the executor can mint a nonce — asking for
+  // the grant first would produce one bound to nothing this executor will ever recognise. The
+  // issuance therefore happens inside the server block below and is reported from there.
+  //
+  // The FALLBACK is the pre-existing bearer path (live or recorded, no nonce): it still proves a
+  // server authorize happened, and the continuity gate still refuses to call the run continuous
+  // when the grant that was issued is not the grant that was consumed.
+  let issued = null;
+  let issuance = null;
+  const reportIssuance = () => {
+    say(issued.log);
+    if (issuance.ok) {
+      say(`  kid=${issuance.kid} jti=${issuance.jti} decision_id=${issuance.decision_id}`);
+      say(`  verdict_fingerprint=${issuance.verdict_fingerprint}`);
+      say(`  offline verify ${issuance.verify.status} at iat (not DEMO-KEY)`);
+    } else {
+      say(`  ISSUANCE VERIFY FAIL ${issuance.verify && issuance.verify.status} ${(issuance.verify && issuance.verify.reason) || issued.error || ''}`);
+    }
+    say('');
+  };
 
   const bootstrap = makePool(bootstrapUrl());
   let hostPool;
@@ -158,8 +191,10 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
     await new Promise((r) => { server = app.listen(0, r); });
     base = `http://127.0.0.1:${server.address().port}`;
 
-    const req = async (method, p, { body, grant } = {}) => {
-      const headers = { 'Content-Type': 'application/json' };
+    const req = async (method, p, { body, grant, headers: extra } = {}) => {
+      // The governed contract is posted RAW, so a caller must be able to say what these bytes are
+      // and carry the nonce preimage. Defaults are unchanged for every JSON panel.
+      const headers = { 'Content-Type': 'application/json', ...(extra || {}) };
       if (grant) headers['CodeRifts-Execution-Grant'] = grant;
       const r = await fetch(`${base}${p}`, { method, headers, body });
       return { code: r.status, json: await r.json().catch(() => null) };
@@ -167,6 +202,35 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
     const challenge = async (target_id = '') =>
       (await req('POST', '/state-challenge', { body: JSON.stringify({ target_id }) })).json;
     const mkGrant = (o) => issue({ ...KEYOPTS, ...o });
+
+    // ── [ISSUANCE], challenge-first ───────────────────────────────────────
+    //
+    // One authorize call for the whole run. POINT 1 reports this grant and POINT 5 consumes THIS
+    // grant — that identity is the only thing the continuity gate accepts, and running a second
+    // authorize for the consume would recreate exactly the two-grant collage the gate exists to
+    // catch. The nonce is live for CHALLENGE_TTL_MS, so nothing may be inserted between here and
+    // the consume that could plausibly take two minutes.
+    const contractBefore = canonicalContractBytes();
+    const contractAfter = proposedContractBytes();
+    let serverGrant = null;
+    if (haveLiveIssuer()) {
+      serverGrant = await acquireServerGrant({
+        challenge, deploymentId: deployment_id, before: contractBefore, after: contractAfter,
+      });
+      if (serverGrant.ok) {
+        issued = serverGrant.issued;
+        say(`  [ATOMIC] challenge nonce minted by this executor; grant nonce_hash === sha256(it)`);
+      } else {
+        say(`  [ISSUANCE] ATOMIC authorize unavailable: ${serverGrant.reason} — ${serverGrant.detail}`);
+      }
+    }
+    if (!issued) {
+      // No live ATOMIC grant: fall back to the pre-existing issuance (live bearer or recorded).
+      // It is still a real server authorize; it is simply not one this executor can consume.
+      issued = await issueAuthorize();
+    }
+    issuance = evaluateIssuance(issued);
+    reportIssuance();
 
     // ── (1) DENY ──────────────────────────────────────────────────────────
     // Reuses host-role-denied.test.js:40-75 — raw INSERT, SQLSTATE 42501, not Node 403.
@@ -440,14 +504,31 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
       say('  FAIL (seal skipped)');
       fail('authorized', 'AUTHORIZED WRITE + VERIFY', authEvidence);
     } else {
-      const authTitle = `prove-auth-${Date.now()}`;
-      const authBody = JSON.stringify({ title: authTitle, body: 'legit' });
-      const ch5 = await challenge('');
-      const g5 = mkGrant({ operation: 'publish', target_id: '', body: authBody, state_nonce: ch5.state_nonce });
+      // THE SERVER GRANT IS CONSUMED HERE when one was issued — same grant as POINT 1, same
+      // nonce, and the RAW contract bytes as the body. The local mint stays as the fallback for a
+      // run with no live issuer; it proves the executor mechanics and never that anyone
+      // authorized the write, which is precisely what the continuity gate then reports.
+      const useServer = !!(serverGrant && serverGrant.ok);
+      const authTitle = useServer ? OBJECT_ID : `prove-auth-${Date.now()}`;
+      const authBody = useServer ? contractAfter : JSON.stringify({ title: authTitle, body: 'legit' });
+      let g5;
+      let posted;
       const authBefore = await countTitle(bootstrap, authTitle);
-      const posted = await req('POST', '/articles', { body: authBody, grant: g5 });
+      if (useServer) {
+        g5 = serverGrant.grant;
+        posted = await consumeServerGrant({
+          post: (pth, o) => req('POST', pth, o),
+          grant: g5,
+          nonce: serverGrant.challenge.state_nonce,
+          after: contractAfter,
+        });
+      } else {
+        const ch5 = await challenge('');
+        g5 = mkGrant({ operation: 'publish', target_id: '', body: authBody, state_nonce: ch5.state_nonce });
+        posted = await req('POST', '/articles', { body: authBody, grant: g5 });
+      }
       const authAfter = await countTitle(bootstrap, authTitle);
-      const jti = JSON.parse(Buffer.from(g5.split('.')[0], 'base64url')).jti;
+      const jti = normalizeGrant(parseGrantAnyVersion(g5).payload).jti;
       const led = await bootstrap.query(
         'SELECT * FROM consumed_grants WHERE deployment_id=$1 AND jti=$2',
         [deployment_id, jti],
@@ -462,13 +543,20 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
       } else {
         say('  no attestation returned');
       }
+      // DELTA, not an absolute count. The server-grant path writes under a CONSTANT object id
+      // (the contract's own identity), so a second run legitimately finds rows already there;
+      // asserting `before === 0` would fail for a reason that has nothing to do with the grant.
       authOk = posted.code === 201 && sealed && bind && bind.without_ok && bind.with_ok
-        && authBefore === 0 && authAfter === 1;
+        && authAfter === authBefore + 1;
+      say(`  grant: ${useServer ? 'SERVER cr.exec.v2 (kid ' + (issuance && issuance.kid) + ')' : 'local DEMO-KEY mint'}`);
       say(`  articles-with-title ${authBefore} → ${authAfter}`);
       say(authOk ? '  PASS' : '  FAIL');
       authEvidence = {
         http: posted.code,
         sealed,
+        grant_source: useServer ? 'server' : 'local_mint',
+        grant_version: parseGrantAnyVersion(g5).payload.v,
+        evidence_tier: useServer ? 'LIVE' : 'NOT_APPLICABLE',
         without_grant: bind && bind.without_grant,
         with_grant: bind && bind.with_grant,
         jti,

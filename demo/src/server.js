@@ -129,6 +129,12 @@ function buildApp({
       if (req.body && typeof req.body.resource_path === 'string') return req.body.resource_path;
       return '';
     },
+    // v2's target lives in a different namespace from v1's target_id — a `scheme://` URI, not a
+    // row id — so the guard leaves it unchecked unless a deployment says what it should be. This
+    // one does: every grant this executor accepts is for its own articles table, and binding it
+    // means a v2 grant minted for some other executor's target is refused here rather than
+    // discovered later by the CAS.
+    targetUri: `db://${deployment_id}/articles`,
   });
 
   // `profiles` lists GRANT profiles this server accepts — unchanged.
@@ -292,14 +298,28 @@ function buildApp({
         });
       }
 
+      // THE NONCE PREIMAGE, for a cr.exec.v2 grant.
+      //
+      // v1 signs the raw state_nonce, so the grant proves its own binding. v2 signs only
+      // `nonce_hash` — by design: the issuer never sees a preimage it did not mint. The caller
+      // holds one, because /state-challenge above handed it to them, and presents it here.
+      //
+      // This header CARRIES the preimage; it does not authorize anything. atomicExecute refuses
+      // unless sha256(header) equals the signed nonce_hash, so a wrong or absent value is a 403
+      // and never a weaker path. A v1 request ignores it entirely.
+      const presentedNonce = req.get('coderifts-state-nonce') || null;
+
       const out = runAdapter
-        ? await runAdapter({ req, payload, targetId, executor, deploymentId: deployment_id })
+        ? await runAdapter({
+          req, payload, targetId, executor, deploymentId: deployment_id, stateNonce: presentedNonce,
+        })
         : await atomicExecute({
           pool: executorPool,
           payload,
           targetId,
           executor,
           deploymentId: deployment_id,
+          stateNonce: presentedNonce,
           operation: payload.operation,
           // BINDING 1 — the RAW body is the governed object when one is posted raw.
           //

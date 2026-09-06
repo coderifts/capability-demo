@@ -20,6 +20,7 @@
  */
 
 const { STRENGTH, REASON, checkInput } = require('./adapter-spi');
+const { normalizeGrant } = require('@coderifts/capability-express/src/verify-grant');
 const crypto = require('node:crypto');
 
 const PG_UNIQUE_VIOLATION = '23505';
@@ -79,8 +80,11 @@ function verifyAtomicExecutionAttestation(token, opts = {}) {
     return { valid: false, status: 'ATTEST_INVALID_SIGNATURE', reason: 'signature_error' };
   }
   if (!ok) return { valid: false, status: 'ATTEST_INVALID_SIGNATURE', reason: 'signature_mismatch' };
-  const grant = opts.intended && opts.intended.grant;
-  if (grant) {
+  // Normalised so an intent expressed as a v2 payload (grant_id / executor_id) checks against the
+  // same preimage fields as a v1 one. Without this a v2 grant's jti reads `undefined` and every
+  // attestation would come back ATTEST_UNBOUND for a reason that is not true.
+  const grant = normalizeGrant(opts.intended && opts.intended.grant);
+  if (grant && grant.jti) {
     const jti = String(grant.jti || '');
     const did = grant.deployment_id != null && String(grant.deployment_id).length > 0
       ? String(grant.deployment_id) : '';
@@ -126,9 +130,16 @@ function verifyPreimageSignature(preimage, signatureB64url, publicKey) {
  * @param {boolean} [o.crashBeforeSeal]   TEST ONLY: throw between gate and seal
  * @returns {Promise<{ok:true,row:object,attestation:string,atomic_execution_attestation:object,preimage:string}|{ok:false,status:string,reason:string,http:number}>}
  */
-async function atomicExecute({ pool, payload, targetId, operation, title, body, executor, deploymentId, crashBeforeSeal }) {
+async function atomicExecute({
+  pool, payload, targetId, operation, title, body, executor, deploymentId, crashBeforeSeal,
+  stateNonce,
+}) {
   const configured = deploymentId == null ? '' : String(deploymentId);
-  const grantDid = payload && payload.deployment_id != null ? String(payload.deployment_id) : '';
+  // ONE vocabulary for both grant versions (verify-grant.js normalizeGrant). v2 spells the same
+  // four facts as grant_id / after_payload_hash / executor_id / nonce_hash; reading v1 field names
+  // off a v2 payload would have handed `undefined` to the ledger's primary key.
+  const grant = normalizeGrant(payload) || {};
+  const grantDid = grant.deployment_id || '';
   // REJECT before the gate: no BEGIN, no FOR UPDATE, no consume.
   if (!configured || grantDid !== configured) {
     return {
@@ -137,6 +148,27 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
       reason: 'deployment_id_mismatch',
       http: 403,
     };
+  }
+
+  // THE NONCE PREIMAGE. v1 carries the raw state_nonce inside the signed body, so the grant is its
+  // own proof. v2 carries only `nonce_hash`, so the preimage must arrive from the party that holds
+  // one — the caller, which got it from this executor's own /state-challenge.
+  //
+  // The check below is what keeps that from being a hole: a caller may present ANY nonce, and only
+  // the one whose sha256 equals the signed nonce_hash is accepted. Presenting somebody else's live
+  // challenge fails here, before BEGIN. An unbound v2 grant (nonce_hash = sha256('')) never gets
+  // this far — grantProfile calls it BEARER and server.js refuses BEARER outright.
+  let nonce = grant.state_nonce;
+  if (grant.nonce_hash) {
+    const presented = stateNonce == null ? '' : String(stateNonce);
+    if (!presented) {
+      return { ok: false, status: 'STATE_NONCE_REQUIRED', reason: 'nonce_preimage_absent', http: 403 };
+    }
+    const h = `sha256:${crypto.createHash('sha256').update(presented, 'utf8').digest('hex')}`;
+    if (h !== String(grant.nonce_hash)) {
+      return { ok: false, status: 'STATE_NONCE_UNBOUND', reason: 'nonce_preimage_mismatch', http: 403 };
+    }
+    nonce = presented;
   }
 
   const client = await pool.connect();
@@ -148,16 +180,19 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
     const r = await client.query(
       `SELECT ok, status, reason, http, article_id, article_title, article_body,
               preimage, challenged_digest, current_digest_out
-         FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7,$8)`,
+         FROM cr_execute_grant($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [
-        payload.jti,
-        payload.scope_hash,
-        payload.state_nonce,
+        grant.jti,
+        grant.scope_hash,
+        nonce,
         targetId == null ? '' : String(targetId),
         operation,
         title == null ? '' : String(title),
         body == null ? '' : String(body),
         configured,
+        // '' for v1: that version signs no state expectation, and the gate reads empty as
+        // "not asserted" so the v1 path stays byte-identical.
+        grant.expected_state_token || '',
       ],
     );
     const g = r.rows[0];
@@ -186,7 +221,7 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
 
     await client.query(
       `SELECT ok, status, reason, http, attestation_ref FROM cap_seal($1,$2,$3,$4)`,
-      [configured, payload.jti, preimage_hash, signature],
+      [configured, grant.jti, preimage_hash, signature],
     );
 
     // Encode here rather than after COMMIT: the artifact must be persisted
@@ -205,7 +240,7 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
     // ACL stays owner-only exactly as the posture baseline pins it.
     await client.query(
       'SELECT ok, status FROM cap_persist_attestation($1,$2,$3)',
-      [configured, payload.jti, attestation],
+      [configured, grant.jti, attestation],
     );
 
     await client.query('COMMIT');
@@ -218,7 +253,7 @@ async function atomicExecute({ pool, payload, targetId, operation, title, body, 
     const atomic_execution_attestation = {
       v: ATOMIC_ATTEST_V,
       executor_kid: executor.kid,
-      jti: payload.jti,
+      jti: grant.jti,
       deployment_id: configured,
       preimage,
       preimage_hash,

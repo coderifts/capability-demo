@@ -125,7 +125,7 @@ describe('STEP 5 — host GRANT INSERT is drift, then REVOKE restores PASS', () 
 describe('STEP 5 — SECURITY DEFINER drop / owner change is drift', () => {
   test('ALTER FUNCTION cr_execute_grant SECURITY INVOKER → FAIL; restore → PASS', async (t) => {
     if (guard(t)) return;
-    const ident = 'cr_execute_grant(text, text, text, text, text, text, text, text)';
+    const ident = 'cr_execute_grant(text, text, text, text, text, text, text, text, text)';
     try {
       await bootstrap.query(`ALTER FUNCTION ${ident} SECURITY INVOKER`);
       const failed = await posture();
@@ -216,7 +216,7 @@ describe('STEP 5 — column GRANT, sequence GRANT, decoy overload, trigger, sear
 
   test('decoy cr_execute_grant() overload does not hide INVOKER on the real gate', async (t) => {
     if (guard(t)) return;
-    const ident = 'cr_execute_grant(text, text, text, text, text, text, text, text)';
+    const ident = 'cr_execute_grant(text, text, text, text, text, text, text, text, text)';
     try {
       await bootstrap.query(`ALTER FUNCTION ${ident} SECURITY INVOKER`);
       await bootstrap.query(`
@@ -260,7 +260,7 @@ describe('STEP 5 — column GRANT, sequence GRANT, decoy overload, trigger, sear
 
   test('RESET search_path on cr_execute_grant → FAIL', async (t) => {
     if (guard(t)) return;
-    const ident = 'cr_execute_grant(text, text, text, text, text, text, text, text)';
+    const ident = 'cr_execute_grant(text, text, text, text, text, text, text, text, text)';
     try {
       await bootstrap.query(`ALTER FUNCTION ${ident} RESET search_path`);
       const failed = await posture();
