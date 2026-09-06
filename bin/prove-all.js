@@ -303,6 +303,18 @@ async function runAll({ cwd = process.cwd() } = {}) {
       const reg = JSON.parse(fs.readFileSync(path.join(DEMO, 'keys', 'executor-keys.json'), 'utf8'));
       return crypto.createPublicKey(reg.keys[0].public_key_pem);
     })();
+    // The evidence root is signed by the SAME executor key the correlation uses — deliberately, so
+    // a reader who verifies one has verified the other's signer too.
+    const executorKid = () => {
+      const reg = JSON.parse(fs.readFileSync(path.join(DEMO, 'keys', 'executor-keys.json'), 'utf8'));
+      return reg.keys[0].kid;
+    };
+    const executorPrivateKeyForRoot = () =>
+      crypto.createPrivateKey(fs.readFileSync(path.join(DEMO, 'keys', 'executor-private.pem'), 'utf8'));
+    const PRODUCER_NAME = '@coderifts/prove';
+    const PRODUCER_VERSION = (() => {
+      try { return require(path.join(REPO, 'package.json')).version; } catch (_) { return 'unknown'; }
+    })();
     // ── PHASE 3 — WHAT THE TRAP COVERS ──────────────────────────────────────────────────────
     //
     // MEASURED before changing it: the 21-trap wrapped `verifyProveTranscript` alone, so POINT 10
@@ -359,6 +371,51 @@ async function runAll({ cwd = process.cwd() } = {}) {
     const continuous = !chain.continuity || chain.continuity.continuous === true;
     const allOk = points.every((p) => p.ok) && prove.ok && chain.transcriptOk.valid && continuous;
 
+    // ── THE EVIDENCE ROOT, built from what this run actually emitted ────────────────────────
+    //
+    // The tokens are read from the SAME variables the artifact below is assembled from, so the
+    // root cannot describe a set the artifact does not contain. The provider readback is included
+    // when one was supplied: it is a sidecar the artifact does not republish, and binding its
+    // bytes here is what stops a readback from another run being paired with this one.
+    const evidenceRoot = (() => {
+      try {
+        const { buildEvidenceRoot } = require(path.join(REPO, 'packages', 'verifier-core', 'evidence-root.js'));
+        const iss = prove.issuance || {};
+        const g = (iss.issued && iss.issued.grant) || {};
+        const ids = (chain.continuity && chain.continuity.identities) || {};
+        return buildEvidenceRoot({
+          run_id,
+          executor_kid: executorKid(),
+          producer: { name: PRODUCER_NAME, version: PRODUCER_VERSION, commit: provenance().source_commit },
+          operation: g.operation || 'publish',
+          target_uri: g.target_uri || null,
+          contract_commit: chain.correlation ? chain.correlation.contract_commit : null,
+          tokens: {
+            chain_receipt: (iss.issued && iss.issued.chain_receipt) || null,
+            execution_grant: (iss.issued && iss.issued.execution_grant) || null,
+            transcript_token: prove.token,
+            correlation: chain.correlation || null,
+            atomic_attestation: chain.attestationToken || null,
+            provider_readback: chain.readbackBytes || null,
+          },
+          claims: {
+            grant_id: ids.issued_jti || iss.jti || null,
+            receipt_hash: g.receipt_hash || g.receipt_digest || null,
+            scope_hash: ids.issued_scope_hash || g.scope_hash || g.after_payload_hash || null,
+            policy_hash: g.policy_hash || null,
+            state_token_hash: g.expected_state_token || null,
+          },
+          privateKey: executorPrivateKeyForRoot(),
+        });
+      } catch (err) {
+        // NAMED, never silent. A run that could not sign its own manifest must not look like a run
+        // that had nothing to sign — the artifact simply carries no root and every consumer then
+        // reports cross_run_collage, which is the true state.
+        line(`could not build the evidence root: ${(err && err.message) || 'unknown'}`);
+        return null;
+      }
+    })();
+
     // ── ARTIFACT ────────────────────────────────────────────────────────────────────────────
     const artifact = {
       v: ARTIFACT_V,
@@ -379,6 +436,18 @@ async function runAll({ cwd = process.cwd() } = {}) {
       // The signed correlation (v, scope_hash, contract_commit, contract_path, readback_commit,
       // correlation_hash, signature) so a verifier can re-check the binding, not pin a sentence.
       ...(chain.correlation ? { correlation: chain.correlation } : {}),
+      // ── cr.evidence.root.v1 — THE SET, SIGNED (1432) ────────────────────────────────────
+      //
+      // Every token below authenticates on its own. None of them can say they came from the SAME
+      // RUN, and that gap was reproduced three ways: a REAL token from a second run of this same
+      // producer, moved into this artifact, verified perfectly. Nothing forged — each token really
+      // was issued.
+      //
+      // The root is this run saying, under the executor's key, "I emitted exactly these bytes".
+      // The binding is the sha256 of each token's exact bytes, so a substituted token fails on its
+      // digest whatever it claims inside. Built LAST, from the values already assembled above, so
+      // it describes what the artifact actually carries rather than what it meant to.
+      ...(evidenceRoot ? { evidence_root: evidenceRoot } : {}),
       // The signed transcript, carried whole. The artifact is a wrapper around it, never a
       // replacement: everything a verifier needs is inside `transcript_token`.
       transcript_token: prove.token,
@@ -594,6 +663,25 @@ function check(file) {
     const ev = evaluateIssuance(artifact.issuance);
     line(`server grant (POINT 1): ${ev.ok ? 'GRANT_CURRENT at iat' : 'FAIL'} kid=${ev.kid} decision_id=${ev.decision_id}`);
     if (!ev.ok) mismatches.push('POINT 1 server grant did not verify GRANT_CURRENT at iat');
+  }
+
+  // THE EVIDENCE ROOT — is this ONE run? (1432)
+  //
+  // Everything else here authenticates a token. This is the only check that speaks about the SET,
+  // and it is the one a cross-run collage fails: a substituted token is authentic and has
+  // different bytes, so its digest cannot match the one the producer signed.
+  //
+  // An artifact with no root is REPORTED, not refused: captures predating the root are still
+  // checkable, and saying "this cannot be shown to be one run" is the honest reading of them.
+  if (artifact.evidence_root) {
+    const { verifyEvidenceRootBinding } = require(path.join(REPO, 'packages', 'verifier-core', 'verify-evidence.js'));
+    const bound = verifyEvidenceRootBinding(artifact, { publicKey, executorKey: publicKey });
+    line(`evidence root        : ${bound.ok ? `ONE RUN (${bound.checks.length} checks, ${bound.library})` : 'NOT ONE RUN'}`);
+    for (const f of bound.failures) line(`  - ${f}`);
+    if (!bound.ok) mismatches.push('the evidence root does not bind these tokens to one run');
+  } else {
+    line('evidence root        : ABSENT — this capture predates cr.evidence.root.v1, so nothing');
+    line('                       binds its tokens to one run; individually authentic is all it says');
   }
 
   // THE CORRELATION SIGNATURE. Measured 2026-09-06 and it was the one slot this path skipped:

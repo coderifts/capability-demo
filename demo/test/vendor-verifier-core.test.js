@@ -23,7 +23,11 @@ const DIR = path.join(__dirname, '..', '..', 'packages', 'verifier-core');
 const MANIFEST = path.join(DIR, 'VENDOR.sha256');
 
 function parseManifest() {
-  const lines = fs.readFileSync(MANIFEST, 'utf8').trim().split('\n');
+  // COMMENTS ARE ALLOWED. 1432 vendored three files at a newer revision than the rest, and a
+  // manifest that cannot say so is a manifest whose mixed provenance lives only in someone's head.
+  // The first non-comment line is the source; `#` lines are prose.
+  const lines = fs.readFileSync(MANIFEST, 'utf8').trim().split('\n')
+    .filter((l) => !l.trim().startsWith('#'));
   const [source, ...rows] = lines;
   const files = rows.filter(Boolean).map((l) => {
     const m = /^(\S+)\s+([0-9a-f]{64})$/.exec(l.trim());

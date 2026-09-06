@@ -301,9 +301,18 @@ async function runChain({ prove = null } = {}) {
   const readbackPath = process.env.CODERIFTS_PROVIDER_READBACK || null;
   let readback = null;
   let readbackError = null;
+  // THE RAW BYTES, kept alongside the parsed object. The evidence root binds the readback by the
+  // sha256 of what was actually read, not of a re-serialisation of it: a sidecar re-encoded with
+  // different key order is the same document and must hash the same, and one from another run
+  // must not.
+  let readbackBytes = null;
   if (readbackPath) {
-    try { readback = JSON.parse(fs.readFileSync(readbackPath, 'utf8')); } catch (err) {
+    try {
+      readbackBytes = fs.readFileSync(readbackPath, 'utf8');
+      readback = JSON.parse(readbackBytes);
+    } catch (err) {
       readbackError = (err && err.message) || 'unreadable';
+      readbackBytes = null;
     }
   }
 
@@ -441,6 +450,12 @@ async function runChain({ prove = null } = {}) {
     exitCode: continuity.continuous ? exitCode : 1,
     correlation: producedCorrelation,
     continuity,
+    // Carried out so the evidence root can bind them: the executor attestation this run sealed,
+    // and the provider readback's exact bytes. Neither is republished in the artifact, and a
+    // digest is how a token that does not travel can still be bound to the run that made it.
+    attestationToken: (authSec && authSec.evidence && typeof authSec.evidence.attestation === 'string')
+      ? authSec.evidence.attestation : null,
+    readbackBytes,
   };
 }
 
