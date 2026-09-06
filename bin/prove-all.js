@@ -701,6 +701,57 @@ function check(file) {
     }
   }
 
+  // ── THE AUTHORIZATION VERDICT, QUOTED (1459) ────────────────────────────────────────────
+  //
+  // Every line above reports ONE token. None of them says whether this artifact adds up to an
+  // authorized, committed change — and a reader assembling that sentence from four lines is the
+  // failure mode this whole thread has been closing. The core predicate answers it, in the same
+  // vocabulary the guard and conformance print.
+  //
+  // MEASURED, and it shapes what can honestly be asked: a prove artifact carries the receipt, the
+  // grant and the evidence root, but NOT the executor attestation — that lived in the panels'
+  // evidence, which the artifact does not republish. So `executor_attestation` is not required
+  // here; asking for it would report COMMIT_UNPROVEN on every honest artifact, which says
+  // something about this surface and nothing about the run. What IS asked is the pair this
+  // artifact can actually establish, and the state is printed either way.
+  {
+    const { verifiedExecutionBinding } = require(path.join(REPO, 'packages', 'verifier-core', 'verified-execution-binding.js'));
+    const iss = artifact.issuance || {};
+    const issuerKeys = (() => {
+      try {
+        const reg = JSON.parse(fs.readFileSync(
+          path.join(DEMO, 'fixtures', 'recorded-authorize', 'issuer-keys.json'), 'utf8',
+        ));
+        return new Map((reg.keys || [])
+          .filter((k) => k && k.kid && k.public_key_pem)
+          .map((k) => [k.kid, {
+            publicKey: crypto.createPublicKey(k.public_key_pem),
+            status: k.status || 'active', retired_at: null, compromised_at: null,
+          }]));
+      } catch (_) { return null; }
+    })();
+    const g = iss.grant || {};
+    const at = Date.parse(g.not_before || g.iat || artifact.started_at);
+    const b = verifiedExecutionBinding({
+      receipt: { verified: artifact.transcript_verifies === true },
+      grant: {
+        token: iss.execution_grant || '',
+        keyring: issuerKeys,
+        expectedKid: null,
+        ...(Number.isFinite(at) ? { now: at + 1000 } : {}),
+      },
+      evidenceRoot: artifact.evidence_root
+        ? { artifact, executorKey: publicKey } : null,
+      committed: artifact.verdict === 'PASS',
+      required: ['issuer_grant', 'one_run_root'],
+    });
+    line(`authorization        : ${b.state}`);
+    for (const sf of b.shortfalls) line(`  - ${sf}`);
+    if (requireEvidenceRoot && !b.authorized_and_committed) {
+      mismatches.push(`assurance: the authorization binding is ${b.state}`);
+    }
+  }
+
   // THE CORRELATION SIGNATURE. Measured 2026-09-06 and it was the one slot this path skipped:
   // mutating correlation.signature left `--check` at exit 0 while every other token was refused.
   // The mirror of 1423 — conformance verified ONLY the correlation, this verified everything BUT
