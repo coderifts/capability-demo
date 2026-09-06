@@ -16,7 +16,7 @@
     "prove:all": "node bin/prove-all.js",
     "prove:check": "node bin/prove-all.js --check",
     "check:packed": "node scripts/check-packed-sample.js",
-    "prepublishOnly": "node scripts/check-packed-sample.js"
+    "prepublishOnly": "npm run test:all && node scripts/check-packed-sample.js"
   },
   "engines": {
     "node": ">=20"

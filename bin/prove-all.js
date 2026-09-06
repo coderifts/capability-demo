@@ -565,6 +565,9 @@ artifact around it is internally consistent with what was signed.
  * verification runs inside the same trap POINT 10 uses.
  */
 function check(file) {
+  // Opt-in, and named in the output either way — a flag whose effect is invisible is a flag
+  // nobody can tell they forgot.
+  const requireEvidenceRoot = process.argv.includes('--require-evidence-root');
   let artifact;
   try {
     artifact = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -682,6 +685,20 @@ function check(file) {
   } else {
     line('evidence root        : ABSENT — this capture predates cr.evidence.root.v1, so nothing');
     line('                       binds its tokens to one run; individually authentic is all it says');
+    // ── ASSURANCE MODE (1448) ─────────────────────────────────────────────────────────────
+    //
+    // MEASURED: `--check` on the shipped sample reads "evidence root ABSENT", "artifact verdict
+    // PASS", exit 0. Readable is right — a legacy artifact is still evidence. Passing an ASSURANCE
+    // check is not: "one run" was never established, and exit 0 is the sentence "nothing here
+    // needs your attention".
+    //
+    // So the artifact stays readable and the ASSURANCE reading is opt-in and explicit. Default-off
+    // because turning it on refuses every capture made before the root existed, and that is a
+    // decision about what this command asserts, not a bug fix.
+    if (requireEvidenceRoot) {
+      mismatches.push('assurance: --require-evidence-root was given and this artifact carries no '
+        + 'cr.evidence.root.v1, so its tokens are not shown to be one run');
+    }
   }
 
   // THE CORRELATION SIGNATURE. Measured 2026-09-06 and it was the one slot this path skipped:
