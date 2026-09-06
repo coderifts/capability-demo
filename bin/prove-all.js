@@ -596,6 +596,19 @@ function check(file) {
     if (!ev.ok) mismatches.push('POINT 1 server grant did not verify GRANT_CURRENT at iat');
   }
 
+  // THE CORRELATION SIGNATURE. Measured 2026-09-06 and it was the one slot this path skipped:
+  // mutating correlation.signature left `--check` at exit 0 while every other token was refused.
+  // The mirror of 1423 — conformance verified ONLY the correlation, this verified everything BUT
+  // it. Two verifiers, complementary blind spots, and either one alone reads as thorough.
+  //
+  // Rebuilt from the fields rather than trusting `correlation_hash`, same as the chain does.
+  if (artifact.correlation) {
+    const { verifyCorrelation } = require(path.join(DEMO, 'src', 'contract-correlation.js'));
+    const cv = verifyCorrelation(artifact.correlation, publicKey);
+    line(`correlation signature: ${cv.valid ? 'VALID' : `INVALID (${cv.reason || 'does not verify'})`}`);
+    if (!cv.valid) mismatches.push('the correlation signature does not verify');
+  }
+
   // AUTHORIZATION CONTINUITY, from the recorded block — RE-DERIVED, not echoed.
   //
   // 1413 measured that `--check` printed nothing about the one property the chain exists to

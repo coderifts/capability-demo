@@ -65,6 +65,35 @@ describe('prove.yml — the copy-paste CI snippet', () => {
     assert.deepEqual((art.points || []).filter((p) => p.state === 'MODELLED').map((p) => p.n), []);
   });
 
+  it('--check refuses a mutation of EVERY signed token, correlation included', () => {
+    // 1423, the mirror half. Conformance verified only the correlation and accepted a mutated
+    // grant; this path verified everything BUT the correlation and accepted a mutated one. Each
+    // reads as thorough on its own, which is why both needed a matrix rather than a spot check.
+    const os = require('node:os');
+    const flip = (x) => x.slice(0, -1) + (x[x.length - 1] === 'A' ? 'B' : 'A');
+    const MUTATIONS = {
+      execution_grant: (t) => { t.issuance.execution_grant = flip(t.issuance.execution_grant); },
+      chain_receipt: (t) => { t.issuance.chain_receipt = flip(t.issuance.chain_receipt); },
+      transcript_token: (t) => { t.transcript_token = flip(t.transcript_token); },
+      correlation_signature: (t) => { t.correlation.signature = flip(t.correlation.signature); },
+    };
+    const base = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prove-mut-'));
+    try {
+      for (const [name, mutate] of Object.entries(MUTATIONS)) {
+        if (name === 'correlation_signature' && !base.correlation) continue;
+        const t = JSON.parse(JSON.stringify(base));
+        mutate(t);
+        const f = path.join(tmp, `${name}.json`);
+        fs.writeFileSync(f, JSON.stringify(t));
+        const r = spawnSync(process.execPath, [BIN, '--check', f, '--keys', KEYS], { encoding: 'utf8', cwd: ROOT });
+        assert.equal(r.status, 1, `a mutated ${name} must not pass --check:\n${r.stdout}${r.stderr}`);
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('--check REPORTS the recorded continuity, and refuses a file that misstates it', () => {
     // The line a reader actually sees. It is re-derived from the three identities rather than read
     // off `continuous`, so this also proves the report is a check and not an echo.
