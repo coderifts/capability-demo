@@ -17,8 +17,8 @@
     {
       "path": "issuance.json",
       "role": "positive",
-      "sha256": "018c28aba2752ecdd4720d519e2e2d2ed28db65b8738f34ba2b5a90c099d874c",
-      "bytes": 2877,
+      "sha256": "f6bb01b44fd38930b5dbf432dce20b2e8d0b4de1aa887243c3b927197d9a9e65",
+      "bytes": 4129,
       "source": "live authorize 2026-09-05"
     },
     {
