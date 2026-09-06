@@ -58,6 +58,23 @@ function assessContinuity({ issuance, consumedJti, attestationJti, correlation }
     ? issuance.grant.scope_hash
     : null;
 
+  // WHY IT CANNOT BE CONTINUOUS WITHOUT A LIVE ISSUER — said here rather than left to be inferred.
+  //
+  // A recorded issuance names a real server authorize, and POINT 1 is right to report it. But a
+  // cr.exec.v2 ATOMIC grant binds sha256 of a nonce THE EXECUTOR MINTED, and the preimage is
+  // recorded nowhere: the issuer only ever saw the hash, and the raw nonce lived in the run that
+  // asked for it. MEASURED against the vendored fixture — a replay is refused
+  // STATE_NONCE_REQUIRED / nonce_preimage_absent, and a guessed nonce STATE_NONCE_UNBOUND.
+  //
+  // So this failure is not a wiring mistake to be fixed; it is what challenge-first MEANS. The
+  // message says so, because "the executor consumed a different grant" invites a reader to look
+  // for a bug that is not there.
+  const recordedNote = issuance && issuance.source === 'recorded'
+    ? ' The issuance is RECORDED: a challenge-first grant binds a nonce that exists only in the run '
+      + 'it was minted for, so no replay can consume it. Continuity is a LIVE-only measurement — '
+      + 'set CODERIFTS_API_KEY and the same chain reports it.'
+    : '';
+
   const identities = {
     issued_jti: issuedJti,
     consumed_jti: consumedJti || null,
@@ -97,7 +114,7 @@ function assessContinuity({ issuance, consumedJti, attestationJti, correlation }
     if (got !== want) {
       return {
         continuous: false, code: NOT_CONTINUOUS, reason,
-        detail: `${what}: issued ${want.slice(0, 12)}, saw ${String(got).slice(0, 12)}.`,
+        detail: `${what}: issued ${want.slice(0, 12)}, saw ${String(got).slice(0, 12)}.${recordedNote}`,
         identities,
       };
     }

@@ -1,24 +1,27 @@
 {
   "schema": "cr.prove.authorize-issuance.v1",
-  "captured_at": "2026-09-06T06:23:37Z",
+  "captured_at": "2026-09-06T09:46:36.625Z",
   "endpoint": "https://app.coderifts.com/api/v1/preflight",
-  "producer": "CodeRifts authorize (live POST, include_execution_grant)",
+  "producer": "CodeRifts authorize (live POST, grant_version v2, challenge-first)",
   "decision": "ALLOW",
   "execution_action": "CONTINUE",
-  "decision_id": "dec_a3b7cfad-30e9-4c66-81ca-60be2a7c9e51",
+  "decision_id": "dec_dc002942-3caf-4d14-9342-2d5c93910415",
   "verdict_fingerprint": "sha256:e37a46ff0c4e8a0cb0d65e91fffcad14de21ccbae6f855d4960b9a02a60eec49",
-  "execution_grant": "eyJ2IjoiY3IuZXhlYy52MSIsImtpZCI6IjIwMjYtMDctazEiLCJyZWNlaXB0X2RpZ2VzdCI6InNoYTI1Njo2NTdjYTc1ZTI2NzA5ODQzN2MxMzI5NmEyNTdmMDI4MTljOTY5YTVjMDgzZmJkNWM4MmM5YmJiMTRhMTk3NjY3Iiwic2NvcGVfaGFzaCI6InNoYTI1NjoyNjI5NzM2NmY0NTk3ZGVhNjc3YjEyMGIwYmRiMzE5MDFjNjZiYzg0N2EwNDUyYmEzMTUxM2ZhNWI5OThkMDhiIiwiYXVkaWVuY2UiOiJ2Ojc5Yzc0NDFkMDU2NiIsIm9wZXJhdGlvbiI6InB1Ymxpc2giLCJ0YXJnZXRfaWQiOiJzaGEyNTY6NmY2OTRjNTFkZjhiZjIyZjU5ZDZmNzhmM2VlYjE0ZjIxYTFiMDBiYjViODA4YmU5ZmQzZDQ4ZWQ2YzgyNWJhYiIsImp0aSI6ImQxYjc4ZjlhLTQzNzktNDUwNi1iYzU5LWM0YzJjZjM5YzVmNSIsImlhdCI6IjIwMjYtMDktMDZUMDY6MjE6NTlaIiwiZXhwIjoiMjAyNi0wOS0wNlQwNjoyNjo1OVoifQ.ye7se1IzFhyCsjd3H2qpPOepngIEC6rv8UNLoxEo4IsdTjb9acZBjYylXX7QCJ0r9fHGRbIyApamA0G_v_7cAw",
-  "chain_receipt": "eyJ2Ijo0LCJraWQiOiIyMDI2LTA3LWsxIiwiZnAiOiJzaGEyNTY6ZTM3YTQ2ZmYwYzRlOGEwY2IwZDY1ZTkxZmZmY2FkMTRkZTIxY2NiYWU2Zjg1NWQ0OTYwYjlhMDJhNjBlZWM0OSIsInByZXYiOiJudWxsIiwiY2FsbGVyIjoiYnVuZGxlIiwidHMiOiIyMDI2LTA5LTA2VDA2OjIxOjU5LjczNVoiLCJyZWciOiIiLCJpciI6IiIsImV4cGlyZXNfYXQiOiIyMDI2LTA5LTA2VDEwOjIxOjU5WiIsImJoIjoic2hhMjU2OjdlZWNlMjk1NjViMGQzMjViODJjMWI2NmQ3YTMwNzM0MjFjODE2MzIyYzI4NjZkMWEyMjBjMzcyNzA3MjJjM2IifQ.j7BqNceOz0V8dQf78ixlCa3G_rPVCZO6y--FSgStXqNhaKYfpRiasCxbZz-KgS2fU6Kjb-ltMSptfyCKlJ3EAQ",
+  "execution_grant": "eyJ2IjoiY3IuZXhlYy52MiIsImtpZCI6IjIwMjYtMDctazEiLCJncmFudF9pZCI6ImRiNmMzOWMyLTFjZDgtNGU3Yi05ZGQ0LWMwYTUwMmM2ZTJjYSIsInJlY2VpcHRfaGFzaCI6InNoYTI1Njo3YmNmMTEwMzU3NzU0ZDVhNzMwNWQ5NDgwZDdmMDk2MTViYzJmODBiMjNkNjUyMGRlYmEzODkwNzdkNmU2YWRmIiwidGVuYW50X2lkIjoiZGVmYXVsdCIsImV4ZWN1dG9yX2lkIjoiZGVtby1kZXBsb3ltZW50IiwiYWRhcHRlcl9pZCI6InBvc3RncmVzLmF0b21pYyIsIm9wZXJhdGlvbiI6InB1Ymxpc2giLCJ0YXJnZXRfdXJpIjoiZGI6Ly9kZW1vLWRlcGxveW1lbnQvYXJ0aWNsZXMiLCJleHBlY3RlZF9zdGF0ZV90b2tlbiI6InNoYTI1Njo4MTQ2NDJlNDkxYjYxZWQxYTA2NjZlYzZkZWM1YjM4Mjg3MWUyNDZmZmU1NDU0MDNmYjA1MmYyYTlhNzI1Yzg4IiwiYWZ0ZXJfcGF5bG9hZF9oYXNoIjoic2hhMjU2OjM0NzVlNzRkMjY1NmU0M2IzMjUyNmFmN2U5MGRkYWI3ZmVmMjkyY2QzOGNiYmY0ZjgzNjVjNTdkNTBmZmQ1NWQiLCJub25jZV9oYXNoIjoic2hhMjU2OjIwMTU1NDcyNDYwY2E2ZmY5N2JkNWQ1ZTkyMzgyMDI1MGQxODFiNzQ1ZmVjZTZlMzY3NzRmZmQ4ZjlhY2MwYTgiLCJwb2xpY3lfaGFzaCI6InNoYTI1NjplM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1IiwiYXVkaWVuY2VfaGFzaCI6InNoYTI1NjozZWRhZjM1MjYxNjYzODM1OTZiYWYzODA2Y2FjY2QwNjM2MTBjMDIzNmVkY2M3ZGM3MTk0YjQ2MGYyZTE4ODAxIiwibm90X2JlZm9yZSI6IjIwMjYtMDktMDZUMDk6NDY6MzdaIiwiZXhwaXJlc19hdCI6IjIwMjYtMDktMDZUMDk6NTE6MzdaIiwibWF4X2F0dGVtcHRzIjoxfQ.tMTTd4N6rkWF6PIZgGcHXwLLMnf61BLpTWIREszmL0aTIPEgBTojyjadwH6-DU8RLLQXRUVEqYLnLgzWdKdECw",
+  "chain_receipt": "eyJ2Ijo0LCJraWQiOiIyMDI2LTA3LWsxIiwiZnAiOiJzaGEyNTY6ZTM3YTQ2ZmYwYzRlOGEwY2IwZDY1ZTkxZmZmY2FkMTRkZTIxY2NiYWU2Zjg1NWQ0OTYwYjlhMDJhNjBlZWM0OSIsInByZXYiOiJudWxsIiwiY2FsbGVyIjoiYnVuZGxlIiwidHMiOiIyMDI2LTA5LTA2VDA5OjQ2OjM3LjUwOFoiLCJyZWciOiIiLCJpciI6IiIsImV4cGlyZXNfYXQiOiIyMDI2LTA5LTA2VDEzOjQ2OjM3WiIsImJoIjoic2hhMjU2OmRiOGFhYTIxMGU4OTk1ZTkwZWJlNGYwNDA2ODViZjkxMDQ5OWYxMzBkMDExYjllYmQwOWQ1MmI1NTdkMWJmZjEifQ.14aFIeXD98vE5EpD_ZW_R6_uAeLnBAL15zRWJz5N7Mpa3-KuVKY8czzVDmnvYsUcD_l_gQFZqlq9SDxF9BL2Cg",
   "grant": {
-    "v": "cr.exec.v1",
+    "v": "cr.exec.v2",
     "kid": "2026-07-k1",
-    "jti": "d1b78f9a-4379-4506-bc59-c4c2cf39c5f5",
-    "iat": "2026-09-06T06:21:59Z",
-    "exp": "2026-09-06T06:26:59Z",
+    "grant_id": "db6c39c2-1cd8-4e7b-9dd4-c0a502c6e2ca",
+    "not_before": "2026-09-06T09:46:37Z",
+    "expires_at": "2026-09-06T09:51:37Z",
     "operation": "publish",
-    "target_id": "sha256:6f694c51df8bf22f59d6f78f3eeb14f21a1b00bb5b808be9fd3d48ed6c825bab",
-    "scope_hash": "sha256:26297366f4597dea677b120b0bdb31901c66bc847a0452ba31513fa5b998d08b",
-    "receipt_digest": "sha256:657ca75e267098437c13296a257f02819c969a5c083fbd5c82c9bbb14a197667"
+    "target_uri": "db://demo-deployment/articles",
+    "receipt_hash": "sha256:7bcf110357754d5a7305d9480d7f09615bc2f80b23d6520deba389077d6e6adf",
+    "expected_state_token": "sha256:814642e491b61ed1a0666ec6dec5b382871e246ffe545403fb052f2a9a725c88",
+    "nonce_hash": "sha256:20155472460ca6ff97bd5d5e923820250d181b745fece6e36774ffd8f9acc0a8",
+    "after_payload_hash": "sha256:3475e74d2656e43b32526af7e90ddab7fef292cd38cbbf4f8365c57d50ffd55d",
+    "scope_hash": "sha256:3475e74d2656e43b32526af7e90ddab7fef292cd38cbbf4f8365c57d50ffd55d"
   },
   "request": {
     "preflight_mode": "authorize",
@@ -39,8 +42,8 @@
     ]
   },
   "does_not_prove": [
-    "that a current authorize call would ALLOW the same change today — issuance was live at captured_at, not re-verified against the live server",
-    "that the grant is currently executable — exp is short-lived; offline verify uses now=iat to check the signature as of issuance",
-    "that this grant authorizes a mutation on the local demo executor — it is a CodeRifts server grant (kid 2026-07-k1), not a DEMO-KEY data-plane grant"
+    "that a current authorize call would ALLOW the same change today \u2014 issuance was live at captured_at, not re-verified against the live server",
+    "that this grant can be REPLAYED \u2014 it is a cr.exec.v2 ATOMIC grant binding sha256 of a state nonce the executor minted, and the preimage is recorded nowhere (the issuer only ever saw the hash). Measured: replaying it is refused STATE_NONCE_REQUIRED, and a guessed nonce STATE_NONCE_UNBOUND. Authorization continuity is therefore a LIVE-only measurement; this fixture records that an authorize happened, never that this run consumed it",
+    "that this grant authorizes a mutation on the local demo executor \u2014 it is a CodeRifts server grant (kid 2026-07-k1), not a DEMO-KEY data-plane grant"
   ]
 }

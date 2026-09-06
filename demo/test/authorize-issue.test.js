@@ -18,17 +18,38 @@ const {
 const { issue } = require('../issue-grant');
 
 describe('authorize issuance — recorded server grant', () => {
-  it('the recorded grant is cr.exec.v1 signed by the well-known kid, not DEMO-KEY', () => {
+  it('the recorded grant is a cr.exec.v2 ATOMIC grant from the well-known kid, not DEMO-KEY', () => {
+    // RE-PINNED to v2. The fixture used to hold a cr.exec.v1 BEARER grant, which no ATOMIC
+    // executor could ever consume — that mismatch is what kept the chain carrying two grants.
+    // It now holds the same challenge-first grant the live path issues, so the recorded and live
+    // shapes agree instead of quietly differing.
     const rec = loadRecorded();
     const keys = loadIssuerKeys();
     assert.equal(rec.decision, 'ALLOW');
     assert.equal(rec.execution_action, 'CONTINUE');
     assert.match(rec.decision_id, /^dec_/);
     assert.match(rec.verdict_fingerprint, /^sha256:[0-9a-f]{64}$/);
-    assert.equal(rec.grant.v, 'cr.exec.v1');
+    assert.equal(rec.grant.v, 'cr.exec.v2');
     assert.equal(rec.grant.kid, keys.kid);
     assert.notEqual(rec.grant.kid, DEMO_KID);
     assert.equal(rec.grant.kid, '2026-07-k1');
+    // ATOMIC, not bearer: nonce_hash is a real hash and not the issuer's sha256('') filler.
+    assert.match(rec.grant.nonce_hash, /^sha256:[0-9a-f]{64}$/);
+    assert.notEqual(rec.grant.nonce_hash, `sha256:${crypto.createHash('sha256').update('').digest('hex')}`);
+  });
+
+  it('THE FIXTURE IS NOT REPLAYABLE, and says so — the nonce preimage exists nowhere', () => {
+    // The property that makes challenge-first worth having, pinned so nobody later "fixes" the
+    // env -u chain by teaching it to replay this grant. The issuer saw only sha256(nonce); the
+    // preimage lived in the run that minted it. Measured against the executor: a replay is
+    // refused STATE_NONCE_REQUIRED, a guessed nonce STATE_NONCE_UNBOUND.
+    const rec = loadRecorded();
+    assert.equal(rec.grant.state_nonce, undefined, 'a v2 grant must never carry the preimage');
+    const doc = JSON.parse(fs.readFileSync(path.join(FIXTURE_DIR, 'issuance.json'), 'utf8'));
+    assert.ok(
+      doc.does_not_prove.some((l) => /REPLAYED/.test(l)),
+      'the fixture must state that it cannot be replayed',
+    );
   });
 
   it('offline verify is GRANT_CURRENT at iat against the pinned keyring (no network)', () => {
@@ -73,7 +94,10 @@ describe('authorize issuance — recorded server grant', () => {
       assert.doesNotMatch(issued.log, /DEMO-KEY/);
       const ev = evaluateIssuance(issued);
       assert.equal(ev.ok, true, JSON.stringify(ev.verify));
-      assert.equal(ev.jti, loadRecorded().grant.jti);
+      // v2 spells the grant id `grant_id`; `jti` is the v1 name. Asserting the v1 field alone
+      // compared a real id against `undefined` — which passed for as long as the fixture was v1.
+      const g = loadRecorded().grant;
+      assert.equal(ev.jti, g.jti || g.grant_id);
     } finally {
       if (prev !== undefined) process.env.CODERIFTS_API_KEY = prev;
     }

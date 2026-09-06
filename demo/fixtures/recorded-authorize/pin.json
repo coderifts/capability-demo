@@ -4,21 +4,21 @@
   "producer": {
     "name": "app.coderifts.com",
     "repo": "https://app.coderifts.com",
-    "version": "capture:2026-09-05T15:21:21Z",
+    "version": "capture:2026-09-06T09:46:36.625Z",
     "digest": "kid:2026-07-k1",
     "generator": "POST /api/v1/preflight include_execution_grant"
   },
   "subject": {
     "name": "execution_grant",
-    "version": "cr.exec.v1",
-    "digest": "sha256:018c28aba2752ecdd4720d519e2e2d2ed28db65b8738f34ba2b5a90c099d874c"
+    "version": "cr.exec.v2",
+    "digest": "sha256:0bfb80b23635c805e79d9c7f01ba116f108e9a652254059e09b8f01f4af34a2a"
   },
   "artifacts": [
     {
       "path": "issuance.json",
       "role": "positive",
-      "sha256": "f6bb01b44fd38930b5dbf432dce20b2e8d0b4de1aa887243c3b927197d9a9e65",
-      "bytes": 4129,
+      "sha256": "fda3966893e23748769496e5a189cc9ad1aac9d0ecfe6459ed9d26a17c45edf5",
+      "bytes": 5292,
       "source": "live authorize 2026-09-05"
     },
     {
