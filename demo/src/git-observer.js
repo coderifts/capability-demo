@@ -173,6 +173,12 @@ function observeGitTarget(input) {
     before_commit,
     before_source,
     observed_commit,
+    // THE SAME VALUE UNDER THE READBACK SIDECAR'S FIELD NAME. Every consumer of a readback in this
+    // ecosystem reads `commit` (the provider readback carries it; the correlation compares against
+    // it), so an observation that only said `observed_commit` would have needed a translation
+    // layer somewhere — and a translation nobody sees is where a mismatch hides. It is an alias,
+    // never a second source: both are the one `rev-parse` above.
+    commit: observed_commit,
     contract_path: contractPath,
     contract_blob_digest,
     contract_bytes_len,

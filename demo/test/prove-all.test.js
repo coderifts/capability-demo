@@ -207,7 +207,10 @@ describe('the runner is composition, not a second implementation', () => {
     }, (s) => out.push(s));
     assert.equal(out[0], 'POINT|1|authorize|PROVEN|OK|d\n');
     assert.equal(out[1], 'TRANSCRIPT|PASS|VERIFIES|sha256:abc\n');
-    assert.match(out[2], /^SUMMARY\|1 proven\|0 carried \(provider readback, unsigned\)\|0 modelled\|1\/1 points OK\n$/);
+    // UPDATED, NOT LOOSENED. "Byte-identical" is about a refactor not moving the output; adding a
+    // fourth state class to the chain is not a refactor, so the pin records the new line in full
+    // rather than being relaxed to a substring match that would stop catching drift.
+    assert.match(out[2], /^SUMMARY\|1 proven\|0 observed \(target-state transition, trusted-executor scope\)\|0 carried \(provider readback, unsigned\)\|0 modelled\|1\/1 points OK\n$/);
   });
 });
 

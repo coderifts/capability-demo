@@ -65,6 +65,20 @@ const MODELLED = 'MODELLED';
  * separately.
  */
 const PROVIDER_READBACK = 'PROVIDER_READBACK';
+/**
+ * A FOURTH state, for the bare-Git target — and it is not PROVEN either, for a different reason.
+ *
+ * Here a real transition really was observed: a ref moved from BASE to the authorized commit, and
+ * a process that could not write read the object database afterwards and found it. That is
+ * strictly more than PROVIDER_READBACK, which is an unsigned document from elsewhere.
+ *
+ * It is still not PROVEN, because the executor and the observer are the same machine and the same
+ * OS user. What separates them is the target's mode bits, not two identities and not a third
+ * party. Calling that PROVEN would let a reader carry it home as "a provider merged our pull
+ * request", which is PATH B and did not happen. The name says exactly what was shown:
+ * TARGET_STATE_TRANSITION_PROVEN — proof_scope TRUSTED_EXECUTOR, provider_witness NOT_APPLICABLE.
+ */
+const TARGET_STATE_TRANSITION_PROVEN = 'TARGET_STATE_TRANSITION_PROVEN';
 
 const points = [];
 const point = (n, name, state, ok, detail) => {
@@ -138,7 +152,15 @@ function attestationPoint({ attestation, jti, deploymentId = '' } = {}) {
  *   umbrella one run rather than two: without it this calls runProve itself, as it always did.
  * @returns {Promise<{points: object[], prove: object, transcriptOk: object, exitCode: number}>}
  */
-async function runChain({ prove = null } = {}) {
+/**
+ * @param {object}      o
+ * @param {object|null} o.prove          a completed prove run, so nothing is re-derived
+ * @param {object|null} o.gitTransition  the bare-Git target's result (demo/src/git-target.js).
+ *   When it RAN, POINT 8 is filled from the observed transition and the readback file is not
+ *   consulted at all. When it is absent — every legacy caller, and the tests that exercise the
+ *   readback grading directly — the CODERIFTS_PROVIDER_READBACK path below runs unchanged.
+ */
+async function runChain({ prove = null, gitTransition = null } = {}) {
   // ── THE LEFT HALF ─────────────────────────────────────────────────────────
   // One call. Its transcript is the input to everything below; nothing here
   // re-derives a fact prove.js already signed.
@@ -298,14 +320,31 @@ async function runChain({ prove = null } = {}) {
   }
 
   let producedCorrelation = null;
-  const readbackPath = process.env.CODERIFTS_PROVIDER_READBACK || null;
+  let targetStateTransition = null;
+  // THE GIT TARGET TAKES PRECEDENCE over the readback file, and the precedence is the point of
+  // this round. A readback is a document handed to the run; a transition is a state this run
+  // caused and then had read back by a process that could not cause it. When both are available
+  // the weaker evidence must not be what POINT 8 reports.
+  const gt = gitTransition && gitTransition.ran === true ? gitTransition : null;
+  const readbackPath = gt ? null : (process.env.CODERIFTS_PROVIDER_READBACK || null);
   let readback = null;
   let readbackError = null;
   // THE RAW BYTES, kept alongside the parsed object. The evidence root binds the readback by the
   // sha256 of what was actually read, not of a re-serialisation of it: a sidecar re-encoded with
   // different key order is the same document and must hash the same, and one from another run
   // must not.
-  let readbackBytes = null;
+  // In a git-target run these are the observer's EXACT stdout bytes. The evidence root binds this
+  // slot, so binding them here is what stops an observation from another run being paired with
+  // this artifact — the same defence the provider readback gets, applied to a stronger document.
+  //
+  // THE SLOT IS NAMED `provider_readback` IN THE CORE'S CLOSED VOCABULARY, and this is not a
+  // provider observation. The set of slots is sealed by the root's signature and cannot be
+  // extended from here without forking the vendored core into four consumers. What prevents the
+  // name from becoming a claim is the document itself: it carries observer_mode read_only,
+  // observation_source git-object-database, and no provider field at all, and POINT 8 states
+  // provider_witness NOT_APPLICABLE. A `target_observation` slot in the core is the clean fix and
+  // is a cross-repository change, not this one.
+  let readbackBytes = gt ? gt.observationBytes : null;
   if (readbackPath) {
     try {
       readbackBytes = fs.readFileSync(readbackPath, 'utf8');
@@ -316,7 +355,77 @@ async function runChain({ prove = null } = {}) {
     }
   }
 
-  if (readback || readbackError) {
+  if (gt) {
+    // ── POINT 8, FROM THE TARGET ─────────────────────────────────────────────────────────────
+    //
+    // The grading already happened inside the target module, against expectations the observer
+    // never saw. What happens here is the BINDING: the same signed correlation the merge path
+    // emits, over the same scope hash the server authorized, with `readback_commit` taken from the
+    // observation rather than from a file. Without it the transition would be a true statement
+    // this run could not tie to the grant it was issued under.
+    const g = gt.graded || {};
+    const proven = g.state === 'PROVEN_BY_TRUSTED_EXECUTOR';
+    const scopeHash = governedScopeHash(
+      out.issuance && out.issuance.grant ? out.issuance.grant.v : null,
+    );
+    let corr = null;
+    if (proven) {
+      const built = correlate({
+        scopeHash,
+        // THE COMMIT IN THE TARGET, not in this producer's checkout. The merge path correlates the
+        // contract file's own commit HERE because a provider readback names a commit in THIS
+        // repository. The transition names the authorized commit in the object database that was
+        // actually mutated, and the two must not be conflated: same bytes, same path, different
+        // repositories. `contract_blob_digest` is what ties them, and the grader checks it.
+        contractCommit: { ok: true, commit: gt.expected.contract_commit, path: gt.expected.contract_path },
+        readback: { commit: gt.observation.commit },
+        privateKey: executorPrivateKey(),
+      });
+      if (built.ok && verifyCorrelation(built, executorPublicKey()).valid) corr = built;
+    }
+    if (corr) producedCorrelation = corr;
+
+    // Carried whole so the offline profile can re-check every correlation from the artifact alone.
+    // `expected` is what the grant bound; `observation` is what the separate process read.
+    targetStateTransition = {
+      state: g.state,
+      proof_scope: g.proof_scope || 'TRUSTED_EXECUTOR',
+      provider_witness: g.provider_witness || 'NOT_APPLICABLE',
+      externally_witnessed: g.externally_witnessed === true,
+      target_kind: g.target_kind || 'git_bare_ref',
+      expected: gt.expected,
+      observation: gt.observation,
+      checks: g.checks || [],
+      failures: g.failures || [],
+      grant: gt.grant || null,
+      state_challenge: gt.state_challenge || null,
+      nonce_consumed: gt.nonce_consumed === true,
+      roles: gt.roles || [],
+      does_not_prove: g.does_not_prove || [],
+    };
+
+    point(8, 'target_state_transition', proven ? TARGET_STATE_TRANSITION_PROVEN : MODELLED,
+      proven && !!corr,
+      proven && corr
+        ? `the governed ref ${gt.expected.ref} moved ${String(gt.expected.base).slice(0, 12)} → `
+          + `${String(gt.expected.contract_commit).slice(0, 12)} under a signed cr.exec.v2 grant, and a `
+          + 'SEPARATE PROCESS that cannot write read the object database afterwards and found it '
+          + `there. Four correlations hold: the ref carries the authorized commit; the bytes at it `
+          + `hash to ${String(gt.expected.contract_blob_digest).slice(0, 19)}…, which is what the grant `
+          + 'bound AND what the preflight payload hashes to; the ref moved FROM the base the grant '
+          + 'was issued against; and the authorized commit has exactly one parent, that base. '
+          + `The binding is SIGNED (${corr.correlation_hash.slice(0, 19)}…). TRUSTED-EXECUTOR SCOPE: `
+          + 'the executor and the observer are one machine and one OS user, separated by the '
+          + 'target\'s mode bits — NOT by two identities, and NOT by any third party. No provider '
+          + 'witnessed this and no pull request was merged (that is PATH B). The merge_evidence '
+          + 'slot stays absent for exactly that reason: there is no provider merge evidence, and '
+          + 'this point does not claim there is.'
+        : proven
+          ? 'the transition graded PROVEN_BY_TRUSTED_EXECUTOR but the correlation did not bind it '
+            + 'to the authorized scope — an observed state nothing ties to a grant is not a proof'
+          : `the target-state transition is ${g.state}: `
+            + `${(g.failures || []).join('; ') || 'unstated'}`);
+  } else if (readback || readbackError) {
     const graded = readbackError
       ? { valid: false, status: 'READBACK_UNREADABLE', reason: readbackError }
       : verifyProviderReadback(readback);
@@ -450,6 +559,8 @@ async function runChain({ prove = null } = {}) {
     exitCode: continuity.continuous ? exitCode : 1,
     correlation: producedCorrelation,
     continuity,
+    // The bare-Git target's whole record, or null when the run had none.
+    targetStateTransition,
     // Carried out so the evidence root can bind them: the executor attestation this run sealed,
     // and the provider readback's exact bytes. Neither is republished in the artifact, and a
     // digest is how a token that does not travel can still be bound to the run that made it.
@@ -476,9 +587,14 @@ function renderChain({ points: pts, prove: out, transcriptOk, continuity }, writ
   const proven = pts.filter((p) => p.state === PROVEN).length;
   const modelled = pts.filter((p) => p.state === MODELLED).length;
   const carried = pts.filter((p) => p.state === PROVIDER_READBACK).length;
-  // The third class is NAMED in the summary. Printing "8 proven, 0 modelled" over nine points
-  // leaves the ninth unaccounted for, and a reader is entitled to see which column it landed in.
-  write(`SUMMARY|${proven} proven|${carried} carried (provider readback, unsigned)|`
+  const observed = pts.filter((p) => p.state === TARGET_STATE_TRANSITION_PROVEN).length;
+  // EVERY CLASS IS NAMED. Printing "8 proven, 0 modelled" over nine points leaves the ninth
+  // unaccounted for, and a reader is entitled to see which column it landed in — which is how the
+  // fourth class was caught: the first git-target run summarised eight of nine and dropped the
+  // one point this whole round exists to fill. A summary that silently omits a state is a summary
+  // that can be made to say anything by inventing one.
+  write(`SUMMARY|${proven} proven|${observed} observed (target-state transition, trusted-executor `
+    + `scope)|${carried} carried (provider readback, unsigned)|`
     + `${modelled} modelled|${pts.filter((p) => p.ok).length}/${pts.length} points OK\n`);
 }
 
@@ -489,7 +605,8 @@ async function main() {
 }
 
 module.exports = {
-  main, runChain, renderChain, attestationPoint, PROVEN, MODELLED, PROVIDER_READBACK,
+  main, runChain, renderChain, attestationPoint,
+  PROVEN, MODELLED, PROVIDER_READBACK, TARGET_STATE_TRANSITION_PROVEN,
 };
 
 if (require.main === module) {

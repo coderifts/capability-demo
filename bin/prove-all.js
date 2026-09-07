@@ -262,6 +262,7 @@ async function runAll({ cwd = process.cwd() } = {}) {
     const { runProve, verifyProveTranscript, PROVE_V } = require(path.join(DEMO, 'prove.js'));
     const { runChain, renderChain } = require(path.join(DEMO, 'e2e-chain.js'));
     const { offlineReverify } = require(path.join(DEMO, 'src', 'offline-reverify.js'));
+    const { runGitTarget } = require(path.join(DEMO, 'src', 'git-target.js'));
     const { CEILING } = require(path.join(DEMO, 'bundle.js'));
 
     // ── PANELS 1–6, then POINTS 1–9, on ONE prove run ───────────────────────────────────────
@@ -284,18 +285,48 @@ async function runAll({ cwd = process.cwd() } = {}) {
     // [ISSUANCE] is already printed above by authorize-issue.js, with the capture timestamp and
     // the endpoint — a second line saying the same thing differently is worse than one line.
     // These two complete the split.
+    // ── THE BARE-GIT TARGET — BUILT, MUTATED AND READ BACK INSIDE THIS RUN ──────────────────
+    //
+    // This is what POINT 8 is filled from now. Not a file handed to the run: a throwaway bare
+    // repository created here, one ref update authorized by a signed cr.exec.v2 grant and
+    // performed as a compare-and-swap, then read back by a SEPARATE PROCESS that cannot write and
+    // is never told what it is about to find.
+    //
+    // It is bound to THIS run's authorization: the grant's `receipt_hash` is the digest of the
+    // same chain receipt the server grant was issued against, so a git grant from another run
+    // fails its own verification here rather than being noticed later.
+    //
+    // Set CODERIFTS_GIT_TARGET=0 to skip it — a run that skips it falls back to the readback file
+    // and POINT 8 grades exactly as it did before. `ran: false` is NOT_RUN, never a failure: an
+    // environment that cannot host a bare repository has not disproved anything.
+    const gitTargetEnabled = process.env.CODERIFTS_GIT_TARGET !== '0';
+    const gitTransition = gitTargetEnabled
+      ? runGitTarget({
+        receiptToken: (prove.issuance && prove.issuance.issued && prove.issuance.issued.chain_receipt)
+          || prove.token,
+        say: () => {},
+      })
+      : { ran: false, reason: 'CODERIFTS_GIT_TARGET=0 — the target was not built' };
+
     const readbackSupplied = !!process.env.CODERIFTS_PROVIDER_READBACK;
     line('');
     line('── phase split ────────────────────────────────────────────');
-    line(`[READBACK] ${readbackSupplied
-      ? `SUPPLIED — ${process.env.CODERIFTS_PROVIDER_READBACK} (captured elsewhere; this run reads bytes and reaches nothing)`
-      : 'ABSENT — no provider observation was supplied; POINT 8 stays modelled'}`);
+    line(`[TARGET]   ${gitTransition.ran
+      ? `BUILT AND OBSERVED — a bare repository created in this run; ${gitTransition.expected.ref} moved `
+        + `${gitTransition.expected.base.slice(0, 12)} → ${gitTransition.expected.contract_commit.slice(0, 12)}, `
+        + 'read back by a separate read-only process (trusted-executor scope; no provider witnessed it)'
+      : `NOT RUN — ${gitTransition.reason}`}`);
+    line(`[READBACK] ${gitTransition.ran
+      ? 'NOT CONSULTED — POINT 8 comes from the observed transition, not from a supplied file'
+      : readbackSupplied
+        ? `SUPPLIED — ${process.env.CODERIFTS_PROVIDER_READBACK} (captured elsewhere; this run reads bytes and reaches nothing)`
+        : 'ABSENT — no provider observation was supplied; POINT 8 stays modelled'}`);
     line('[VERIFY]   everything below is checked offline — POINT 10 proves the traps were live,');
     line('           and the correlation + scope recompute run inside them, not beside them');
 
     line('');
     line('── chain points 1–9 ───────────────────────────────────');
-    const chain = await runChain({ prove });
+    const chain = await runChain({ prove, gitTransition });
     renderChain(chain, (s) => process.stdout.write(s));
 
     // ── POINT 10 ────────────────────────────────────────────────────────────────────────────
@@ -436,6 +467,16 @@ async function runAll({ cwd = process.cwd() } = {}) {
       // The signed correlation (v, scope_hash, contract_commit, contract_path, readback_commit,
       // correlation_hash, signature) so a verifier can re-check the binding, not pin a sentence.
       ...(chain.correlation ? { correlation: chain.correlation } : {}),
+      // ── THE TARGET-STATE TRANSITION (POINT 8) ───────────────────────────────────────────
+      //
+      // What the grant bound, what a separate read-only process observed, and the grading of the
+      // two against each other — carried whole so an offline profile re-checks the correlations
+      // from this file rather than reading POINT 8's prose. The `parents` in `expected` are the
+      // one value here that was READ FROM THE OBJECT DATABASE AND RECORDED rather than being
+      // re-derivable downstream: a verifier holding no repository cannot re-read them, which the
+      // conformance profile states in its own does_not_prove.
+      ...(chain.targetStateTransition
+        ? { target_state_transition: chain.targetStateTransition } : {}),
       // ── cr.evidence.root.v1 — THE SET, SIGNED (1432) ────────────────────────────────────
       //
       // Every token below authenticates on its own. None of them can say they came from the SAME
@@ -476,9 +517,21 @@ async function runAll({ cwd = process.cwd() } = {}) {
     fs.writeFileSync(jsonPath, `${JSON.stringify(artifact, null, 2)}\n`);
     fs.writeFileSync(mdPath, renderMarkdown(artifact));
 
+    // THE READBACK SIDECAR — the observer's EXACT stdout, byte for byte. It is written rather than
+    // republished inside the artifact because the evidence root binds it by the digest of these
+    // bytes: a re-serialisation with different spacing is a different document to the root, and
+    // an artifact that contained its own re-encoding of the sidecar would bind something nobody
+    // could reproduce from the file on disk.
+    let readbackPathOut = null;
+    if (chain.targetStateTransition && chain.readbackBytes) {
+      readbackPathOut = path.join(cwd, 'readback.json');
+      fs.writeFileSync(readbackPathOut, chain.readbackBytes);
+    }
+
     line('');
     line(`wrote ${jsonPath}`);
     line(`wrote ${mdPath}`);
+    if (readbackPathOut) line(`wrote ${readbackPathOut}`);
     line(`═══ VERDICT: ${artifact.verdict} ═══`);
     return { exitCode: allOk ? 0 : 1, artifact };
   } finally {
@@ -763,6 +816,46 @@ function check(file) {
     const cv = verifyCorrelation(artifact.correlation, publicKey);
     line(`correlation signature: ${cv.valid ? 'VALID' : `INVALID (${cv.reason || 'does not verify'})`}`);
     if (!cv.valid) mismatches.push('the correlation signature does not verify');
+  }
+
+  // THE TARGET-STATE TRANSITION, RE-CHECKED HERE TOO.
+  //
+  // The artifact carries the grading POINT 8 did. Printing that grade back would be reading the
+  // producer's conclusion out loud — the same failure this file names one comment above about the
+  // correlation. So the four correlations are RECOMPUTED from the block's own `expected` and
+  // `observation`, exactly as the conformance profile recomputes them, and the producer's verdict
+  // is only reported once they agree.
+  //
+  // WHAT CANNOT BE RECHECKED HERE: `expected.parents`. It was read from the target's object
+  // database during the run, and the target is a throwaway repository that no longer exists. The
+  // single-parent check below therefore compares a RECORDED value against the recorded base — it
+  // detects an inconsistent artifact, not a forged one. That limit is the same one the conformance
+  // profile states, and it is stated rather than papered over.
+  const tst = artifact.target_state_transition;
+  if (tst) {
+    const obs = tst.observation || {};
+    const exp = tst.expected || {};
+    const fails = [];
+    const t = (id, ok) => { if (!ok) fails.push(id); };
+    t('after_state_token', obs.observed_commit === exp.contract_commit);
+    t('blob_digest', obs.contract_blob_digest === exp.contract_blob_digest);
+    t('content_sha256', exp.after_payload_digest == null
+      || obs.contract_blob_digest === exp.after_payload_digest);
+    t('single_parent', Array.isArray(exp.parents) && exp.parents.length === 1
+      && exp.parents[0] === exp.base);
+    t('state_transition', obs.before_commit === exp.base);
+    t('observer_mode', obs.observer_mode === 'read_only'
+      && obs.observation_source === 'git-object-database');
+    t('canonical_target_uri', obs.canonical_target_uri === exp.canonical_target_uri);
+    line(`target transition    : ${fails.length === 0
+      ? `${tst.state} — four correlations re-derived (ref moved ${String(exp.base).slice(0, 12)} → `
+        + `${String(exp.contract_commit).slice(0, 12)}); proof_scope ${tst.proof_scope}, `
+        + `provider_witness ${tst.provider_witness}, externally witnessed `
+        + `${tst.externally_witnessed === true}`
+      : `INCONSISTENT — ${fails.join(', ')} do not re-derive from the artifact's own fields`}`);
+    if (fails.length > 0) {
+      mismatches.push(`the target-state transition does not re-derive (${fails.join(', ')})`);
+    }
   }
 
   // AUTHORIZATION CONTINUITY, from the recorded block — RE-DERIVED, not echoed.

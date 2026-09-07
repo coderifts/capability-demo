@@ -87,7 +87,12 @@ describe('e2e chain — the nine points', () => {
     // of the chain.
     const { code, stdout } = runChain();
     assert.match(stdout, /^TRANSCRIPT\|PASS\|VERIFIES\|sha256:/m, 'the transcript itself still verifies');
-    assert.match(stdout, /^SUMMARY\|8 proven\|0 carried \(provider readback, unsigned\)\|1 modelled\|9\/9 points OK$/m);
+    // The SUMMARY now names FOUR classes, not three. A fourth state exists
+    // (TARGET_STATE_TRANSITION_PROVEN) and a summary that omitted it would leave a point
+    // unaccounted for — which is the whole reason the third class was named here in the first
+    // place. This call supplies no git target, so the count in that column is 0 and POINT 8 is
+    // modelled exactly as before.
+    assert.match(stdout, /^SUMMARY\|8 proven\|0 observed \(target-state transition, trusted-executor scope\)\|0 carried \(provider readback, unsigned\)\|1 modelled\|9\/9 points OK$/m);
 
     // WHICH STATE, read from the run's own report rather than from the environment. Reading
     // process.env here would let the test and the run disagree about what happened.
