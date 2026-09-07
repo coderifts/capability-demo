@@ -280,26 +280,64 @@ describe('bundle — a placed token is carried verbatim and self-verifies', () =
   });
 });
 
-// ── THE MEASURED DIVERGENCE ──────────────────────────────────────────────────
+// ── THE DIVERGENCE THAT WAS PINNED, AND IS NOW CLOSED ────────────────────────
 describe('bundle — the demo grant vs the public v1 field set', () => {
-  test('a DEFAULT demo grant carries deployment_id and the public verifier rejects it', (t) => {
+  test('a DEFAULT demo grant carries deployment_id and the public verifier ACCEPTS it', (t) => {
     if (guard(t)) return;
-    // Pinned so this divergence stays visible. The assembler does NOT strip the
-    // field: a token is signed bytes, and editing it to pass a verifier would
-    // forge a different grant.
+    // ── WHAT THIS TEST USED TO RECORD, AND WHY ───────────────────────────────
+    //
+    // It asserted `slot.state === 'INVALID'` and `reason === 'unknown_field'`. That was TRUE and
+    // worth pinning: the demo mints a v1 grant carrying `deployment_id`, the public verifier's
+    // allowed set was `['v', ...SIGNED_FIELDS]`, and it therefore refused a grant this repo's own
+    // executor issues. Two implementations of one format, disagreeing — fail-CLOSED, and wrong.
+    //
+    // The comment then said what it would NOT do about it: the assembler does not strip the field.
+    // A token is signed bytes, and editing one to pass a verifier forges a different grant. So the
+    // divergence was recorded rather than papered over, and left for a deliberate fix.
+    //
+    // ── THE FIX THAT CLOSED IT (1470, a472bf9) ───────────────────────────────
+    //
+    // receipt-verifier's v1 path gained V1_OPTIONAL_SIGNED_FIELDS = ['state_nonce',
+    // 'deployment_id'] — admitted BY NAME, in both the allowed set and the signing-input
+    // reconstruction, and appended only when non-empty so a BEARER grant's preimage stays
+    // byte-identical to every pre-ATOMIC issuance. Widening was safe because these fields are
+    // SIGNED: the closed set never stopped injection, it guards against semantic drift, and these
+    // two narrow rather than restrict. That core is vendored here, so the verifier now reads
+    // VERIFIED on the very token it used to refuse.
+    //
+    // The assertion is inverted; the history is not deleted. A reader who finds this test needs to
+    // know the divergence existed, or they cannot tell a fix from a thing that never broke.
     const dflt = issue({ ...KEYOPTS, operation: 'publish', target_id: '', body: '{"a":1}' });
     const payload = JSON.parse(Buffer.from(dflt.split('.')[0], 'base64url').toString('utf8'));
     assert.ok('deployment_id' in payload, 'the default grant no longer carries deployment_id');
 
     const r = verify(assembleBundle({ tokens: { execution_grant: dflt } }), slotKeysFor(dflt));
     const slot = r.slots.find((s) => s.slot === 'execution_grant');
-    assert.equal(slot.state, 'INVALID');
-    assert.equal(slot.reason, 'unknown_field');
+    assert.equal(slot.state, 'VERIFIED', JSON.stringify(slot));
+    assert.notEqual(slot.reason, 'unknown_field');
+    assert.equal(r.bundle, 'VERIFIED');
 
-    // …and the same grant minted without it verifies, so the field is the cause.
+    // THE CONTROL STAYS. The same grant minted WITHOUT the field still verifies — so the field is
+    // now accepted rather than tolerated, and a BEARER grant did not become collateral damage of
+    // the widening.
     const without = publicGrant();
     assert.ok(!('deployment_id' in JSON.parse(Buffer.from(without.split('.')[0], 'base64url').toString('utf8'))));
     const ok = verify(assembleBundle({ tokens: { execution_grant: without } }), slotKeysFor(without));
     assert.equal(ok.bundle, 'VERIFIED');
+  });
+
+  test('THE SET IS STILL CLOSED: an actually-unknown field is still refused', (t) => {
+    if (guard(t)) return;
+    // Without this, "the verifier accepts deployment_id" would be indistinguishable from "the
+    // verifier stopped checking". The widening was by name; this is the half that proves it.
+    const grant = publicGrant();
+    const [head, sig] = grant.split('.');
+    const payload = JSON.parse(Buffer.from(head, 'base64url').toString('utf8'));
+    payload.surprise = 'x';
+    const forged = `${Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')}.${sig}`;
+    const r = verify(assembleBundle({ tokens: { execution_grant: forged } }), slotKeysFor(grant));
+    const slot = r.slots.find((s) => s.slot === 'execution_grant');
+    assert.equal(slot.state, 'INVALID');
+    assert.equal(slot.reason, 'unknown_field');
   });
 });
