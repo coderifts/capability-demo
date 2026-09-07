@@ -1,5 +1,5 @@
 receipt-verifier 02153c9b7ffc7ff672fe5471433f3c3b01e0d694
-# verified-execution-binding.js is vendored at ce5fd34e93a6e8cdcc71d7ebcba09497088844e1 (1459 — the one predicate).
+# verified-execution-binding.js is vendored at 1e41542296551139c41e2d4b4cff2e67bc42aa06 (1459 — the one predicate).
 # evidence-root.js, verify-evidence.js and verify-prove-transcript.js are vendored at
 # 7887719fa6e2bd1f70907f119e1c2a9b7c6a84ff (1432). The other files keep their own earlier
 # revisions on purpose — a single source-commit line would be tidier and untrue.
