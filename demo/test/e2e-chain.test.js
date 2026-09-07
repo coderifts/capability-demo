@@ -62,24 +62,51 @@ describe('e2e chain — the nine points', () => {
     for (const p of points) assert.equal(p.ok, 'OK', `point ${p.n} (${p.name}): ${p.detail}`);
   });
 
-  test('the run REFUSES exit 0 while the chain carries two grants — named, not silent', (t) => {
+  test('continuity decides the exit code, and the chain says which state it is in', (t) => {
     if (guard(t)) return;
-    // INVERTED, and the inversion is the finding. This asserted `code === 0` for "a clean run".
-    // MEASURED: the run is not clean — POINT 1 records a SERVER grant (jti d33032a5, kid
-    // 2026-07-k1) while POINTS 2-7 consume a locally minted one. Every point passed and the
-    // sentence they compose did not, which is exactly what the continuity gate now refuses.
+    // ── THE THIRD STATE OF THIS TEST, AND IT ANNOUNCED ITSELF ────────────────────────────
     //
-    // The transcript still verifies and the nine points still hold; what changed is that the run
-    // no longer reports success over a discontinuous authorization. When a server grant over the
-    // governed contract exists (one live authorize), this returns to 0 — and the assertion below
-    // is written so it will FAIL LOUDLY at that point rather than silently keep passing.
+    // It first asserted `code === 0` for "a clean run". That was inverted when the continuity gate
+    // measured the run was NOT clean: POINT 1 recorded a SERVER grant while POINTS 2-7 consumed a
+    // locally minted one — every point passing, and the sentence they compose false.
+    //
+    // The inverted version left instructions: "if this is 0, the chain became continuous — update
+    // this test". It then failed in prove 0.1.7's prepublish, and the measurement is that it was
+    // RIGHT to: the message shape never changed, the RUN did.
+    //
+    //   CODERIFTS_API_KEY set      POINT 1 source=live      CONTINUITY|OK    exit 0
+    //   the four keys unset        POINT 1 source=recorded  CONTINUITY|FAIL  exit 1
+    //
+    // A recorded issuance CANNOT be consumed: a challenge-first grant binds a nonce that exists
+    // only in the run that minted it, so the replay path is discontinuous by construction and the
+    // gate correctly says so. `npm test` runs under the developer's real environment, `test:pg`
+    // under `env -u` — which is why test:all caught what test:pg alone did not.
+    //
+    // So this asserts BOTH states rather than one. Pinning either alone would make the suite pass
+    // or fail on whether a key happens to be exported, which is a property of the machine and not
+    // of the chain.
     const { code, stdout } = runChain();
     assert.match(stdout, /^TRANSCRIPT\|PASS\|VERIFIES\|sha256:/m, 'the transcript itself still verifies');
     assert.match(stdout, /^SUMMARY\|8 proven\|0 carried \(provider readback, unsigned\)\|1 modelled\|9\/9 points OK$/m);
-    assert.match(stdout, /^CONTINUITY\|FAIL\|authorization_not_continuous \(consume_jti_mismatch\)/m,
-      'the gap must be named on its own line');
-    assert.equal(code, 1,
-      'if this is 0, the chain became continuous — update this test and delete the gap from the report');
+
+    // WHICH STATE, read from the run's own report rather than from the environment. Reading
+    // process.env here would let the test and the run disagree about what happened.
+    const issuance = stdout.match(/^POINT\|1\|authorize\|.*source=(live|recorded)$/m);
+    assert.ok(issuance, `POINT 1 does not report its issuance source:\n${stdout}`);
+
+    if (issuance[1] === 'live') {
+      assert.match(stdout, /^CONTINUITY\|OK\|AUTHORIZATION CONTINUOUS: one grant \([0-9a-f-]+\) from server authorize through consume, attestation and correlation$/m,
+        'a live authorize must produce ONE grant through the whole chain, named on its own line');
+      assert.equal(code, 0, 'a continuous chain must not refuse exit 0');
+    } else {
+      assert.match(stdout, /^CONTINUITY\|FAIL\|authorization_not_continuous \(consume_jti_mismatch\)/m,
+        'the gap must be named on its own line');
+      // The reason is asserted too: a recorded grant is not merely absent, it is UNCONSUMABLE, and
+      // a reader who sees only "not continuous" would go looking for a wiring bug that is not there.
+      assert.match(stdout, /Continuity is a LIVE-only measurement/m,
+        'the recorded path must say WHY it cannot be continuous');
+      assert.equal(code, 1, 'a discontinuous chain must refuse exit 0');
+    }
   });
 });
 
