@@ -13,6 +13,55 @@ const { spawnSync } = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..', '..');
 const WORKFLOW = path.join(ROOT, '.github', 'workflows', 'prove.yml');
+/**
+ * Flip ONE BIT of a token's DECODED signature, and refuse to return if that changed nothing.
+ *
+ * ── WHY NOT `s.slice(0, -1) + 'A'` ──────────────────────────────────────────────────────────
+ *
+ * An Ed25519 signature is 64 bytes and base64url-encodes to 86 characters. 86 x 6 = 516 bits
+ * against 512 real ones, so the FINAL CHARACTER CARRIES FOUR BITS THAT DECODE TO NOTHING. Two
+ * characters whose top two bits agree encode the same signature, and 'A'..'P' all have top bits
+ * 00 — so the classic "flip the last character to A/B" mutation is a NO-OP whenever the signature
+ * ends in one of those sixteen. MEASURED: 16 of 64 characters, one capture in four.
+ *
+ * When it happens nothing is broken, the verifier accepts, and a control that names the signature
+ * path passes without exercising it. It is silent, it depends on which capture is vendored, and it
+ * moves on its own the next time a fixture is re-cut.
+ *
+ * ── SEPARATOR-AWARE, AND THAT IS NOT A DETAIL ───────────────────────────────────────────────
+ *
+ * Two token shapes live here: `payload.signature` (grants, receipts) and
+ * `PREFIX|KID|payload|signature` (prove transcripts, posture receipts). A helper that always split
+ * on '.' cut the pipe-joined transcript at the dot inside `cr.prove.transcript.v1` and rebuilt
+ * everything after it as one blob — the signature did change, but so did the whole token, so the
+ * case proved "a wrecked token is refused" rather than "one flipped signature bit is refused".
+ * MEASURED on the vendored capture: 4 pipe-segments in, 1 out.
+ *
+ * A bare signature (no separator) is handled too: the whole string is the signature.
+ */
+function flipSignatureByte(token) {
+  const sep = token.includes('|') ? '|' : (token.includes('.') ? '.' : null);
+  const i = sep === null ? -1 : token.lastIndexOf(sep);
+  const sig = Buffer.from(token.slice(i + 1), 'base64url');
+  const out = Buffer.from(sig);
+  out[0] ^= 0x01;
+  // THE SELF-CHECK. A negative control whose mutation might do nothing is not a control, and this
+  // is inside the helper so no future case can inherit the defect quietly.
+  if (out.equals(sig)) throw new Error('flipSignatureByte: the mutation did not change the signature bytes');
+  const flipped = token.slice(0, i + 1) + out.toString('base64url');
+  // THE STRUCTURE GUARD, and it counts BOTH separators rather than the one chosen above. Checking
+  // only the chosen separator would be the check agreeing with the decision it is meant to audit:
+  // pick '.' for a pipe-joined token and the dot-count still matches while the four pipe-segments
+  // collapse into one. Measured that way round, on the vendored transcript, before it was written.
+  for (const s of ['|', '.']) {
+    if (flipped.split(s).length !== token.split(s).length) {
+      throw new Error(`flipSignatureByte: the token's ${s}-segment count changed — this mangled the `
+        + 'token instead of flipping one signature bit');
+    }
+  }
+  return flipped;
+}
+
 const SAMPLE = path.join(ROOT, 'examples', 'sample-transcript', 'transcript.json');
 const KEYS = path.join(ROOT, 'examples', 'sample-transcript', 'executor-keys.json');
 const BIN = path.join(ROOT, 'bin', 'prove-all.js');
@@ -70,12 +119,11 @@ describe('prove.yml — the copy-paste CI snippet', () => {
     // grant; this path verified everything BUT the correlation and accepted a mutated one. Each
     // reads as thorough on its own, which is why both needed a matrix rather than a spot check.
     const os = require('node:os');
-    const flip = (x) => x.slice(0, -1) + (x[x.length - 1] === 'A' ? 'B' : 'A');
     const MUTATIONS = {
-      execution_grant: (t) => { t.issuance.execution_grant = flip(t.issuance.execution_grant); },
-      chain_receipt: (t) => { t.issuance.chain_receipt = flip(t.issuance.chain_receipt); },
-      transcript_token: (t) => { t.transcript_token = flip(t.transcript_token); },
-      correlation_signature: (t) => { t.correlation.signature = flip(t.correlation.signature); },
+      execution_grant: (t) => { t.issuance.execution_grant = flipSignatureByte(t.issuance.execution_grant); },
+      chain_receipt: (t) => { t.issuance.chain_receipt = flipSignatureByte(t.issuance.chain_receipt); },
+      transcript_token: (t) => { t.transcript_token = flipSignatureByte(t.transcript_token); },
+      correlation_signature: (t) => { t.correlation.signature = flipSignatureByte(t.correlation.signature); },
     };
     const base = JSON.parse(fs.readFileSync(SAMPLE, 'utf8'));
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'prove-mut-'));
