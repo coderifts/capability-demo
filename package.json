@@ -15,6 +15,7 @@
     "prove": "node demo/prove.js",
     "prove:all": "node bin/prove-all.js",
     "prove:check": "node bin/prove-all.js --check",
+    "fixture": "node scripts/make-conformance-fixture.js",
     "check:packed": "node scripts/check-packed-sample.js",
     "prepublishOnly": "npm run test:all && node scripts/check-packed-sample.js"
   },

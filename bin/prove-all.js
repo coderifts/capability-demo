@@ -192,7 +192,15 @@ function provenance() {
   };
 }
 
-async function runAll({ cwd = process.cwd() } = {}) {
+/**
+ * @param {object}            o
+ * @param {string}            o.cwd        where the artifact and its sidecar are written
+ * @param {boolean|undefined} o.gitTarget  build the bare-Git target? `undefined` reads the
+ *   environment (default ON); an explicit true/false overrides it. The fixture assembler passes
+ *   this explicitly for both poles, because a producer of EVIDENCE should not depend on which
+ *   variables happened to be exported when it ran.
+ */
+async function runAll({ cwd = process.cwd(), gitTarget = undefined } = {}) {
   const started_at = new Date().toISOString();
   const run_id = `prove-${crypto.randomUUID()}`;
   let pg = null;
@@ -299,14 +307,21 @@ async function runAll({ cwd = process.cwd() } = {}) {
     // Set CODERIFTS_GIT_TARGET=0 to skip it — a run that skips it falls back to the readback file
     // and POINT 8 grades exactly as it did before. `ran: false` is NOT_RUN, never a failure: an
     // environment that cannot host a bare repository has not disproved anything.
-    const gitTargetEnabled = process.env.CODERIFTS_GIT_TARGET !== '0';
+    const gitTargetEnabled = gitTarget === undefined
+      ? process.env.CODERIFTS_GIT_TARGET !== '0'
+      : gitTarget === true;
     const gitTransition = gitTargetEnabled
       ? runGitTarget({
         receiptToken: (prove.issuance && prove.issuance.issued && prove.issuance.issued.chain_receipt)
           || prove.token,
         say: () => {},
       })
-      : { ran: false, reason: 'CODERIFTS_GIT_TARGET=0 — the target was not built' };
+      : {
+        ran: false,
+        reason: gitTarget === false
+          ? '--no-git-target — the target was not built, and POINT 8 falls back to the readback file'
+          : 'CODERIFTS_GIT_TARGET=0 — the target was not built',
+      };
 
     const readbackSupplied = !!process.env.CODERIFTS_PROVIDER_READBACK;
     line('');
@@ -932,6 +947,16 @@ async function main() {
   }
 
   const argv = process.argv.slice(2);
+  // EXPLICIT BEATS AMBIENT. Both spellings exist because the env var shipped first; a flag wins
+  // over it, and passing both contradictory flags is refused rather than resolved by argument
+  // order — a run that silently picks one would make its own artifact hard to explain.
+  const wantsTarget = argv.includes('--git-target');
+  const refusesTarget = argv.includes('--no-git-target');
+  if (wantsTarget && refusesTarget) {
+    line('usage: --git-target and --no-git-target are contradictory; pass one');
+    return 2;
+  }
+  const gitTarget = wantsTarget ? true : (refusesTarget ? false : undefined);
   const ci = argv.indexOf('--check');
   if (ci !== -1) {
     const file = argv[ci + 1];
@@ -941,7 +966,7 @@ async function main() {
     }
     return check(file);
   }
-  const out = await runAll();
+  const out = await runAll({ gitTarget });
   return out.exitCode;
 }
 
