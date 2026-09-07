@@ -70,8 +70,39 @@ function scalar(v) {
   return v == null ? '' : String(v);
 }
 
+/**
+ * cr.exec.v1 OPTIONAL signed fields — the ATOMIC profile's, and a DELIBERATE widening (1470).
+ *
+ * ── MEASURED BEFORE OPENING THE SET ─────────────────────────────────────────────────────────
+ *
+ * This verifier's allowed set was `['v', ...SIGNED_FIELDS]`, so a v1 grant carrying `state_nonce`
+ * read MALFORMED / unknown_field. That grant is not malformed: it is what the demo executor issues
+ * for the ATOMIC profile, and capability-demo's middleware has always signed and accepted it
+ * (OPTIONAL_SIGNED_FIELDS = ['state_nonce', 'deployment_id']). Fail-CLOSED, and wrong — this core
+ * is vendored into five consumers, so every one of them refused a valid ATOMIC grant.
+ *
+ * ── WHY WIDENING IS SAFE HERE, AND WHY IT IS STILL A DECISION ───────────────────────────────
+ *
+ * These fields are SIGNED: appended to the preimage, so a forger cannot add one without breaking
+ * the signature. The closed set never protected against injection; it protects against SEMANTIC
+ * DRIFT — a future field that RESTRICTS use must not be silently ignored by an older verifier that
+ * then says GRANT_CURRENT. `state_nonce` and `deployment_id` do not restrict: they NARROW, and a
+ * verifier that ignores them is not more permissive than one that does not know them.
+ *
+ * So the set is widened BY NAME, not opened. An actually-unknown field is still unknown_field, and
+ * test/v1-atomic-optional-fields.test.js records both halves so the next change is a decision
+ * rather than a rediscovery.
+ *
+ * ── APPENDED ONLY WHEN NON-EMPTY ────────────────────────────────────────────────────────────
+ *
+ * Byte-identical to capability-demo/packages/middleware/src/verify-grant.js. A BEARER grant's
+ * signing input must stay exactly what it was before ATOMIC existed, or every pre-ATOMIC issuance
+ * stops verifying — which is why presence, not declaration, decides the slot.
+ */
+const V1_OPTIONAL_SIGNED_FIELDS = Object.freeze(['state_nonce', 'deployment_id']);
+
 function reconstructSignedInput(payload) {
-  return [
+  const parts = [
     SIGNING_PREFIX,
     scalar(payload.kid),
     scalar(payload.receipt_digest),
@@ -82,7 +113,11 @@ function reconstructSignedInput(payload) {
     scalar(payload.jti),
     scalar(payload.iat),
     scalar(payload.exp),
-  ].join('|');
+  ];
+  for (const k of V1_OPTIONAL_SIGNED_FIELDS) {
+    if (payload[k] != null && String(payload[k]).length > 0) parts.push(String(payload[k]));
+  }
+  return parts.join('|');
 }
 
 function sha256pref(s) {
@@ -262,10 +297,16 @@ function verifyExecutionGrantInner(token, ctx, opts = {}) {
       return { valid: false, status: 'MALFORMED', reason: 'missing_field', payload };
     }
   }
-  const allowed = new Set(['v', ...SIGNED_FIELDS]);
+  const allowed = new Set(['v', ...SIGNED_FIELDS, ...V1_OPTIONAL_SIGNED_FIELDS]);
   for (const k of Object.keys(payload)) {
     if (!allowed.has(k)) {
       return { valid: false, status: 'MALFORMED', reason: 'unknown_field', payload };
+    }
+  }
+
+  for (const k of V1_OPTIONAL_SIGNED_FIELDS) {
+    if (payload[k] != null && typeof payload[k] !== 'string') {
+      return { valid: false, status: 'MALFORMED', reason: 'missing_field', payload };
     }
   }
 
@@ -513,6 +554,7 @@ module.exports = {
   SIGNING_PREFIX,
   SIGNING_PREFIX_V2,
   SIGNED_FIELDS,
+  V1_OPTIONAL_SIGNED_FIELDS,
   CLOCK_SKEW_LEEWAY_MS,
   isIssuedInFuture,
 };
