@@ -165,6 +165,10 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
   // One call. Its transcript is the input to everything below; nothing here
   // re-derives a fact prove.js already signed.
   points.length = 0;
+  // THE GIT TARGET, HOISTED. POINT 2 has to know whether this run's governed action is the ref
+  // update, and it is the second point rendered — reading a variable declared two hundred lines
+  // below it was a TDZ crash waiting for the first git-target run through this path.
+  const gt = gitTransition && gitTransition.ran === true ? gitTransition : null;
   const out = prove || await runProve({ silent: true });
   const transcriptOk = verifyProveTranscript(out.token, { publicKey: executorPublicKey() });
 
@@ -179,8 +183,25 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
 
   const auth = sectionOf(out, 'authorized');
   const authOk = !!(auth && auth.verdict === 'PASS' && auth.evidence.jti && auth.evidence.attestation);
-  point(2, 'grant issuance', PROVEN, authOk,
-    authOk ? `a grant was issued and consumed: jti ${auth.evidence.jti}` : 'no grant reached the ledger');
+  // ── WHICH GRANT WAS ISSUED AND CONSUMED ─────────────────────────────────────────────────
+  //
+  // With a git target the GOVERNED grant is consumed by the LEDGER (a claim on
+  // refs/coderifts/consumed/<jti>, read back from the object database), not by the Postgres write.
+  // Reporting the Postgres jti here while the artifact's issuance names the git grant is what made
+  // POINT 1/2/6 contradict `issuance.execution_grant` on a clean-clone fixture.
+  //
+  // POINTS 3-7 keep the MECHANISM identities and say so: they are the executor's credential
+  // boundary, one-use ledger and seal, and they really did run on their own grant.
+  const governedJti = gt ? gt.ledger_consumed_jti : null;
+  point(2, 'grant issuance', PROVEN, gt ? !!governedJti : authOk,
+    gt
+      ? (governedJti
+        ? `the governed grant was issued and consumed: jti ${governedJti}, claimed in the ledger `
+          + `(refs/coderifts/consumed/…) in the same transaction as the ref update and READ BACK `
+          + `from the object database. POINTS 3-7 below are the executor MECHANISM and carry their `
+          + `own grant (${auth && auth.evidence ? auth.evidence.jti : 'none'}).`
+        : 'the governed grant is not in the ledger — nothing recorded consuming it')
+      : (authOk ? `a grant was issued and consumed: jti ${auth.evidence.jti}` : 'no grant reached the ledger'));
 
   const denyReadback = deny && deny.verdict === 'PASS'
     && deny.evidence && deny.evidence.host_sqlstate === '42501'
@@ -325,7 +346,7 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
   // this round. A readback is a document handed to the run; a transition is a state this run
   // caused and then had read back by a process that could not cause it. When both are available
   // the weaker evidence must not be what POINT 8 reports.
-  const gt = gitTransition && gitTransition.ran === true ? gitTransition : null;
+  // (hoisted to the top of runChain — POINT 2 needs it)
   const readbackPath = gt ? null : (process.env.CODERIFTS_PROVIDER_READBACK || null);
   let readback = null;
   let readbackError = null;

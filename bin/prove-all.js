@@ -273,26 +273,6 @@ async function runAll({ cwd = process.cwd(), gitTarget = undefined } = {}) {
     const { runGitTarget } = require(path.join(DEMO, 'src', 'git-target.js'));
     const { CEILING } = require(path.join(DEMO, 'bundle.js'));
 
-    // ── PANELS 1–6, then POINTS 1–9, on ONE prove run ───────────────────────────────────────
-    line('── panels (deny through drift, plus CAS/rollback negatives) ─');
-    const prove = await runProve({ silent: false });
-    // ── PHASE 3 — THE NETWORKED SEGMENT, LABELLED AND BOUNDED ───────────────────────────────
-    //
-    // Two phases, and the split is stated in the output rather than left to a reader's trust:
-    //
-    //   [ISSUANCE]  may touch the network — the live POST /api/v1/preflight when CODERIFTS_API_KEY
-    //               is set (demo/src/authorize-issue.js), otherwise the recorded server grant.
-    //   [READBACK]  may touch the network — the provider observation. Supplied as a file here, so
-    //               this run reads bytes captured elsewhere and reaches nothing itself.
-    //   [VERIFY]    reaches nothing, and it is PROVED rather than promised: POINT 10 runs the
-    //               verification inside 21 traps with the trap shown live first.
-    //
-    // Naming the networked half is the point. A run that quietly did its issuance inside the same
-    // breath as its verification could still print "offline" truthfully about the narrow step it
-    // trapped, which is how an offline claim starts covering less than a reader assumes.
-    // [ISSUANCE] is already printed above by authorize-issue.js, with the capture timestamp and
-    // the endpoint — a second line saying the same thing differently is worse than one line.
-    // These two complete the split.
     // ── THE BARE-GIT TARGET — BUILT, MUTATED AND READ BACK INSIDE THIS RUN ──────────────────
     //
     // This is what POINT 8 is filled from now. Not a file handed to the run: a throwaway bare
@@ -312,8 +292,10 @@ async function runAll({ cwd = process.cwd(), gitTarget = undefined } = {}) {
       : gitTarget === true;
     const gitTransition = gitTargetEnabled
       ? await runGitTarget({
-        receiptToken: (prove.issuance && prove.issuance.issued && prove.issuance.issued.chain_receipt)
-          || prove.token,
+        // NOT `prove.issuance` any more — the target now runs BEFORE the prove chain, so there is
+        // nothing from it to read. This value only seeds the LOCAL MINT's receipt_hash; a
+        // server-issued grant carries the issuer's own receipt and ignores it.
+        receiptToken: 'cr.git.local-mint.receipt',
         // THE ONE GRANT. Supplied by the caller because BASE must exist before an authorize can
         // bind it, and the target is what creates BASE. `issueGitGrant` asks the live server for a
         // git.ref.update grant over the same governed bytes; with no live issuer it returns null
@@ -355,6 +337,44 @@ async function runAll({ cwd = process.cwd(), gitTarget = undefined } = {}) {
           : 'CODERIFTS_GIT_TARGET=0 — the target was not built',
       };
 
+    // ── PANELS 1–6, then POINTS 1–9, on ONE prove run ───────────────────────────────────────
+    //
+    // THE GIT TARGET RUNS FIRST, and the ordering is the fix. prove.js produces the chain, so it
+    // has to be told which authorization the run is about BEFORE it issues one — otherwise it
+    // takes its own server authorize and the artifact ends up relabelled downstream, which is
+    // exactly what a clean-clone fixture measured: `issuance.execution_grant -> <git grant>` over
+    // `POINT 1 … jti <postgres grant>`.
+    line('── panels (deny through drift, plus CAS/rollback negatives) ─');
+    const prove = await runProve({
+      silent: false,
+      gitChain: gitTransition.ran
+        ? {
+          grant: gitTransition.grant,
+          grantToken: gitTransition.grant_token,
+          consumedJti: gitTransition.ledger_consumed_jti,
+          attestationJti: gitTransition.attestation_jti,
+          attestationToken: gitTransition.attestation,
+          issued: gitTransition.issued || null,
+        }
+        : null,
+    });
+    // ── PHASE 3 — THE NETWORKED SEGMENT, LABELLED AND BOUNDED ───────────────────────────────
+    //
+    // Two phases, and the split is stated in the output rather than left to a reader's trust:
+    //
+    //   [ISSUANCE]  may touch the network — the live POST /api/v1/preflight when CODERIFTS_API_KEY
+    //               is set (demo/src/authorize-issue.js), otherwise the recorded server grant.
+    //   [READBACK]  may touch the network — the provider observation. Supplied as a file here, so
+    //               this run reads bytes captured elsewhere and reaches nothing itself.
+    //   [VERIFY]    reaches nothing, and it is PROVED rather than promised: POINT 10 runs the
+    //               verification inside 21 traps with the trap shown live first.
+    //
+    // Naming the networked half is the point. A run that quietly did its issuance inside the same
+    // breath as its verification could still print "offline" truthfully about the narrow step it
+    // trapped, which is how an offline claim starts covering less than a reader assumes.
+    // [ISSUANCE] is already printed above by authorize-issue.js, with the capture timestamp and
+    // the endpoint — a second line saying the same thing differently is worse than one line.
+    // These two complete the split.
     const readbackSupplied = !!process.env.CODERIFTS_PROVIDER_READBACK;
     line('');
     line('── phase split ────────────────────────────────────────────');
@@ -601,12 +621,23 @@ async function runAll({ cwd = process.cwd(), gitTarget = undefined } = {}) {
         // WHICH ACTION THIS GRANT AUTHORIZED, said out loud. A reader must not have to infer from
         // an operation string whether the artifact is about a database write or a ref update.
         ...(governed ? { governed_action: 'git.ref.update', grant_source: governed.source } : {}),
-        // The mechanism grant is CARRIED, never dropped: POINTS 2-7 are about it, and deleting it
-        // here would make those points reference an authorization the artifact does not contain.
-        ...(governed ? {
-          mechanism_grant: prove.issuance.issued && prove.issuance.issued.grant,
-          mechanism_execution_grant: prove.issuance.issued && prove.issuance.issued.execution_grant,
-        } : {}),
+        // THE MECHANISM GRANT, carried ONLY when it is a different authorization.
+        //
+        // MEASURED: with prove.js now issuing the governed grant itself, `prove.issuance.issued`
+        // IS that grant — so these fields became a copy of it under a name that says "a different
+        // one". A field asserting a distinction that does not exist is worse than an absent field,
+        // because a reader counts it.
+        //
+        // POINTS 3-7 run on a locally-minted grant now; POINT 2 names it in its own sentence, so
+        // the mechanism authorization is still stated where a reader meets it.
+        ...(governed && prove.issuance.issued && prove.issuance.issued.grant
+          && (prove.issuance.issued.grant.grant_id || prove.issuance.issued.grant.jti)
+            !== governed.grant.grant_id
+          ? {
+            mechanism_grant: prove.issuance.issued.grant,
+            mechanism_execution_grant: prove.issuance.issued.execution_grant,
+          }
+          : {}),
         does_not_prove: prove.issuance.does_not_prove,
       } : null,
       // Reused verbatim from demo/bundle.js — the ceiling is not restated in this file's words,

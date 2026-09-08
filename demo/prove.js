@@ -126,7 +126,26 @@ function parseGrantAnyVersion(token) {
  * grant) runs first, labelled [ISSUANCE], outside the 21-trap. mkGrant below
  * remains the local DEMO-KEY issuer the executor can consume.
  */
-async function runProve({ skipSeal = false, silent = false } = {}) {
+/**
+ * @param {object}      o
+ * @param {object|null} o.gitChain  when this run's GOVERNED action is a bare-Git ref update:
+ *   `{ grant, grantToken, chainReceipt, consumedJti, attestationJti, issued }`.
+ *
+ *   ── WHY prove.js HAS TO KNOW ─────────────────────────────────────────────────────────────
+ *
+ *   MEASURED on a clean-clone fixture: prove-all.js was overwriting the ARTIFACT's issuance field
+ *   with the git grant while this file's own chain ran on a Postgres grant — so `transcript.json`
+ *   read `issuance.execution_grant -> 64c43752 (git.ref.update)` and three lines later
+ *   `POINT 1 … jti 6890233c`, `POINT 2 … jti 6890233c`, `POINT 6 … binds jti 6890233c`. A summary
+ *   asserting one authorization over evidence naming another is the collage this whole surface
+ *   exists to refuse, and relabelling downstream is how it got in.
+ *
+ *   This file PRODUCES the chain, so this file has to be the one that knows which authorization
+ *   the run is about. With a gitChain, POINT 1/2/6 report the git grant, and the Postgres sections
+ *   take no second SERVER authorize — they mint locally and are the executor MECHANISM, which is
+ *   what they always were.
+ */
+async function runProve({ skipSeal = false, silent = false, gitChain = null } = {}) {
   const measured_at = new Date().toISOString();
   const deployment_id = configuredDeploymentId();
   const sections = [];
@@ -213,7 +232,10 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
     const contractBefore = canonicalContractBytes();
     const contractAfter = proposedContractBytes();
     let serverGrant = null;
-    if (haveLiveIssuer()) {
+    // ONE SERVER AUTHORIZE PER RUN. With a git target the governed authorization is already in
+    // hand, and asking the issuer for a second one would put two live grants in a run that claims
+    // one — the exact shape POINT 1 and the artifact disagreed about.
+    if (haveLiveIssuer() && !gitChain) {
       serverGrant = await acquireServerGrant({
         challenge, deploymentId: deployment_id, before: contractBefore, after: contractAfter,
       });
@@ -223,6 +245,11 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
       } else {
         say(`  [ISSUANCE] ATOMIC authorize unavailable: ${serverGrant.reason} — ${serverGrant.detail}`);
       }
+    }
+    if (gitChain) {
+      // THE GOVERNED ISSUANCE IS THE GIT GRANT. POINT 1 reports it, and it is the grant every
+      // other identity in this artifact must equal.
+      issued = gitChain.issued;
     }
     if (!issued) {
       // No live ATOMIC grant: fall back to the pre-existing issuance (live bearer or recorded).
@@ -559,6 +586,19 @@ async function runProve({ skipSeal = false, silent = false } = {}) {
         evidence_tier: useServer ? 'LIVE' : 'NOT_APPLICABLE',
         without_grant: bind && bind.without_grant,
         with_grant: bind && bind.with_grant,
+        // ── WHOSE IDENTITIES THESE ARE ───────────────────────────────────────────────────
+        //
+        // With a git target, the GOVERNED consume is the ledger claim and the GOVERNED attestation
+        // is the executor's seal over the observed transition — both on the git grant. The
+        // Postgres consume below really happened and keeps its own identity under
+        // `mechanism_jti`, because deleting it would make POINTS 3-5 reference an authorization
+        // the artifact no longer contains.
+        // THE MECHANISM'S OWN IDENTITIES, unchanged. POINT 6 verifies this attestation's binding
+        // and POINT 7 the gate preimage sealed with it, so swapping in the git chain's
+        // cr.exec.attest.v1 here would hand those points an envelope they do not verify — a
+        // different format, failing for a reason that has nothing to do with what they check.
+        // The GOVERNED consume and attestation travel in the transition block and the continuity
+        // identities, where the closed profile reads them.
         jti,
         attestation: token,
         before_count: authBefore,

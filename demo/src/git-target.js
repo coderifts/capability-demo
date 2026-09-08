@@ -511,6 +511,8 @@ async function runGitTarget({ receiptToken, now = Date.now(), issue = null, say 
       ran: true,
       grant_source: grantSource,
       grant_token: grant.token,
+      // The issuance DOCUMENT, so prove.js can report POINT 1 from a real authorize verdict.
+      issued: grant.issued || null,
       // The decision receipt the GOVERNED grant was issued against, carried so the artifact's
       // chain_receipt is the one this grant names rather than a neighbouring authorize's.
       chain_receipt: (grant.issued && grant.issued.chain_receipt) || null,

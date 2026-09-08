@@ -210,6 +210,9 @@ async function issueGitGrant({ base, targetUri, executorId, before, after }) {
   if (payload.after_payload_hash !== sha256pref(after)) return null;
   if (payload.nonce_hash !== sha256pref(nonce)) return null;
   if (payload.target_uri !== targetUri) return null;
+  // `issued` is carried whole: prove.js needs the ISSUANCE DOCUMENT (decision id, verdict
+  // fingerprint, chain receipt), not just the grant, or POINT 1 would have a grant with no
+  // authorize verdict behind it.
   return { token: issued.execution_grant, payload, nonce, issued };
 }
 
