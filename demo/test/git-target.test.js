@@ -112,10 +112,14 @@ describe('the authorization the executor acted under', () => {
     }]));
   };
 
-  test('the grant binds the operation, the target, the bytes and the end state', () => {
+  test('the grant binds the operation, the target, the bytes and the PRE-state', () => {
     assert.equal(R.grant.operation, OPERATION);
     assert.equal(R.grant.target_uri, CANONICAL_TARGET_URI);
-    assert.equal(R.grant.expected_state_token, R.expected.contract_commit);
+    // BASE, not the destination. `expected_state_token` is the state expected to be CURRENT when
+    // the executor acts — the ATOMIC challenge-first meaning, and what the live issuer binds. The
+    // local mint bound the destination until the two vocabularies were reconciled, which gave one
+    // signed field two meanings depending on who issued the grant.
+    assert.equal(R.grant.expected_state_token, R.expected.base);
     assert.equal(R.grant.after_payload_hash, contractDigest(proposedContractBytes()));
     assert.equal(R.expected.ref, TARGET_REF);
   });
