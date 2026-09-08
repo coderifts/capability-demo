@@ -40,6 +40,7 @@
     "packages/middleware/src/",
     "examples/atomic-v2/",
     "examples/sample-transcript/",
+    "examples/conformance-e2e-7-7/",
     "docs/adapter-strength.v1.json",
     "README.md",
     "LICENSE",

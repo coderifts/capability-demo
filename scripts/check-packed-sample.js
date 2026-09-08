@@ -31,7 +31,11 @@
  *                      is named
  *   cr.exec.v2         the grant is the challenge-first ATOMIC shape, not a bearer grant no
  *                      ATOMIC executor could consume
- *   POINT 8 PROVEN     and no point MODELLED — a modelled E2E is precisely the 0.1.4 sample
+ *   POINT 8 PROVEN     on THIS sample (prove-db-provider-readback). That is not
+ *                      TARGET_STATE_TRANSITION_PROVEN, not a merge, not PATH B, and not
+ *                      the Conformance 7/7 canonical fixture. A modelled E2E is the 0.1.4
+ *                      regression; calling this sample 7/7 is a different over-claim.
+ *   profile sidecar    PROFILE.md ships and names this sample as not-7/7
  *   signature          `--check` on the extracted pair exits 0
  *
  * Exit 0 = the shipped sample is current. Exit 1 = it is not, with the reason named.
@@ -46,6 +50,10 @@ const REPO = path.join(__dirname, '..');
 const ARTIFACT_V = 'cr.prove.artifact.v1';
 const SAMPLE = 'examples/sample-transcript/transcript.json';
 const KEYS = 'examples/sample-transcript/executor-keys.json';
+const PROFILE = 'examples/sample-transcript/PROFILE.md';
+const E2E_POINTER = 'examples/conformance-e2e-7-7/PROFILE.md';
+const PROFILE_ID = 'prove-db-provider-readback';
+const E2E_PROFILE_ID = 'conformance-end-to-end-7-7';
 
 const failures = [];
 const ok = [];
@@ -84,6 +92,8 @@ try {
   const root = path.join(out, 'package');
   const samplePath = path.join(root, SAMPLE);
   const keysPath = path.join(root, KEYS);
+  const profilePath = path.join(root, PROFILE);
+  const e2ePointerPath = path.join(root, E2E_POINTER);
 
   // ABSENCE IS A FAILURE, not a skip. A sample that did not ship is the strongest form of the
   // bug this checks for.
@@ -97,6 +107,29 @@ try {
       + 'the sample cannot be checked without the keyring it was signed with\n');
     process.exit(1);
   }
+  if (!fs.existsSync(profilePath)) {
+    process.stderr.write(`FAIL: the tarball does not contain ${PROFILE} — `
+      + 'the shipped sample has no profile label (it must not be read as Conformance 7/7)\n');
+    process.exit(1);
+  }
+  if (!fs.existsSync(e2ePointerPath)) {
+    process.stderr.write(`FAIL: the tarball does not contain ${E2E_POINTER} — `
+      + 'the 7/7 canonical is a different sample and must be named as such\n');
+    process.exit(1);
+  }
+
+  const profileText = fs.readFileSync(profilePath, 'utf8');
+  const e2eText = fs.readFileSync(e2ePointerPath, 'utf8');
+  check(profileText.includes(PROFILE_ID), `sample profile is ${PROFILE_ID}`,
+    `${PROFILE} does not name ${PROFILE_ID}`);
+  check(/not.*Conformance 7\/7|not.*canonical fixture/i.test(profileText),
+    'sample profile says this is not Conformance 7/7',
+    `${PROFILE} does not say this sample is not the Conformance 7/7 canonical fixture`);
+  check(e2eText.includes(E2E_PROFILE_ID), `7/7 pointer profile is ${E2E_PROFILE_ID}`,
+    `${E2E_POINTER} does not name ${E2E_PROFILE_ID}`);
+  check(e2eText.includes('TARGET_STATE_TRANSITION_PROVEN'),
+    '7/7 pointer names TARGET_STATE_TRANSITION_PROVEN (not merge)',
+    `${E2E_POINTER} does not name TARGET_STATE_TRANSITION_PROVEN`);
 
   const a = JSON.parse(fs.readFileSync(samplePath, 'utf8'));
 
@@ -122,8 +155,15 @@ try {
 
   const points = Array.isArray(a.points) ? a.points : [];
   const p8 = points.find((p) => p.n === 8);
-  check(!!p8 && p8.state === 'PROVEN', 'POINT 8 merge is PROVEN',
+  // THIS SAMPLE is prove-db-provider-readback. POINT 8 here is unsigned
+  // provider-readback / DB executor evidence. It is not a merge, not PATH B,
+  // and not TARGET_STATE_TRANSITION_PROVEN (that state is Conformance 7/7).
+  check(!!p8 && p8.state === 'PROVEN',
+    'POINT 8 on prove-db-provider-readback is PROVEN (not TARGET_STATE_TRANSITION_PROVEN, not a merge, not Conformance 7/7)',
     `POINT 8 is ${p8 ? p8.state : 'absent'}, not PROVEN`);
+  check(!!p8 && p8.state !== 'TARGET_STATE_TRANSITION_PROVEN',
+    'this packed sample is not the Conformance 7/7 canonical fixture',
+    'POINT 8 is TARGET_STATE_TRANSITION_PROVEN — that state belongs to conformance-end-to-end-7-7, not this sample');
   const modelled = points.filter((p) => p.state === 'MODELLED').map((p) => p.n);
   check(modelled.length === 0, 'no point is MODELLED',
     `these points are MODELLED: ${modelled.join(', ')}`);

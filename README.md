@@ -26,6 +26,15 @@ node bin/prove-all.js --check examples/sample-transcript/transcript.json \
   --keys examples/sample-transcript/executor-keys.json
 ```
 
+Two public E2E samples, distinct profiles — do not mix them:
+
+| Profile | Path | What POINT 8 is |
+| --- | --- | --- |
+| `prove-db-provider-readback` | `examples/sample-transcript/` (this package) | `PROVEN` on an unsigned provider-readback / DB executor. **Not** a merge, **not** PATH B, **not** Conformance 7/7. |
+| `conformance-end-to-end-7-7` | `@coderifts/conformance` `fixtures/recorded/end-to-end/` (pointer: `examples/conformance-e2e-7-7/`) | `TARGET_STATE_TRANSITION_PROVEN`. Replay: `npx @coderifts/conformance --assurance END_TO_END`. |
+
+The packed-check (`scripts/check-packed-sample.js`) asserts the shipped sample is the DB/provider-readback profile and **refuses** to call that POINT 8 a merge or the 7/7 canonical.
+
 Authorized vs blocked on one screen: `node examples/currently-authorized/run.js`.
 
 Four hops asserted end to end: authorize request shape, grant issuance, one-use consumption, seal
