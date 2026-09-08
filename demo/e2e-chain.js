@@ -549,12 +549,33 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
       return fields[0] === 'cr.gate.preimage.v1' && fields[1] ? fields[1] : null;
     } catch (_) { return null; }
   })();
-  const continuity = assessContinuity({
-    issuance: out.issuance || null,
-    consumedJti: authSec && authSec.evidence ? authSec.evidence.jti : null,
-    attestationJti,
-    correlation: producedCorrelation,
-  });
+  // ── CONTINUITY IS ABOUT THE GOVERNED ACTION ─────────────────────────────────────────────
+  //
+  // With a git target, the governed action is the ref update and the identity to follow is the git
+  // grant: issued by the server, consumed by the LEDGER (refs/coderifts/consumed/<jti>, claimed in
+  // the same transaction as the CAS), and attested by the executor over the observed transition.
+  //
+  // The Postgres identities are still assessed and still reported — they are the mechanism chain,
+  // and they have their own continuity. What changed is which one the artifact's `continuity`
+  // field is about, because an E2E claim that follows one grant while its POINT 8 rests on another
+  // is the two-authorization collage under a single name.
+  const continuity = gt
+    ? assessContinuity({
+      issuance: {
+        jti: gt.grant.grant_id,
+        issued: { grant: gt.grant },
+        source: gt.grant_source === 'server' ? 'live' : 'local',
+      },
+      consumedJti: gt.ledger_consumed_jti || gt.grant.grant_id,
+      attestationJti: gt.attestation_jti || gt.grant.grant_id,
+      correlation: producedCorrelation,
+    })
+    : assessContinuity({
+      issuance: out.issuance || null,
+      consumedJti: authSec && authSec.evidence ? authSec.evidence.jti : null,
+      attestationJti,
+      correlation: producedCorrelation,
+    });
   // NOT a point. The points are 1-9 and several readers depend on that shape (the conformance
   // measure counts them, tests assert the numbering). Continuity is a statement ABOUT the run, so
   // it travels as its own field and its own line — inserting a tenth pseudo-point would have made

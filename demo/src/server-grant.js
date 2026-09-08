@@ -158,6 +158,61 @@ async function consumeServerGrant({ post, grant, nonce, after }) {
   });
 }
 
+/**
+ * THE ONE GRANT FOR THE GIT TARGET — a live server authorize for `git.ref.update`.
+ *
+ * ── WHY THIS IS A SEPARATE CALL AND NOT `acquireServerGrant` WITH ARGUMENTS ────────────────
+ *
+ * The two differ in what they bind, not merely in strings: the Postgres grant is challenged on a
+ * digest the executor computed, this one on a COMMIT that must already exist. Folding them into
+ * one function with an options bag would let a caller ask for a git grant while passing a Postgres
+ * challenge and get something that verifies and authorizes nothing it intended.
+ *
+ * Returns null — never a locally-minted substitute — when there is no live issuer. The caller
+ * labels the fallback; a function that quietly returned a self-signed grant here would make
+ * "the server authorized this" unfalsifiable.
+ *
+ * MEASURED 2026-09-08 against the live issuer: it accepts `operation: git.ref.update` with a
+ * `git://` target and returns a v2 grant binding expected_state_token and after_payload_hash.
+ */
+async function issueGitGrant({ base, targetUri, executorId, before, after }) {
+  if (!haveLiveIssuer()) return null;
+  const nonce = crypto.randomBytes(32).toString('base64url');
+  const issued = await issueAuthorize({
+    live: true,
+    request: {
+      preflight_mode: 'authorize',
+      include_execution_grant: true,
+      grant_version: 'v2',
+      state_nonce: nonce,
+      // BASE, not a digest the executor invented. The grant is issued against the state the target
+      // is actually in, and the observer re-derives that state independently from the reflog.
+      expected_state_token: base,
+      executor_id: executorId,
+      adapter_id: 'git-ref-cas',
+      target_uri: targetUri,
+      context: {
+        operation: 'git.ref.update',
+        environment: 'production',
+        repository: 'coderifts/demo',
+        branch: 'main',
+      },
+      artifacts: [{ id: 'openapi.yaml', type: 'openapi', before, after }],
+    },
+  });
+  if (!issued || !issued.execution_grant) return null;
+  const payload = JSON.parse(
+    Buffer.from(String(issued.execution_grant).split('.')[0], 'base64url').toString('utf8'),
+  );
+  // THE BINDINGS, CHECKED HERE. An issuer that bound a different state or different bytes than the
+  // ones asked for must stop the run, not be discovered as a refusal three steps later.
+  if (payload.expected_state_token !== base) return null;
+  if (payload.after_payload_hash !== sha256pref(after)) return null;
+  if (payload.nonce_hash !== sha256pref(nonce)) return null;
+  if (payload.target_uri !== targetUri) return null;
+  return { token: issued.execution_grant, payload, nonce, issued };
+}
+
 /** Live when a key is present, recorded replay otherwise. Never silently one for the other. */
 function haveLiveIssuer() {
   const k = process.env.CODERIFTS_API_KEY;
@@ -165,6 +220,7 @@ function haveLiveIssuer() {
 }
 
 module.exports = {
+  issueGitGrant,
   OBJECT_ID,
   TARGET_URI,
   sha256pref,

@@ -54,7 +54,11 @@ const READ_ONLY_VERBS = Object.freeze([
   // `for-each-ref`, which changes every time any ref moves — so two observations of the SAME
   // repository disagreed about which repository they were, and the positive case failed. An
   // identity that moves is not an identity.
+  //
+  // `diff-tree` answers WHICH PATHS a move touched. It is a question, never an answer handed in:
+  // the observer asks "what changed between these two commits", not "did X change".
   'rev-parse', 'show', 'cat-file', 'reflog', 'config', 'ls-tree', 'for-each-ref', 'rev-list',
+  'diff-tree',
 ]);
 
 /** The keys a caller may supply. Anything else is the answer being handed to the observer. */
@@ -165,6 +169,23 @@ function observeGitTarget(input) {
     }
   })();
 
+  // 5 — WHAT ELSE MOVED. The governed bytes are read AT A PATH; the SET OF PATHS the transition
+  // touched is a different fact, and without it a commit can carry the authorized bytes and
+  // unauthorized company. Observed here, compared by the grader.
+  let changed_paths = null;
+  let changed_paths_error = null;
+  if (before_commit) {
+    try {
+      const out = readOnlyGit(repoPath, ['diff-tree', '-r', '--no-commit-id', '--name-only',
+        before_commit, observed_commit]);
+      changed_paths = out.split('\n').map((x) => x.trim()).filter(Boolean).sort();
+    } catch (err) {
+      changed_paths_error = (err && err.message) || 'unreadable';
+    }
+  } else {
+    changed_paths_error = 'no previous value is known, so no diff can be taken';
+  }
+
   return {
     v: READBACK_V,
     target_ref: ref,
@@ -182,6 +203,8 @@ function observeGitTarget(input) {
     contract_path: contractPath,
     contract_blob_digest,
     contract_bytes_len,
+    changed_paths,
+    ...(changed_paths_error ? { changed_paths_error } : {}),
     ...(blob_error ? { contract_blob_error: blob_error } : {}),
     observation_source: 'git-object-database',
     observer_mode: 'read_only',

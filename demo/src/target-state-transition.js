@@ -264,6 +264,36 @@ function gradeStateTransition(o = {}) {
     checks.push({ id: 'single_parent', ok: null, detail: 'UNCHECKED: no repository path supplied' });
   }
 
+  // ── NOTHING ELSE MOVED ──────────────────────────────────────────────────────────────────
+  //
+  // MEASURED, and this is why the check exists rather than a wider grant schema. A commit carrying
+  // the AUTHORIZED contract bytes at the governed path, with BASE as its single parent, plus one
+  // extra file the grant never mentioned, passed every check above:
+  //
+  //   PROVEN  ugyanazok a bajtok + becsempeszett fajl   files=2 [contracts/openapi.yaml deploy.sh]
+  //
+  // after_state_token in the grant would also have caught it — by naming the destination commit
+  // id. It is not needed: the grant authorizes A CHANGE TO THE GOVERNED CONTRACT, and "the move
+  // touched only that path" is a fact the object database answers on its own. Binding a commit id
+  // would additionally force the producer to build the commit BEFORE asking for authorization,
+  // which is a heavier ordering constraint for a property already checkable here.
+  //
+  // A commit whose message or author differs but whose TREE is identical is NOT refused: the claim
+  // is about the state reached, and that state is the same one.
+  if (exp.contract_path != null) {
+    if (!Array.isArray(obs.changed_paths)) {
+      note('no_unauthorized_company', false,
+        `the observation reports no changed_paths (${obs.changed_paths_error || 'absent'}), so what `
+        + 'else the move carried is unknown — and unknown is not clean');
+    } else {
+      const extra = obs.changed_paths.filter((x) => x !== exp.contract_path);
+      note('no_unauthorized_company', extra.length === 0,
+        `the transition also changed ${extra.join(', ')} — the grant authorized the governed `
+        + `contract (${exp.contract_path}) and nothing else`,
+        `the transition touched only ${exp.contract_path}`);
+    }
+  }
+
   // The observation must come from a reader that could not write, and from the object database.
   note('observer_mode', obs.observer_mode === 'read_only',
     `the observation declares observer_mode ${obs.observer_mode}`);

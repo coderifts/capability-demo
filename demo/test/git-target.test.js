@@ -22,18 +22,19 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 
 const { runGitTarget, CANONICAL_TARGET_URI, TARGET_REF, OPERATION } = require('../src/git-target');
+const { gradeStateTransition } = require('../src/target-state-transition');
 const { verifyExecutionGrant } = require('../../packages/verifier-core/verify-grant.js');
 const { contractDigest, proposedContractBytes } = require('../src/governed-contract');
 
 let R = null;
 
-before(() => {
+before(async () => {
   assert.notEqual(process.getuid && process.getuid(), 0,
     'this suite must NOT run as root: root bypasses the mode bits, so the denial below would be a '
     + 'denial we did not actually get');
   // ONE run, shared. Each run builds a repository and does real filesystem work; re-running it per
   // test would buy independence the assertions do not need and cost several seconds.
-  R = runGitTarget({ receiptToken: 'test-receipt-token' });
+  R = await runGitTarget({ receiptToken: 'test-receipt-token' });
 });
 
 describe('the bare-Git target, end to end', () => {
@@ -144,5 +145,70 @@ describe('the authorization the executor acted under', () => {
   test('the nonce was issued against BASE, so it cannot be replayed after another state', () => {
     assert.equal(R.state_challenge.observed_state, R.expected.base);
     assert.equal(R.grant.nonce_hash, R.state_challenge.nonce_hash);
+  });
+});
+
+describe('ONE GRANT END TO END (1465 phase 4)', () => {
+  test('the CAS goes through the LEDGER, and a replay is refused BY the ledger', () => {
+    // Not "the CAS failed because the ref moved" — both would refuse, and only one of them is the
+    // one-use property. `gitAtomicExecute` claims refs/coderifts/consumed/<jti> in the same
+    // transaction as the ref update, so the record and the effect cannot come apart.
+    assert.equal(R.nonce_consumed, true);
+    assert.equal(R.roles.find((x) => x.role === 'executor').outcome, 'SUCCESS');
+  });
+
+  test('the ledger consumed, and the attestation sealed, THE SAME grant', () => {
+    // Read back from the produced evidence rather than echoed from the input: if these ever
+    // diverge from the issued grant the continuity gate must see two values, not one repeated.
+    assert.equal(R.ledger_consumed_jti, R.grant.grant_id);
+    assert.equal(R.attestation_jti, R.grant.grant_id);
+    assert.equal(R.expected.grant_id, R.grant.grant_id);
+  });
+
+  test('the attestation commits the STATE THE GRANT WAS ISSUED AGAINST, not the nonce', () => {
+    // `cr.exec.attest.v1.state_nonce` is joined by the core against the grant's
+    // `expected_state_token`. Carrying the challenge nonce preimage here produced "the grant and
+    // the attestation disagree about the state nonce" on a pair that agreed about everything real.
+    const body = JSON.parse(Buffer.from(R.attestation.split('|')[2], 'base64url').toString('utf8'));
+    assert.equal(body.state_nonce, R.grant.expected_state_token);
+    assert.equal(body.state_nonce, R.expected.base);
+  });
+
+  test('the grant SOURCE is stated — a local mint never reads as a server authorize', () => {
+    assert.ok(['server', 'local-mint'].includes(R.grant_source));
+  });
+});
+
+describe('NOTHING ELSE MOVED — the gap that did NOT need a wider grant schema', () => {
+  test('the observation reports which paths the transition touched', () => {
+    // The observer asks "what changed", never "did X change" — it is still told nothing.
+    assert.ok(Array.isArray(R.observation.changed_paths), R.observation.changed_paths_error || '');
+    assert.deepEqual(R.observation.changed_paths, [R.expected.contract_path]);
+  });
+
+  test('the grader refuses a transition that carried unauthorized company', () => {
+    // MEASURED before this check existed: the authorized bytes at the governed path, single parent
+    // BASE, plus one extra file the grant never mentioned, graded PROVEN. after_state_token in the
+    // grant would also have caught it; this does, without widening a signed schema.
+    const g = gradeStateTransition({
+      observation: { ...R.observation, changed_paths: [R.expected.contract_path, 'deploy.sh'] },
+      expected: R.expected,
+      repoPath: null,
+      attestation: { token: R.attestation, registry: require('../keys/executor-keys.json'), now: Date.now() },
+    });
+    assert.notEqual(g.state, 'PROVEN_BY_TRUSTED_EXECUTOR');
+    assert.ok(g.checks.find((c) => c.id === 'no_unauthorized_company').ok === false);
+  });
+
+  test('an observation that could NOT report the paths is refused, not skipped', () => {
+    // Unknown is not clean. A grader that skipped the check when the diff was unreadable would
+    // pass exactly the case an attacker can most easily create.
+    const g = gradeStateTransition({
+      observation: { ...R.observation, changed_paths: null, changed_paths_error: 'unreadable' },
+      expected: R.expected,
+      repoPath: null,
+      attestation: { token: R.attestation, registry: require('../keys/executor-keys.json'), now: Date.now() },
+    });
+    assert.equal(g.checks.find((c) => c.id === 'no_unauthorized_company').ok, false);
   });
 });

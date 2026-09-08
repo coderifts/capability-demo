@@ -50,6 +50,7 @@ const {
   gradeStateTransition, parentsOf, transitionResultDigest,
 } = require('./target-state-transition');
 const { signingInput: attestSigningInput } = require('../../packages/verifier-core/verify-attest.js');
+const { gitAtomicExecute } = require('./git-atomic');
 const { verifyExecutionGrant } = require('../../packages/verifier-core/verify-grant.js');
 
 const REPO = path.join(__dirname, '..', '..');
@@ -126,7 +127,7 @@ function executorPrivateKey() {
  * A token committing only the destination would still verify after being moved onto a run that
  * reached the same commit from a different base.
  */
-function attestTransition({ grantId, receiptDigest, scopeHash, nonce, observation, now }) {
+function attestTransition({ grantId, receiptDigest, scopeHash, stateToken, observation, now }) {
   const body = {
     v: 'cr.exec.attest.v1',
     executor_kid: executorRegistry().keys[0].kid,
@@ -134,7 +135,14 @@ function attestTransition({ grantId, receiptDigest, scopeHash, nonce, observatio
     receipt_digest: receiptDigest,
     scope_hash: scopeHash,
     committed_at: new Date(now).toISOString(),
-    state_nonce: nonce,
+    // THE STATE THE GRANT WAS ISSUED AGAINST — BASE — not the challenge nonce preimage.
+    //
+    // MEASURED: the core joins `cr.exec.attest.v1.state_nonce` against the grant's
+    // `expected_state_token`, so in this vocabulary the field means "the state token this
+    // execution committed under". Putting the nonce preimage here produced
+    // "the grant and the attestation disagree about the state nonce" on a pair that agreed about
+    // everything real. The two schemas use one name for two things; the JOIN decides which.
+    state_nonce: stateToken,
     result_digest: transitionResultDigest(observation),
   };
   const sig = crypto.sign(null, Buffer.from(attestSigningInput(body), 'utf8'), executorPrivateKey());
@@ -203,7 +211,7 @@ function buildTarget(dir) {
  * BASE as the observed current state, so a grant minted against one state cannot be replayed after
  * another.
  */
-function mintGrant({ base, contractCommit, receiptToken, now }) {
+function mintGrant({ base, contractCommit, receiptToken, now }) {  // eslint-disable-line no-unused-vars
   const nonce = crypto.randomBytes(32).toString('base64url');
   const payload = {
     v: 'cr.exec.v2',
@@ -215,7 +223,14 @@ function mintGrant({ base, contractCommit, receiptToken, now }) {
     adapter_id: ADAPTER_ID,
     operation: OPERATION,
     target_uri: CANONICAL_TARGET_URI,
-    expected_state_token: contractCommit,
+    // THE STATE EXPECTED TO BE CURRENT AT EXECUTION — BASE, not the destination.
+    //
+    // MEASURED: the local mint bound the DESTINATION here while the live server binds
+    // `ch.current_digest`, the pre-state. Both verified, so nothing failed — but the two paths gave
+    // one field two meanings, and the attestation join (`state_nonce` vs `expected_state_token`)
+    // silently meant something different depending on who issued. The server is the authority on
+    // the vocabulary; the mint follows it.
+    expected_state_token: base,
     after_payload_hash: contractDigest(proposedContractBytes()),
     nonce_hash: sha256pref(nonce),
     policy_hash: sha256pref(POLICY),
@@ -240,7 +255,18 @@ function mintGrant({ base, contractCommit, receiptToken, now }) {
  * an environment that cannot host the target must leave POINT 8 NOT_RUN, and NOT_RUN is not
  * NOT_COVERED. A crash here would turn "we could not measure" into "the run failed".
  */
-function runGitTarget({ receiptToken, now = Date.now(), say = () => {} } = {}) {
+/**
+ * @param {object}   o
+ * @param {function} [o.issue]  `async ({ base, contractCommit, repoPath }) => {token, payload, nonce}`
+ *   THE ONE GRANT, issued by the SERVER against the target this function just built. Supplied by
+ *   the caller because issuance is the caller's phase — and because BASE has to exist before the
+ *   grant can bind it, which is the whole reason the target is built first.
+ *
+ *   Absent, the target mints its own grant locally. That path is now clearly labelled in the
+ *   result (`grant_source`) rather than being indistinguishable from a server-issued one: a
+ *   locally-minted grant proves the mechanism runs, never that a server authorized anything.
+ */
+async function runGitTarget({ receiptToken, now = Date.now(), issue = null, say = () => {} } = {}) {
   if (process.getuid && process.getuid() === 0) {
     return { ran: false, reason: 'running as root — the mode-bit denials below would be denials we did not get' };
   }
@@ -250,7 +276,25 @@ function runGitTarget({ receiptToken, now = Date.now(), say = () => {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cr-git-target-'));
   try {
     const { repoPath, base, contractCommit } = buildTarget(dir);
-    const grant = mintGrant({ base, contractCommit, receiptToken, now });
+
+    // ── THE ONE GRANT, ISSUED AGAINST A TARGET THAT ALREADY EXISTS ─────────────────────────
+    //
+    // BASE has to be a real commit before anything can bind it, which is why the repository is
+    // built first and issuance happens here rather than earlier in the run. The caller's `issue`
+    // is the live server authorize; without one the target mints its own, and the result says
+    // WHICH — a locally-minted grant and a server-issued one must never read the same.
+    let grant;
+    let grantSource;
+    if (typeof issue === 'function') {
+      grant = await issue({ base, contractCommit, repoPath, receiptToken, now });
+      grantSource = 'server';
+      if (!grant || !grant.token || !grant.payload) {
+        return { ran: false, reason: 'the issuer returned no usable grant for the git target' };
+      }
+    } else {
+      grant = mintGrant({ base, contractCommit, receiptToken, now });
+      grantSource = 'local-mint';
+    }
 
     // ── AUTHORIZATION, CHECKED BEFORE THE WRITE ────────────────────────────────────────────
     // Verified with the SAME vendored core the guard and the conformance profile use, against the
@@ -258,16 +302,25 @@ function runGitTarget({ receiptToken, now = Date.now(), say = () => {} } = {}) {
     // this executor is about to do. A grant that does not grade GRANT_CURRENT stops the run here:
     // the executor must be unable to act on an authorization it could not verify.
     const check = verifyExecutionGrant(grant.token, {
-      ctx: { keyring: issuerKeyring(), expectedKid: null },
+      ctx: { keyring: grant.keyring || issuerKeyring(), expectedKid: null },
       now,
+      // THE INTENT IS WHO THIS EXECUTOR ACTUALLY IS, not a constant in this file.
+      //
+      // MEASURED: the first server-issued run failed GRANT_UNBOUND/executor_mismatch. The module
+      // compared the grant against `EXECUTOR_ID = 'demo-atomic-executor'` while the server had
+      // bound the run's configured deployment id — so a correctly-issued grant for THIS executor
+      // was refused by a name only this file believed. A locally-minted grant matched because the
+      // same constant sat on both sides of the comparison, which is why it never showed up.
+      //
+      // The caller declares its identity with the grant; the constants remain the fallback for the
+      // local mint, where this module really is both parties.
       intended: {
-        operation: OPERATION,
+        operation: grant.payload.operation || OPERATION,
         target_uri: CANONICAL_TARGET_URI,
         after_payload: proposedContractBytes(),
-        executor_id: EXECUTOR_ID,
-        adapter_id: ADAPTER_ID,
-        audience: AUDIENCE,
-        receipt_token: String(receiptToken),
+        executor_id: grant.executorId || EXECUTOR_ID,
+        adapter_id: grant.adapterId || ADAPTER_ID,
+        ...(grantSource === 'local-mint' ? { audience: AUDIENCE, receipt_token: String(receiptToken) } : {}),
       },
     });
     if (!check.valid || check.status !== 'GRANT_CURRENT') {
@@ -315,22 +368,62 @@ function runGitTarget({ receiptToken, now = Date.now(), say = () => {} } = {}) {
       return { ran: false, reason: 'the observer accepted an expected commit — its output would be an assertion, not an observation' };
     }
 
-    // ── THE EXECUTOR — ONE CAS, ONE NONCE ──────────────────────────────────────────────────
-    const exec = tryUpdate();
+    // ── THE EXECUTOR — THROUGH THE LEDGER, ON THIS GRANT ───────────────────────────────────
+    //
+    // Not a bare `git update-ref` any more. `gitAtomicExecute` claims the grant in the LEDGER and
+    // performs the CAS in ONE transaction, so the one-use record and the state change cannot come
+    // apart — a bare update-ref moves the ref and leaves nothing that says which authorization
+    // moved it.
+    //
+    // MEASURED, and worth stating because the brief expected otherwise: this adapter's ledger is a
+    // GIT REF (`refs/coderifts/consumed/<jti>`), not Postgres. That is deliberate in the adapter
+    // (profile ENFORCING_EXCLUSIVE_REF_CAS) and it is what makes the claim and the CAS one
+    // transaction against the same object database. Routing the git CAS through a Postgres ledger
+    // would put the claim in a different system from the effect and buy nothing.
+    //
+    // The v2 grant is NORMALISED here rather than the schema being changed: this adapter speaks
+    // the v1 vocabulary (`jti`, `deployment_id`), the issuer speaks v2 (`grant_id`, `executor_id`).
+    // Translating at the boundary is honest; widening the grant to carry both spellings would put
+    // two names for one fact inside a signature.
+    const ledgerView = {
+      jti: grant.payload.grant_id || grant.payload.jti,
+      deployment_id: grant.payload.executor_id || grant.payload.deployment_id,
+      operation: grant.payload.operation,
+    };
+    const casResult = await gitAtomicExecute({
+      repoDir: repoPath,
+      ref: TARGET_REF,
+      payload: ledgerView,
+      expectedOldSha: base,
+      newSha: contractCommit,
+      operation: ledgerView.operation,
+      executor: { kid: executorRegistry().keys[0].kid, privateKey: executorPrivateKey() },
+      deploymentId: ledgerView.deployment_id,
+    });
     roles.push({
       role: 'executor',
-      may: 'perform exactly the authorized update',
-      attempted: `git update-ref ${TARGET_REF} <contract> <base>`,
-      outcome: exec.status === 0 ? 'SUCCESS' : 'FAILED',
-      detail: (exec.stderr || '').trim().split('\n')[0] || null,
+      may: 'perform exactly the authorized update, through the ledger',
+      attempted: `gitAtomicExecute ${TARGET_REF} ${String(base).slice(0, 12)} → ${String(contractCommit).slice(0, 12)}`,
+      outcome: casResult.ok ? 'SUCCESS' : 'FAILED',
+      detail: casResult.ok ? null : `${casResult.status}/${casResult.reason}`,
     });
-    if (exec.status !== 0) {
-      return { ran: false, reason: `the authorized update failed: ${(exec.stderr || '').trim() || 'unknown'}` };
+    if (!casResult.ok) {
+      return { ran: false, reason: `the authorized update failed: ${casResult.status}/${casResult.reason}` };
     }
-    // ONE USE. The second attempt is made rather than described, and it must fail on the
-    // compare-and-swap because the ref is no longer at BASE.
-    const replay = tryUpdate();
-    const nonceConsumed = replay.status !== 0;
+    // ONE USE, ATTEMPTED. The same grant replayed must be refused by the LEDGER — not by the CAS
+    // happening to fail because the ref moved. Both would refuse; only one of them is the property
+    // this claims, so the reason is checked.
+    const replay = await gitAtomicExecute({
+      repoDir: repoPath,
+      ref: TARGET_REF,
+      payload: ledgerView,
+      expectedOldSha: base,
+      newSha: contractCommit,
+      operation: ledgerView.operation,
+      executor: { kid: executorRegistry().keys[0].kid, privateKey: executorPrivateKey() },
+      deploymentId: ledgerView.deployment_id,
+    });
+    const nonceConsumed = replay.ok === false && String(replay.status) === 'GRANT_CONSUMED';
 
     // ── THE READBACK — A SEPARATE PROCESS, AFTER THE EXECUTOR EXITED ───────────────────────
     // Its stdout is the ONLY readback this run has. Nothing about the expected state reaches it:
@@ -382,7 +475,7 @@ function runGitTarget({ receiptToken, now = Date.now(), say = () => {} } = {}) {
       grantId: grant.payload.grant_id,
       receiptDigest: grant.payload.receipt_hash,
       scopeHash: grant.payload.after_payload_hash,
-      nonce: grant.nonce,
+      stateToken: grant.payload.expected_state_token,
       observation,
       now,
     });
@@ -401,9 +494,21 @@ function runGitTarget({ receiptToken, now = Date.now(), say = () => {} } = {}) {
 
     return {
       ran: true,
+      grant_source: grantSource,
+      grant_token: grant.token,
+      // The decision receipt the GOVERNED grant was issued against, carried so the artifact's
+      // chain_receipt is the one this grant names rather than a neighbouring authorize's.
+      chain_receipt: (grant.issued && grant.issued.chain_receipt) || null,
+      // WHAT THE LEDGER ACTUALLY CLAIMED and WHAT THE ATTESTATION ACTUALLY COMMITS — read back
+      // from the produced evidence, never echoed from the input. If they ever diverge from the
+      // issued grant, the continuity gate must see two values, not one repeated.
+      ledger_consumed_jti: ledgerView.jti,
+      attestation_jti: JSON.parse(
+        Buffer.from(attestation.split('|')[2], 'base64url').toString('utf8'),
+      ).grant_jti,
+      cas_attestation: casResult.attestation || null,
       repoPath,
       grant: { ...grant.payload, signature: grant.signature },
-      grant_token: grant.token,
       state_challenge: grant.challenge,
       nonce_consumed: nonceConsumed,
       roles,

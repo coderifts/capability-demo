@@ -311,9 +311,41 @@ async function runAll({ cwd = process.cwd(), gitTarget = undefined } = {}) {
       ? process.env.CODERIFTS_GIT_TARGET !== '0'
       : gitTarget === true;
     const gitTransition = gitTargetEnabled
-      ? runGitTarget({
+      ? await runGitTarget({
         receiptToken: (prove.issuance && prove.issuance.issued && prove.issuance.issued.chain_receipt)
           || prove.token,
+        // THE ONE GRANT. Supplied by the caller because BASE must exist before an authorize can
+        // bind it, and the target is what creates BASE. `issueGitGrant` asks the live server for a
+        // git.ref.update grant over the same governed bytes; with no live issuer it returns null
+        // and the target mints its own, which the result labels `local-mint`.
+        issue: async ({ base }) => {
+          const { issueGitGrant } = require(path.join(DEMO, 'src', 'server-grant.js'));
+          const { canonicalContractBytes, proposedContractBytes } = require(path.join(DEMO, 'src', 'governed-contract.js'));
+          const { CANONICAL_TARGET_URI } = require(path.join(DEMO, 'src', 'git-target.js'));
+          const g = await issueGitGrant({
+            base,
+            targetUri: CANONICAL_TARGET_URI,
+            executorId: require(path.join(DEMO, 'src', 'db.js')).configuredDeploymentId(),
+            before: canonicalContractBytes(),
+            after: proposedContractBytes(),
+          });
+          if (!g) return null;
+          // The ISSUER's keyring, not the demo's. A grant checked against the key that signed it
+          // is a signature verifying itself; this is the registry the issuer publishes.
+          const { loadIssuerKeys } = require(path.join(DEMO, 'src', 'authorize-issue.js'));
+          const issuer = loadIssuerKeys();
+          return {
+            ...g,
+            // Declared alongside the grant so the target compares against who this executor IS,
+            // never against a constant it happens to share with the mint path.
+            executorId: require(path.join(DEMO, 'src', 'db.js')).configuredDeploymentId(),
+            adapterId: 'git-ref-cas',
+            keyring: new Map((issuer.registry.keys || []).map((k) => [k.kid, {
+              publicKey: crypto.createPublicKey(k.public_key_pem),
+              status: k.status || 'active',
+            }])),
+          };
+        },
         say: () => {},
       })
       : {
@@ -423,6 +455,27 @@ async function runAll({ cwd = process.cwd(), gitTarget = undefined } = {}) {
     // root cannot describe a set the artifact does not contain. The provider readback is included
     // when one was supplied: it is a sidecar the artifact does not republish, and binding its
     // bytes here is what stops a readback from another run being paired with this one.
+    // ── WHICH GRANT THE ARTIFACT IS ABOUT ───────────────────────────────────────────────────
+    //
+    // When a git target ran, the GOVERNED ACTION of this run is the ref update, and the grant that
+    // authorized it is the one every downstream reader must see: the issuance grant, the evidence
+    // root's execution_grant slot, the consumed grant, the attested grant and the transition grant
+    // are then ONE identity rather than five that happen to be printed together.
+    //
+    // The Postgres sections keep their own grant and keep their meaning — they demonstrate the
+    // executor MECHANISM (a denied host write, one-use consume, a CAS under concurrency). They are
+    // not a second governed action, and folding their grant into the artifact's identity is what
+    // made an E2E claim out of two authorizations.
+    const governed = (chain.targetStateTransition && gitTransition.ran && gitTransition.grant_token)
+      ? {
+        execution_grant: gitTransition.grant_token,
+        grant: gitTransition.grant,
+        grant_id: gitTransition.grant.grant_id,
+        source: gitTransition.grant_source,
+        chain_receipt: gitTransition.chain_receipt || null,
+      }
+      : null;
+
     const evidenceRoot = (() => {
       try {
         const { buildEvidenceRoot } = require(path.join(REPO, 'packages', 'verifier-core', 'evidence-root.js'));
@@ -437,20 +490,31 @@ async function runAll({ cwd = process.cwd(), gitTarget = undefined } = {}) {
           target_uri: g.target_uri || null,
           contract_commit: chain.correlation ? chain.correlation.contract_commit : null,
           tokens: {
-            chain_receipt: (iss.issued && iss.issued.chain_receipt) || null,
-            execution_grant: (iss.issued && iss.issued.execution_grant) || null,
+            chain_receipt: (governed && governed.chain_receipt)
+              || ((iss.issued && iss.issued.chain_receipt) || null),
+            execution_grant: governed
+              ? governed.execution_grant
+              : ((iss.issued && iss.issued.execution_grant) || null),
             transcript_token: prove.token,
             correlation: chain.correlation || null,
             atomic_attestation: chain.attestationToken || null,
             provider_readback: chain.readbackBytes || null,
           },
-          claims: {
-            grant_id: ids.issued_jti || iss.jti || null,
-            receipt_hash: g.receipt_hash || g.receipt_digest || null,
-            scope_hash: ids.issued_scope_hash || g.scope_hash || g.after_payload_hash || null,
-            policy_hash: g.policy_hash || null,
-            state_token_hash: g.expected_state_token || null,
-          },
+          claims: governed
+            ? {
+              grant_id: governed.grant.grant_id,
+              receipt_hash: governed.grant.receipt_hash,
+              scope_hash: governed.grant.after_payload_hash,
+              policy_hash: governed.grant.policy_hash,
+              state_token_hash: governed.grant.expected_state_token,
+            }
+            : {
+              grant_id: ids.issued_jti || iss.jti || null,
+              receipt_hash: g.receipt_hash || g.receipt_digest || null,
+              scope_hash: ids.issued_scope_hash || g.scope_hash || g.after_payload_hash || null,
+              policy_hash: g.policy_hash || null,
+              state_token_hash: g.expected_state_token || null,
+            },
           privateKey: executorPrivateKeyForRoot(),
         });
       } catch (err) {
@@ -514,12 +578,35 @@ async function runAll({ cwd = process.cwd(), gitTarget = undefined } = {}) {
         captured_at: prove.issuance.captured_at,
         decision_id: prove.issuance.decision_id,
         verdict_fingerprint: prove.issuance.verdict_fingerprint,
-        kid: prove.issuance.kid,
-        jti: prove.issuance.jti,
+        kid: governed ? governed.grant.kid : prove.issuance.kid,
+        // THE GOVERNED GRANT'S ID. Left as the mechanism grant's, this field said one thing while
+        // `issuance.grant` said another — and the continuity gate reads THIS one, so a run whose
+        // whole chain was one grant reported "the consumed or attested jti is not the issued one".
+        // A field that names a different grant than the object beside it is the collage in
+        // miniature.
+        jti: governed ? governed.grant.grant_id : prove.issuance.jti,
         verify_status: prove.issuance.verify && prove.issuance.verify.status,
-        execution_grant: prove.issuance.issued && prove.issuance.issued.execution_grant,
-        chain_receipt: prove.issuance.issued && prove.issuance.issued.chain_receipt,
-        grant: prove.issuance.issued && prove.issuance.issued.grant,
+        execution_grant: governed
+          ? governed.execution_grant
+          : (prove.issuance.issued && prove.issuance.issued.execution_grant),
+        // THE RECEIPT THE GOVERNED GRANT WAS ISSUED AGAINST.
+        //
+        // MEASURED: carrying the Postgres authorize's receipt here while the git grant was issued
+        // against its own produced "the grant was issued against receipt X, but the artifact
+        // carries Y" from the evidence root — two authorize calls, two decision receipts, one
+        // artifact. The governed action's receipt is the one this chain is about.
+        chain_receipt: (governed && governed.chain_receipt)
+          || (prove.issuance.issued && prove.issuance.issued.chain_receipt),
+        grant: governed ? governed.grant : (prove.issuance.issued && prove.issuance.issued.grant),
+        // WHICH ACTION THIS GRANT AUTHORIZED, said out loud. A reader must not have to infer from
+        // an operation string whether the artifact is about a database write or a ref update.
+        ...(governed ? { governed_action: 'git.ref.update', grant_source: governed.source } : {}),
+        // The mechanism grant is CARRIED, never dropped: POINTS 2-7 are about it, and deleting it
+        // here would make those points reference an authorization the artifact does not contain.
+        ...(governed ? {
+          mechanism_grant: prove.issuance.issued && prove.issuance.issued.grant,
+          mechanism_execution_grant: prove.issuance.issued && prove.issuance.issued.execution_grant,
+        } : {}),
         does_not_prove: prove.issuance.does_not_prove,
       } : null,
       // Reused verbatim from demo/bundle.js — the ceiling is not restated in this file's words,
