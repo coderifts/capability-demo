@@ -47,7 +47,10 @@ const PROFILE = 'END_TO_END';
 const ROLES = Object.freeze({
   'transcript.json': 'bundle',
   'executor-keys.json': 'keyring',
-  'readback.json': 'provider_observation',
+  // THE ROLE NAMES WHAT THE FILE IS. `provider_observation` was written for a GitHub capture; this
+  // is the observer's read of the LOCAL target, and there is no provider in the run. A role a
+  // reader takes at face value must not name a party who is not there.
+  'readback.json': 'target_state_observation',
   'negative-transcript.json': 'negative',
   'negative-readback.json': 'negative_observation',
 });

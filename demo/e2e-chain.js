@@ -197,9 +197,8 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
     gt
       ? (governedJti
         ? `the governed grant was issued and consumed: jti ${governedJti}, claimed in the ledger `
-          + `(refs/coderifts/consumed/…) in the same transaction as the ref update and READ BACK `
-          + `from the object database. POINTS 3-7 below are the executor MECHANISM and carry their `
-          + `own grant (${auth && auth.evidence ? auth.evidence.jti : 'none'}).`
+          + '(refs/coderifts/consumed/…) in the same transaction as the ref update and READ BACK '
+          + 'from the object database'
         : 'the governed grant is not in the ledger — nothing recorded consuming it')
       : (authOk ? `a grant was issued and consumed: jti ${auth.evidence.jti}` : 'no grant reached the ledger'));
 
@@ -207,18 +206,54 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
     && deny.evidence && deny.evidence.host_sqlstate === '42501'
     && deny.evidence.before_count === deny.evidence.after_count
     && typeof deny.evidence.before_count === 'number';
-  point(3, 'executor credential-boundary', PROVEN, !!denyReadback,
-    denyReadback
-      ? `host INSERT refused SQLSTATE 42501; articles count unchanged (${deny.evidence.before_count} → ${deny.evidence.after_count})`
-      : 'deny panel missing target-side 42501 or unchanged-state read-back');
+  // ── POINTS 3-7 AND 9 DESCRIBE THE GOVERNED TARGET ───────────────────────────────────────
+  //
+  // MEASURED on the shipped capture: the structured lane carried ONE grant on a `git_bare_ref`
+  // target while these points said `SQLSTATE 42501`, `articles count unchanged`, `the ledger PK`
+  // and named a SECOND grant. Every sentence was true of the Postgres mechanism run and none of
+  // it was about the thing POINT 8 proves. A reader who reads the prose — which is what prose is
+  // for — met two mechanisms and two authorizations under a claim that says one.
+  //
+  // With a git target these are generated from the GIT chain's own evidence. The Postgres panels
+  // still run and still gate the run (a failure there fails the section); what changed is that the
+  // chain's account of ITSELF is about the target it actually governed.
+  const gitRole = (name) => (gt ? (gt.roles || []).find((r) => r.role === name) : null);
+  const hostDenied = gitRole('host');
+  point(3, 'executor credential-boundary', PROVEN,
+    gt ? !!(hostDenied && hostDenied.outcome === 'DENIED') : !!denyReadback,
+    gt
+      ? (hostDenied && hostDenied.outcome === 'DENIED'
+        ? `the HOST role attempted \`${hostDenied.attempted}\` against the governed ref and the `
+          + `target refused it (${hostDenied.detail || 'denied'}); the ref did not move. The `
+          + 'separation is the TARGET\'s mode bits, not two identities — one machine, one OS user'
+        : 'the host write was not refused, so no credential boundary was shown on this target')
+      : (denyReadback
+        ? `host INSERT refused SQLSTATE 42501; articles count unchanged (${deny.evidence.before_count} → ${deny.evidence.after_count})`
+        : 'deny panel missing target-side 42501 or unchanged-state read-back'));
 
   const replay = sectionOf(out, 'replay');
-  point(4, 'nonce consume (one-use)', PROVEN, replay && replay.verdict === 'PASS',
-    'the same grant cannot be consumed twice — the ledger PK is the mechanism');
+  point(4, 'nonce consume (one-use)', PROVEN,
+    gt ? gt.nonce_consumed === true : !!(replay && replay.verdict === 'PASS'),
+    gt
+      ? (gt.nonce_consumed === true
+        ? 'the same grant replayed against the same target was refused BY THE LEDGER '
+          + '(GRANT_CONSUMED), not by the compare-and-swap happening to fail — both would refuse, '
+          + 'and only one of them is the one-use property. The claim on '
+          + '`refs/coderifts/consumed/<jti>` is made in the same transaction as the ref update'
+        : 'the replay was not refused by the ledger, so one-use is not shown on this target')
+      : 'the same grant cannot be consumed twice — the ledger PK is the mechanism');
 
   const conc = sectionOf(out, 'concurrency');
-  point(5, 'CAS under concurrency', PROVEN, conc && conc.verdict === 'PASS',
-    'two racing writers, exactly one mutation');
+  const gitExec = gitRole('executor');
+  point(5, 'CAS under concurrency', PROVEN,
+    gt ? !!(gitExec && gitExec.outcome === 'SUCCESS') : !!(conc && conc.verdict === 'PASS'),
+    gt
+      ? (gitExec && gitExec.outcome === 'SUCCESS'
+        ? `the ref moved by COMPARE-AND-SWAP: \`${gitExec.attempted}\` — the old value was `
+          + 'supplied by the caller from the authorize, never re-read at execution time, so a ref '
+          + 'that had moved since the grant was issued would refuse rather than overwrite'
+        : 'the authorized compare-and-swap did not succeed')
+      : 'two racing writers, exactly one mutation');
 
   // ── (6) ATTESTATION — CRYPTOGRAPHIC, NOT PRESENCE ─────────────────────────
   // The audit's P0 was a CONFIRMED that rested on a token EXISTING. This point
@@ -236,7 +271,33 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
     jti: authOk ? auth.evidence.jti : null,
     deploymentId: configuredDeploymentId(),
   });
-  point(6, 'attestation', PROVEN, a6.ok, a6.detail);
+  // ── POINT 6, FROM THE DECODED AND VERIFIED GIT ATTESTATION ──────────────────────────────
+  //
+  // The grant id in this sentence is read out of the token AFTER it verifies, never carried
+  // alongside it. The shipped capture printed a jti that came from a different envelope entirely,
+  // and a reader had no way to tell that the number and the signature were about different runs.
+  const gitAtt = (() => {
+    if (!gt || typeof gt.attestation !== 'string') return null;
+    try {
+      const { verifyExecutionAttestation } = require('../packages/verifier-core/verify-attest.js');
+      const v = verifyExecutionAttestation(gt.attestation, { registry: executorRegistry() });
+      if (!v || v.valid !== true) {
+        return { ok: false, detail: `the executor attestation does not verify (${v && v.status})` };
+      }
+      const body = v.payload || {};
+      return {
+        ok: true,
+        detail: `a cr.exec.attest.v1 signed by ${body.executor_kid} verifies, and the grant id in `
+          + `this sentence is READ FROM THE VERIFIED TOKEN: ${body.grant_jti}. It commits result `
+          + `${String(body.result_digest).slice(0, 19)}…, the digest of this transition (before ⨝ `
+          + 'after ⨝ bytes), so a signature over a different move does not match',
+      };
+    } catch (err) {
+      return { ok: false, detail: `the attestation verifier could not run: ${(err && err.message) || 'error'}` };
+    }
+  })();
+  point(6, 'attestation', PROVEN, gt ? !!(gitAtt && gitAtt.ok) : a6.ok,
+    gt ? (gitAtt ? gitAtt.detail : 'no executor attestation accompanies this transition') : a6.detail);
 
   // ── (7) GATE ──────────────────────────────────────────────────────────────
   // The gate is real and is the one right-half point with a producer: the
@@ -282,7 +343,22 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
       try { await pool.end(); } catch (_) { /* */ }
     }
   }
-  point(7, 'gate', PROVEN, gateOk, gateDetail);
+  // POINT 7 — the seal the LEDGER CLAIM made, for a git target.
+  //
+  // `gitAtomicExecute` signs a cr.gate.preimage.v1 over (ref ⨝ old ⨝ new ⨝ operation) bound to the
+  // grant's jti, in the same transaction as the claim and the CAS. That is this target's gate; the
+  // Postgres deferred-constraint gate below is the mechanism's, and describing one as the other is
+  // what made the prose name a second mechanism.
+  const gitGate = gt && typeof gt.cas_attestation === 'string' && gt.cas_attestation.length > 0;
+  point(7, 'gate', PROVEN, gt ? !!gitGate : gateOk,
+    gt
+      ? (gitGate
+        ? 'cr.gate.preimage.v1 sealed by the executor in the SAME transaction as the ledger claim '
+          + 'and the ref update — the claim, the state change and the seal cannot come apart, '
+          + 'because a bare update-ref would move the ref and leave nothing saying which '
+          + 'authorization moved it'
+        : 'the ref moved with no gate preimage sealed — nothing records which grant moved it')
+      : gateDetail);
 
   // ── (8) MERGE and (9) DEPLOY — MODELLED ───────────────────────────────────
   // Not written by hand. The bundle assembler is asked for these slots and
@@ -528,14 +604,25 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
     });
     const producerNamed = typeof deployDef.producer === 'string' && deployDef.producer.length > 0;
     const heldOut = !Object.prototype.hasOwnProperty.call(bundle.slots, 'deploy_attestation');
-    point(9, 'deploy', PROVEN, a9.ok && producerNamed && heldOut,
-      a9.ok
+    // POINT 9 — for a git target the seal binds the REF, not a deployment id. Saying "deployment
+    // demo-deployment" beside a `git_bare_ref` target named a thing that is not in this run.
+    const gitSeal = gt && typeof gt.cas_attestation === 'string' && gt.cas_attestation.length > 0;
+    point(9, 'deploy', PROVEN,
+      gt ? !!gitSeal : (a9.ok && producerNamed && heldOut),
+      gt
+        ? (gitSeal
+          ? `the executor seal (cr.atomic.execution.attestation.v1) binds the governed ref `
+            + `${gt.expected.ref} moving ${String(gt.expected.base).slice(0, 12)} → `
+            + `${String(gt.expected.contract_commit).slice(0, 12)} under grant `
+            + `${gt.ledger_consumed_jti}; a forged signature over the same bytes is REFUSED`
+          : 'the ref moved with no executor seal over the mutation')
+        : (a9.ok
         ? `the executor seal binds deployment ${deploymentId || '(unset)'} and verifies `
           + `(${deployDef.envelope}); a forged signature over the same bytes is REFUSED. `
           + 'A PUBLIC verifier for this envelope now exists — receipt-verifier '
           + 'verify-atomic-attestation.js — so the bundle slot grades it rather than refusing it '
           + 'for want of one'
-        : `deploy attestation did not prove out: ${a9.detail}`);
+        : `deploy attestation did not prove out: ${a9.detail}`));
   }
 
   // A modelled point that is honestly modelled does not fail the run; a point
