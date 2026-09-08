@@ -50,7 +50,7 @@ const {
   gradeStateTransition, parentsOf, transitionResultDigest,
 } = require('./target-state-transition');
 const { signingInput: attestSigningInput } = require('../../packages/verifier-core/verify-attest.js');
-const { gitAtomicExecute } = require('./git-atomic');
+const { gitAtomicExecute, listConsumedLedger, ledgerRefFor } = require('./git-atomic');
 const { verifyExecutionGrant } = require('../../packages/verifier-core/verify-grant.js');
 
 const REPO = path.join(__dirname, '..', '..');
@@ -425,6 +425,21 @@ async function runGitTarget({ receiptToken, now = Date.now(), issue = null, say 
     });
     const nonceConsumed = replay.ok === false && String(replay.status) === 'GRANT_CONSUMED';
 
+    // WHAT THE LEDGER ACTUALLY HOLDS. Read from the object database after the fact, so "the grant
+    // was consumed" is a fact about the target rather than a restatement of the request.
+    const consumedFromLedger = await (async () => {
+      try {
+        // The ledger stores a HASH of the jti in the ref name, never the jti itself — so the
+        // comparison is against `ledgerRefFor(jti)`, the adapter's own derivation. Matching on a
+        // raw jti found nothing and would have reported "not consumed" for every consumed grant.
+        const want = ledgerRefFor(ledgerView.jti);
+        const rows = await listConsumedLedger({ repoDir: repoPath });
+        return (rows || []).some((r) => r && r.ref === want) ? ledgerView.jti : null;
+      } catch (_) {
+        return null;
+      }
+    })();
+
     // ── THE READBACK — A SEPARATE PROCESS, AFTER THE EXECUTOR EXITED ───────────────────────
     // Its stdout is the ONLY readback this run has. Nothing about the expected state reaches it:
     // the flags are the target, the ref, the path and the canonical URI, and the URI is a label
@@ -502,7 +517,17 @@ async function runGitTarget({ receiptToken, now = Date.now(), issue = null, say 
       // WHAT THE LEDGER ACTUALLY CLAIMED and WHAT THE ATTESTATION ACTUALLY COMMITS — read back
       // from the produced evidence, never echoed from the input. If they ever diverge from the
       // issued grant, the continuity gate must see two values, not one repeated.
-      ledger_consumed_jti: ledgerView.jti,
+      // READ BACK FROM THE LEDGER, not echoed from the input.
+      //
+      // MEASURED while checking a claim that the fixture path carried two grants: this field was
+      // `ledgerView.jti` — the value handed IN, reported back out. Every downstream comparison
+      // ("consumed === issued") was therefore a value compared with its own copy, which is the
+      // shape this codebase refuses everywhere else. It happened to be true; it was not evidence.
+      //
+      // `listConsumedLedger` reads refs/coderifts/consumed/* out of the object database. If the
+      // claim is not there, this is null and the continuity gate sees a missing value rather than
+      // a confident one.
+      ledger_consumed_jti: consumedFromLedger,
       attestation_jti: JSON.parse(
         Buffer.from(attestation.split('|')[2], 'base64url').toString('utf8'),
       ).grant_jti,

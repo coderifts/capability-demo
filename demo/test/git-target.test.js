@@ -20,6 +20,9 @@
 const { test, describe, before } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const os = require('node:os');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const { runGitTarget, CANONICAL_TARGET_URI, TARGET_REF, OPERATION } = require('../src/git-target');
 const { gradeStateTransition } = require('../src/target-state-transition');
@@ -214,5 +217,45 @@ describe('NOTHING ELSE MOVED — the gap that did NOT need a wider grant schema'
       attestation: { token: R.attestation, registry: require('../keys/executor-keys.json'), now: Date.now() },
     });
     assert.equal(g.checks.find((c) => c.id === 'no_unauthorized_company').ok, false);
+  });
+});
+
+describe('the consumed grant is READ BACK, not echoed', () => {
+  test('the ledger really holds a claim for the grant that was used', () => {
+    // MEASURED: this field was the input value reported back out, so every downstream
+    // "consumed === issued" comparison compared a value with its own copy. It was true, and it
+    // was not evidence.
+    assert.equal(R.ledger_consumed_jti, R.grant.grant_id);
+  });
+
+  test('a grant nobody consumed is NOT found in the ledger', async () => {
+    // The other half. Without it, "read back" could be a function that returns whatever it was
+    // asked about — which is the echo again, one layer down.
+    //
+    // A FRESH target, because runGitTarget removes its throwaway repository when it finishes:
+    // reaching into R.repoPath afterwards asks a directory that no longer exists, and an empty
+    // answer from a missing repo would have made this pass for the wrong reason.
+    const { buildTarget } = require('../src/git-target');
+    const { listConsumedLedger, ledgerRefFor } = require('../src/git-atomic');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-neg-'));
+    try {
+      const { repoPath } = buildTarget(dir);
+      const rows = await listConsumedLedger({ repoDir: repoPath });
+      assert.equal(rows.length, 0, 'a target nobody executed against has an empty ledger');
+      assert.equal(rows.some((r) => r.ref === ledgerRefFor('never-consumed-grant')), false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    // …and the run that DID consume reported the jti, so this is not "nothing is ever found".
+    assert.equal(R.ledger_consumed_jti, R.grant.grant_id);
+  });
+
+  test('the ledger keys on a HASH of the jti, and the lookup uses the adapter\'s derivation', () => {
+    // A raw-jti lookup found nothing and would have reported "not consumed" for every consumed
+    // grant — a false negative that reads as caution while being simply wrong.
+    const { ledgerRefFor } = require('../src/git-atomic');
+    const ref = ledgerRefFor(R.grant.grant_id);
+    assert.match(ref, /^refs\/coderifts\/consumed\//);
+    assert.ok(!ref.includes(R.grant.grant_id), 'the ledger ref must not contain the raw jti');
   });
 });
