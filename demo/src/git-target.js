@@ -46,7 +46,10 @@ const { execFileSync, spawnSync } = require('node:child_process');
 const {
   CONTRACT_PATH, canonicalContractBytes, proposedContractBytes, contractDigest,
 } = require('./governed-contract');
-const { gradeStateTransition, parentsOf } = require('./target-state-transition');
+const {
+  gradeStateTransition, parentsOf, transitionResultDigest,
+} = require('./target-state-transition');
+const { signingInput: attestSigningInput } = require('../../packages/verifier-core/verify-attest.js');
 const { verifyExecutionGrant } = require('../../packages/verifier-core/verify-grant.js');
 
 const REPO = path.join(__dirname, '..', '..');
@@ -104,6 +107,41 @@ function issuerRegistry() {
  * handed in. The grant below is checked against THIS, not against the key object that signed it a
  * few lines earlier, or the check would be a signature verifying itself.
  */
+function executorRegistry() {
+  return JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
+}
+function executorPrivateKey() {
+  return crypto.createPrivateKey(fs.readFileSync(path.join(KEYS, 'executor-private.pem'), 'utf8'));
+}
+
+/**
+ * SEAL THE TRANSITION — a real cr.exec.attest.v1, signed by the executor key.
+ *
+ * The signing input is built by the CORE's own `signingInput`, never re-implemented here. An
+ * attestation whose preimage this file assembled by hand would verify against nothing but itself,
+ * and that mistake has already been made once in this repository (a trailing slot omitted, every
+ * attestation failing its own signature).
+ *
+ * `result_digest` is the TRANSITION's digest, not the destination commit: before ⨝ after ⨝ bytes.
+ * A token committing only the destination would still verify after being moved onto a run that
+ * reached the same commit from a different base.
+ */
+function attestTransition({ grantId, receiptDigest, scopeHash, nonce, observation, now }) {
+  const body = {
+    v: 'cr.exec.attest.v1',
+    executor_kid: executorRegistry().keys[0].kid,
+    grant_jti: grantId,
+    receipt_digest: receiptDigest,
+    scope_hash: scopeHash,
+    committed_at: new Date(now).toISOString(),
+    state_nonce: nonce,
+    result_digest: transitionResultDigest(observation),
+  };
+  const sig = crypto.sign(null, Buffer.from(attestSigningInput(body), 'utf8'), executorPrivateKey());
+  return `cr.exec.attest.v1|${body.executor_kid}|`
+    + `${Buffer.from(JSON.stringify(body), 'utf8').toString('base64url')}|${sig.toString('base64url')}`;
+}
+
 function issuerKeyring() {
   return new Map(issuerRegistry().keys.map((k) => [k.kid, {
     publicKey: crypto.createPublicKey(k.public_key_pem),
@@ -336,8 +374,26 @@ function runGitTarget({ receiptToken, now = Date.now(), say = () => {} } = {}) {
     // comparison. What names the target INSTANCE is the canonical URI, which the grant binds and
     // the grader does compare.
 
+    // ── THE EXECUTOR SEALS WHAT IT DID ─────────────────────────────────────────────────────
+    //
+    // Emitted AFTER the observation, because the token commits the observed transition. An
+    // attestation minted before the read-back would be a promise, not a commitment.
+    const attestation = attestTransition({
+      grantId: grant.payload.grant_id,
+      receiptDigest: grant.payload.receipt_hash,
+      scopeHash: grant.payload.after_payload_hash,
+      nonce: grant.nonce,
+      observation,
+      now,
+    });
+
     const graded = gradeStateTransition({
-      observation, expected, repoPath, attestation: { present: true },
+      observation,
+      expected: { ...expected, grant_id: grant.payload.grant_id },
+      repoPath,
+      // THE TOKEN, and the registry it must verify against. Not `{present: true}` — the grader
+      // refuses a boolean outright now, so a regression here fails loudly rather than grading up.
+      attestation: { token: attestation, registry: executorRegistry(), now },
     });
 
     say(`git target: ${graded.state} — ref ${TARGET_REF} moved ${base.slice(0, 12)} → `
@@ -351,9 +407,10 @@ function runGitTarget({ receiptToken, now = Date.now(), say = () => {} } = {}) {
       state_challenge: grant.challenge,
       nonce_consumed: nonceConsumed,
       roles,
-      expected: { ...expected, after_payload: undefined },
+      expected: { ...expected, after_payload: undefined, grant_id: grant.payload.grant_id },
       observation,
       observationBytes,
+      attestation,
       graded,
     };
   } catch (err) {

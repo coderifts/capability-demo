@@ -345,6 +345,10 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
   // provider_witness NOT_APPLICABLE. A `target_observation` slot in the core is the clean fix and
   // is a cross-repository change, not this one.
   let readbackBytes = gt ? gt.observationBytes : null;
+  // The git executor's own seal, hoisted so the evidence root binds its bytes under the
+  // atomic_attestation slot. Without a git target this stays null and the Postgres executor's
+  // attestation (below) fills the slot exactly as before.
+  const gitAttestationToken = gt ? gt.attestation : null;
   if (readbackPath) {
     try {
       readbackBytes = fs.readFileSync(readbackPath, 'utf8');
@@ -398,6 +402,10 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
       checks: g.checks || [],
       failures: g.failures || [],
       grant: gt.grant || null,
+      // THE ATTESTATION'S EXACT BYTES. Carried in the artifact rather than referenced, because a
+      // digest in the evidence root with no bytes anywhere is a binding to something nobody can
+      // check — which is what the previous capture shipped.
+      attestation: gt.attestation || null,
       state_challenge: gt.state_challenge || null,
       nonce_consumed: gt.nonce_consumed === true,
       roles: gt.roles || [],
@@ -564,8 +572,12 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
     // Carried out so the evidence root can bind them: the executor attestation this run sealed,
     // and the provider readback's exact bytes. Neither is republished in the artifact, and a
     // digest is how a token that does not travel can still be bound to the run that made it.
-    attestationToken: (authSec && authSec.evidence && typeof authSec.evidence.attestation === 'string')
-      ? authSec.evidence.attestation : null,
+    // THE GIT SEAL WINS when a git target ran, for the same reason POINT 8 does: the root's
+    // atomic_attestation slot must bind the attestation over the transition this artifact claims,
+    // not the one over a database write it also happened to do.
+    attestationToken: gitAttestationToken
+      || ((authSec && authSec.evidence && typeof authSec.evidence.attestation === 'string')
+        ? authSec.evidence.attestation : null),
     readbackBytes,
   };
 }

@@ -69,12 +69,120 @@ function parentsOf(repoPath, commit) {
  * @param {object} [o.attestation] { present: boolean } — whether the executor signed this run.
  * @param {string} [o.repoPath]    for the parent check; omitted skips check 4 as UNCHECKED.
  */
+/**
+ * The digest an attestation commits as its `result_digest` — the TRANSITION, not the destination.
+ *
+ * Joined by \x1f (US), the same separator every other preimage in this ecosystem uses. Binding all
+ * three means an attestation issued for a different move, or for the same destination reached from
+ * a different base, or for a commit carrying different bytes, does not match.
+ */
+function transitionResultDigest({ before_commit, observed_commit, contract_blob_digest }) {
+  return sha256pref(Buffer.from([
+    String(before_commit || ''), String(observed_commit || ''), String(contract_blob_digest || ''),
+  ].join('\x1f'), 'utf8'));
+}
+
+/**
+ * Verify the executor's attestation over THIS transition.
+ *
+ * Returns `{ok, detail, kid, jti, result_digest}`. Every refusal names which of the four things
+ * failed, because "not attested" covers a missing token, a bad signature, a token for another
+ * grant, and a token for another transition — and those send a reader to different places.
+ */
+function verifyTransitionAttestation(att, o) {
+  // A BOOLEAN IS NOT A TOKEN, and it is refused rather than downgraded. This is the exact shape
+  // that shipped: `{present: true}`, believed because it was set.
+  if (!att || typeof att !== 'object') {
+    return { ok: false, detail: 'no executor attestation accompanies this transition, so nothing signed the change' };
+  }
+  if (typeof att.token !== 'string' || att.token.length === 0) {
+    const asserted = Object.keys(att).filter((k) => att[k] === true).join(', ');
+    return {
+      ok: false,
+      detail: asserted
+        ? `the caller asserted ${asserted} and supplied no cr.exec.attest.v1 token — a boolean is `
+          + 'not a signature, and this grader does not grade on one'
+        : 'the attestation carries no token',
+    };
+  }
+  let verified;
+  try {
+    const { verifyExecutionAttestation } = require('../../packages/verifier-core/verify-attest.js');
+    verified = verifyExecutionAttestation(att.token, {
+      registry: att.registry, now: att.now,
+    });
+  } catch (err) {
+    return { ok: false, detail: `the attestation verifier could not run: ${(err && err.message) || 'error'}` };
+  }
+  if (!verified || verified.valid !== true) {
+    return {
+      ok: false,
+      detail: `the attestation does not verify (${(verified && verified.status) || 'unknown'}`
+        + `${verified && verified.reason ? ': ' + verified.reason : ''})`,
+    };
+  }
+  const body = verified.payload || {};
+
+  // BOUND TO THE AUTHORIZATION. An attestation that verifies but commits a different grant is a
+  // real signature over somebody else's run — the collage, one layer down.
+  const expectedJti = o.expected && o.expected.grant_id;
+  if (expectedJti && body.grant_jti !== expectedJti) {
+    return {
+      ok: false,
+      detail: `the attestation commits grant ${String(body.grant_jti).slice(0, 12)} and this `
+        + `transition was authorized by ${String(expectedJti).slice(0, 12)} — two authorizations`,
+    };
+  }
+
+  // BOUND TO THIS TRANSITION. Without this the executor could attest ANY move under the right
+  // grant, and the grader would call the wrong one proven.
+  const obs = o.observation || {};
+  const want = transitionResultDigest({
+    before_commit: obs.before_commit,
+    observed_commit: obs.observed_commit,
+    contract_blob_digest: obs.contract_blob_digest,
+  });
+  if (body.result_digest !== want) {
+    return {
+      ok: false,
+      detail: `the attestation commits result ${String(body.result_digest).slice(0, 19)}… and this `
+        + `transition hashes to ${want.slice(0, 19)}… — a signature over a different move`,
+    };
+  }
+  return {
+    ok: true,
+    detail: null,
+    kid: body.executor_kid,
+    jti: body.grant_jti,
+    result_digest: body.result_digest,
+  };
+}
+
 function gradeStateTransition(o = {}) {
   const obs = o.observation || null;
   const exp = o.expected || {};
   const checks = [];
   const failures = [];
-  const note = (id, ok, detail) => {
+  /**
+   * @param {string} id
+   * @param {boolean} ok
+   * @param {string} whyNot   the sentence for the FAILING branch
+   * @param {string} [whyYes] the sentence for the PASSING branch
+   *
+   * ── TWO SENTENCES, NOT ONE ──────────────────────────────────────────────────────────────
+   *
+   * MEASURED on the vendored capture: `executor_attested` shipped as
+   *   { ok: true, detail: "no executor attestation accompanies this transition, so nothing
+   *     signed the change" }
+   * — a passing check whose own words say it failed. One sentence written for the failure branch
+   * was emitted on both, so every ok:true check carried a negative explanation. A reader auditing
+   * the details rather than the booleans would have read the artifact as broken; a reader trusting
+   * the booleans would have missed that this one was decided by a caller's boolean.
+   *
+   * A negative sentence is now reachable ONLY from ok:false.
+   */
+  const note = (id, ok, whyNot, whyYes) => {
+    const detail = ok ? (whyYes || `${id}: re-checked and it holds`) : whyNot;
     checks.push({ id, ok, detail });
     if (!ok) failures.push(detail);
     return ok;
@@ -162,9 +270,20 @@ function gradeStateTransition(o = {}) {
   note('observation_source', obs.observation_source === 'git-object-database',
     `the observation declares source ${obs.observation_source}`);
 
-  const attested = !!(o.attestation && o.attestation.present === true);
-  note('executor_attested', attested,
-    'no executor attestation accompanies this transition, so nothing signed the change');
+  // ── THE ATTESTATION: A TOKEN, VERIFIED HERE — NOT A CALLER'S BOOLEAN ────────────────────
+  //
+  // This check used to read `o.attestation.present === true` and grade on it. That is the
+  // caller-boolean class already closed in the core predicate (a `signed: true` flag that was
+  // believed because it was set), reappearing in this grader: whoever called `gradeStateTransition`
+  // decided whether the change was attested, and the grader wrote it down.
+  //
+  // A boolean is now refused OUTRIGHT rather than treated as a weaker yes. Accepting it "for
+  // compatibility" would leave the hole open under a deprecation notice nobody reads.
+  const att = o.attestation || null;
+  const attVerify = verifyTransitionAttestation(att, o);
+  note('executor_attested', attVerify.ok, attVerify.detail,
+    `a cr.exec.attest.v1 token signed by ${attVerify.kid} commits grant ${String(attVerify.jti).slice(0, 12)} `
+    + `and result ${String(attVerify.result_digest).slice(0, 19)}…, and it verifies here`);
 
   const proven = failures.length === 0;
   return {
@@ -190,4 +309,7 @@ const DOES_NOT_PROVE = Object.freeze([
   + 'the target afterwards and found it moved',
 ]);
 
-module.exports = { gradeStateTransition, parentsOf, sha256pref, STATE, DOES_NOT_PROVE };
+module.exports = {
+  gradeStateTransition, parentsOf, sha256pref, STATE, DOES_NOT_PROVE,
+  transitionResultDigest, verifyTransitionAttestation,
+};

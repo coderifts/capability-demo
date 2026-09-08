@@ -30,7 +30,11 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, spawnSync } = require('node:child_process');
 
-const { gradeStateTransition, sha256pref, STATE } = require('../src/target-state-transition.js');
+const {
+  gradeStateTransition, sha256pref, STATE, transitionResultDigest,
+} = require('../src/target-state-transition.js');
+
+const KEYS = path.join(__dirname, '..', 'keys');
 
 const OBSERVER = path.join(__dirname, '..', '..', 'bin', 'coderifts-git-observer.js');
 const CONTRACT = 'contracts/openapi.yaml';
@@ -59,6 +63,38 @@ function observe(repoPath = repo, ref = 'refs/heads/main', contractPath = CONTRA
   return { code: r.status, stdout: r.stdout, stderr: r.stderr, observation: parsed };
 }
 
+/**
+ * A REAL cr.exec.attest.v1 over the observation under test.
+ *
+ * `{present: true}` used to be enough here, and that was the caller-boolean class: this suite
+ * decided the transition was attested and the grader wrote it down. The grader now refuses a
+ * boolean outright, so every positive case has to produce a token — which is the property being
+ * claimed, and it costs one signature.
+ */
+function attestFor(observation, over = {}) {
+  const { signingInput } = require('../../packages/verifier-core/verify-attest.js');
+  const registry = JSON.parse(fs.readFileSync(path.join(KEYS, 'executor-keys.json'), 'utf8'));
+  const key = crypto.createPrivateKey(fs.readFileSync(path.join(KEYS, 'executor-private.pem'), 'utf8'));
+  const body = {
+    v: 'cr.exec.attest.v1',
+    executor_kid: registry.keys[0].kid,
+    grant_jti: GRANT_ID,
+    receipt_digest: `sha256:${'1'.repeat(64)}`,
+    scope_hash: sha256pref(Buffer.from(AFTER_PAYLOAD, 'utf8')),
+    committed_at: new Date().toISOString(),
+    result_digest: transitionResultDigest(observation),
+    ...over,
+  };
+  const sig = crypto.sign(null, Buffer.from(signingInput(body), 'utf8'), key);
+  return {
+    token: `cr.exec.attest.v1|${body.executor_kid}|`
+      + `${Buffer.from(JSON.stringify(body), 'utf8').toString('base64url')}|${sig.toString('base64url')}`,
+    registry,
+  };
+}
+
+const GRANT_ID = 'git-test-grant-0001';
+
 const expected = (over = {}) => ({
   base: BASE,
   contract_commit: CONTRACT_COMMIT,
@@ -71,8 +107,12 @@ const expected = (over = {}) => ({
   ...over,
 });
 const grade = (obs, over = {}) => gradeStateTransition({
-  observation: obs, expected: expected(over.expected), repoPath: over.repoPath ?? repo,
-  attestation: over.attestation ?? { present: true },
+  observation: obs,
+  expected: { ...expected(over.expected), grant_id: GRANT_ID },
+  repoPath: over.repoPath ?? repo,
+  // `??` would substitute the default for an explicitly-passed null, so "no attestation" could
+  // not be expressed at all. A sentinel says absent when absent is the case under test.
+  attestation: 'attestation' in over ? over.attestation : attestFor(obs),
 });
 
 before(() => {
@@ -232,9 +272,9 @@ describe('the negatives — none may read PROVEN', () => {
     const o = observe(repo, 'refs/heads/merged');
     const g = gradeStateTransition({
       observation: o.observation,
-      expected: expected({ contract_commit: MERGE_COMMIT, ref: 'refs/heads/merged' }),
+      expected: { ...expected({ contract_commit: MERGE_COMMIT, ref: 'refs/heads/merged' }), grant_id: GRANT_ID },
       repoPath: repo,
-      attestation: { present: true },
+      attestation: attestFor(o.observation),
     });
     notProven(g, 'merge commit');
     assert.equal(g.checks.find((c) => c.id === 'single_parent').ok, false);
@@ -262,7 +302,37 @@ describe('the negatives — none may read PROVEN', () => {
   });
 
   test('11. NO EXECUTOR ATTESTATION — a transition nobody signed', () => {
-    notProven(grade(observe().observation, { attestation: { present: false } }), 'unattested');
+    notProven(grade(observe().observation, { attestation: null }), 'unattested');
+  });
+
+  test('11b. A BOOLEAN IS NOT A SIGNATURE — the exact shape that shipped', () => {
+    // `{present: true}` was accepted and graded ok:true on the vendored capture. It is refused
+    // now, and the refusal names WHY rather than reporting a generic missing attestation.
+    const g = grade(observe().observation, { attestation: { present: true } });
+    notProven(g, 'caller boolean');
+    const c = g.checks.find((x) => x.id === 'executor_attested');
+    assert.match(c.detail, /a boolean is not a signature/);
+  });
+
+  test('11c. A REAL TOKEN FOR ANOTHER GRANT — a signature over somebody else\'s authorization', () => {
+    const o = observe().observation;
+    notProven(grade(o, { attestation: attestFor(o, { grant_jti: 'git-someone-else-9999' }) }), 'wrong grant');
+  });
+
+  test('11d. A REAL TOKEN FOR ANOTHER TRANSITION — right grant, wrong move', () => {
+    const o = observe().observation;
+    const other = { ...o, observed_commit: SAME_BYTES_COMMIT, before_commit: CONTRACT_COMMIT };
+    notProven(grade(o, { attestation: attestFor(other) }), 'wrong transition');
+  });
+
+  test('11e. THE POSITIVE CONTROL still passes — the refusals are not a blanket no', () => {
+    const g = grade(observe().observation);
+    assert.equal(g.state, 'PROVEN_BY_TRUSTED_EXECUTOR', g.failures.join('; '));
+    const c = g.checks.find((x) => x.id === 'executor_attested');
+    assert.equal(c.ok, true);
+    // AND the passing sentence is a POSITIVE one. The vendored capture shipped ok:true with
+    // "no executor attestation accompanies this transition" as its detail.
+    assert.doesNotMatch(c.detail, /^no |does not|nothing signed/);
   });
 
   test('12. NO TRANSITION — a ref already at the destination did not move', () => {
