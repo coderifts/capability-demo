@@ -607,7 +607,17 @@ async function runChain({ prove = null, gitTransition = null } = {}) {
     // POINT 9 — for a git target the seal binds the REF, not a deployment id. Saying "deployment
     // demo-deployment" beside a `git_bare_ref` target named a thing that is not in this run.
     const gitSeal = gt && typeof gt.cas_attestation === 'string' && gt.cas_attestation.length > 0;
-    point(9, 'deploy', PROVEN,
+    // ── THE NAME IS `executor_seal`, NOT `deploy` ───────────────────────────────────────────
+    //
+    // MEASURED on the shipped capture: the structured target is a `git.ref.update` on a
+    // `git_bare_ref` and points[9].name was still "deploy". Nothing is deployed in this run — the
+    // point verifies the executor's SEAL over the mutation. The prose beside it had already been
+    // corrected; the NAME had not, and a name is what a reader keys on.
+    //
+    // It slipped past the domain-word invariant because that guard read four surfaces (title,
+    // asserts, vector ids, sidecar roles) and points[].name was not one of them. A guard that
+    // covers most of the surfaces reports the ones it covers.
+    point(9, gt ? 'executor_seal' : 'deploy', PROVEN,
       gt ? !!gitSeal : (a9.ok && producerNamed && heldOut),
       gt
         ? (gitSeal

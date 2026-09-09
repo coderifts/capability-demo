@@ -257,7 +257,9 @@ function main(argv) {
         generator: 'scripts/make-conformance-fixture.js (bin/prove-all.js, both poles)',
       },
       subject: {
-        name: 'capability-demo contract-publish E2E (single run, bare-Git target-state transition)',
+        // NOT "contract-publish E2E". The governed action is a git.ref.update on a bare-Git
+        // ref; "publish" named the Postgres mechanism run this capture stopped being about.
+        name: 'capability-demo target-state-transition E2E (one grant, bare-Git ref update)',
         version,
         digest: transcriptDigest,
       },
@@ -269,7 +271,7 @@ function main(argv) {
         working_tree_dirty: pp.working_tree_dirty,
         observed_at: readbackDoc.observed_at,
       },
-      note: 'ONE contract-publish run, producer-emitted, with POINT 8 filled from a BARE-GIT '
+      note: 'ONE target-state-transition run, producer-emitted, with POINT 8 filled from a BARE-GIT '
         + 'TARGET-STATE TRANSITION rather than from a supplied provider readback. The run built a '
         + 'throwaway bare repository, authorized one ref update under a signed cr.exec.v2 grant '
         + '(operation git.ref.update, binding the contract blob digest and the end state), '
