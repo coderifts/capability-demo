@@ -272,7 +272,12 @@ function main(argv) {
         observed_at: readbackDoc.observed_at,
       },
       note: 'ONE target-state-transition run, producer-emitted, with POINT 8 filled from a BARE-GIT '
-        + 'TARGET-STATE TRANSITION rather than from a supplied provider readback. The run built a '
+        // NOT "a supplied provider readback". The clause is a contrast, but it states the
+        // word without denying it, and conformance's prose invariant reads this note. It was
+        // fixed once by hand IN THE VENDORED PIN and the next re-cut overwrote it — a
+        // generated artifact edited at the artifact is a fix with a known expiry date.
+        + 'TARGET-STATE TRANSITION rather than from a readback supplied by a third party; NO '
+        + 'provider is involved in this capture. The run built a '
         + 'throwaway bare repository, authorized one ref update under a signed cr.exec.v2 grant '
         + '(operation git.ref.update, binding the contract blob digest and the end state), '
         + 'performed it as a compare-and-swap, and then had a SEPARATE PROCESS that cannot write '

@@ -1,4 +1,4 @@
-receipt-verifier v1.0.0 51a8224439959a5b46c0b09e9a2cd67117f05d56
+receipt-verifier v1.0.1 51a8224439959a5b46c0b09e9a2cd67117f05d56
 # ── ONE RELEASED TAG, AND IT IS NOW TRUE ────────────────────────────────────────────────────
 #
 # Line 1 used to be a bare commit, and the note under it said the files "keep their own earlier
@@ -17,6 +17,25 @@ receipt-verifier v1.0.0 51a8224439959a5b46c0b09e9a2cd67117f05d56
 # demo/test/vendor-core.test.js compares these bytes against `git show v1.0.0:<file>` when
 # receipt-verifier is beside this repo, so the tag is checked and not merely asserted.
 #
+#
+# ── AND THE TAG IS SIGNED, WHICH IS THE PART A STRANGER CAN CHECK ───────────────────────────
+#
+# v1.0.0 was an unsigned tag: a name anyone can check out, and also a name anyone with push access
+# can move. v1.0.1 is annotated and SSH-signed, so the pin now resolves to an identity and not
+# only to bytes.
+#
+#   tag object   06dd74f36f60e0b4d22dd4667732fe0a27575287
+#   peeled commit 51a8224439959a5b46c0b09e9a2cd67117f05d56
+#   signer       zsobpeter@gmail.com
+#   fingerprint  SHA256:7yRXTm9zKGicfFpzL+7lpwFoPaoSwxAJlabB3jwxw2Y
+#
+# Verify it yourself, in a checkout of receipt-verifier:
+#
+#   git tag -v v1.0.1
+#   -> Good "git" signature for zsobpeter@gmail.com with ED25519 key SHA256:7yRXTm9zKGicfFpzL+7lpwFoPaoSwxAJlabB3jwxw2Y
+#
+# The peeled commit is UNCHANGED from v1.0.0 — the core is byte-identical and this re-pin moves no
+# hash line. What it adds is who stands behind the bytes.
 verify-evidence.js           98cd9b989a25095e0442f91f68a1adecd6e6a2a5b05902bf2580b8cba973c5e2
 verify-prove-transcript.js   3bb17bd4f16d5ee3cf3fbb754b4df9aa570a615ca94ff2a97b751c4fabd3bd0d
 evidence-root.js             4d5476fc44bbfc2a847feeb313a1c6c08ef7fd832a2348ef3c244bd8d3f03fcd
