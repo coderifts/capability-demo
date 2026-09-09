@@ -58,6 +58,35 @@ const V2_REQUIRED_STRINGS = Object.freeze([
   'operation', 'target_uri', 'expected_state_token', 'after_payload_hash',
   'nonce_hash', 'policy_hash', 'audience_hash', 'not_before', 'expires_at',
 ]);
+/**
+ * RESERVED, AND INERT. Optional v2 fields a grant MAY carry and this verifier reads as NOTHING.
+ *
+ * ── WHY THEY EXIST BEFORE THE GATE THAT USES THEM ───────────────────────────────────────────
+ *
+ * The admitted key set is closed: an unknown field is `MALFORMED/unknown_field`, which is the
+ * right default and also means a future field cannot be introduced without every deployed
+ * verifier refusing the grants that carry it. Reserving the two names now is what keeps that
+ * introduction from being a breaking change later.
+ *
+ * ── WHAT THEY DO NOT DO, WHICH IS THE POINT ─────────────────────────────────────────────────
+ *
+ * NOTHING. A grant carrying `call_hash` is graded EXACTLY as one without it. There is no check,
+ * no comparison, and no `intended` field they bind to.
+ *
+ * A VERIFIER THAT READS THEIR PRESENCE AS AUTHORIZATION IS WRONG. `call_hash` present does not
+ * mean a tool call was bound; `executor_image_digest` present does not mean an executor image was
+ * pinned. Nothing signs a promise that the value is true, nothing compares it to anything, and an
+ * attacker who can mint a grant can put any value in them. Presence is not proof — it is a slot.
+ *
+ * They are unsigned-by-default only in the sense that no separate signature covers them: the v2
+ * signing input is the canonical JSON of the WHOLE body, so a grant that carries them signs
+ * different bytes than one that does not, and neither can be edited into the other. That binds
+ * the VALUE to the issuer; it says nothing about whether the value means anything.
+ *
+ * When a gate for them lands it will be a NEW check with its own negative fixtures, and this
+ * comment is what a reader should be shown if anyone claims otherwise before then.
+ */
+const V2_RESERVED_INERT = Object.freeze(['call_hash', 'executor_image_digest']);
 const TARGET_SCHEMES = Object.freeze(['fs', 'git', 'api', 'db', 'registry', 'deploy']);
 const DEFAULT_FETCH_URL = 'https://app.coderifts.com/api/v1/attestation/public-key';
 
@@ -177,7 +206,9 @@ function verifyExecutionGrantV2(payload, sigB64, ctx, opts = {}) {
   if (!Number.isInteger(payload.max_attempts) || payload.max_attempts < 1) {
     return { valid: false, status: 'MALFORMED', reason: 'bad_max_attempts', payload };
   }
-  const allowed = new Set([...V2_REQUIRED_STRINGS, 'max_attempts']);
+  // The reserved names are ADMITTED, never inspected. Everything below this line treats a payload
+  // carrying them identically to one that does not — verified by test, not by intent.
+  const allowed = new Set([...V2_REQUIRED_STRINGS, 'max_attempts', ...V2_RESERVED_INERT]);
   for (const k of Object.keys(payload)) {
     if (!allowed.has(k)) return { valid: false, status: 'MALFORMED', reason: 'unknown_field', payload };
   }
@@ -555,6 +586,8 @@ module.exports = {
   SIGNING_PREFIX_V2,
   SIGNED_FIELDS,
   V1_OPTIONAL_SIGNED_FIELDS,
+  V2_REQUIRED_STRINGS,
+  V2_RESERVED_INERT,
   CLOCK_SKEW_LEEWAY_MS,
   isIssuedInFuture,
 };

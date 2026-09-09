@@ -23,13 +23,13 @@
  * the command, so it left.
  *
  * CLI usage now:
- *   node cli.js <receipt> [--key pub.pem | --keys <url|file>] [--kid <kid>] [--fetch <url>]
- *   node cli.js --chain receipts.txt [--key pub.pem | --keys <url|file>] [--kid <kid>] [--fetch <url>]
+ *   node cli.js <receipt> [--key pub.pem | --keys <url|file>] [--kid <kid>] [--fetch <url>] [--refresh-keys]
+ *   node cli.js --chain receipts.txt [--key pub.pem | --keys <url|file>] [--kid <kid>] [--fetch <url>] [--refresh-keys]
  *
- * Key discovery: with no --key/--keys, keys are fetched from
- *   https://app.coderifts.com/.well-known/coderifts-keys.json  (override with --fetch <url>).
- * The fetch-and-resolve path accepts BOTH the registry array (active + retired)
- * and the legacy single-key body from /api/v1/attestation/public-key.
+ * Key discovery: with no --key/--keys/--fetch/--refresh-keys, the command loads the
+ * vendored snapshot at keys/coderifts-keys.json (offline). Live fetch is opt-in
+ * (--refresh-keys or --fetch <url> / --keys <url>). DEFAULT_FETCH_URL is the well-known
+ * registry used by those opt-in flags. This library never fetches.
  * --keys resolves each receipt's key by kid from a registry
  *   ({ keys: [{ kid, public_key_pem, status, valid_from, retired_at }] }); accepts a URL or file.
  *

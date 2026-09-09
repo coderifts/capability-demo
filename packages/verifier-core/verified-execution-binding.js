@@ -43,6 +43,7 @@ const crypto = require('node:crypto');
 
 const { verifyExecutionGrant } = require('./verify-grant.js');
 const { verifyEvidenceRootBinding } = require('./verify-evidence.js');
+const { verifyReceipt } = require('./verify.js');
 
 const BINDING_V = 'cr.verified-execution-binding.v1';
 
@@ -57,6 +58,24 @@ const STATE = Object.freeze({
   RECORDED_UNWITNESSED: 'RECORDED_UNWITNESSED',
   NOT_COMMITTED: 'NOT_COMMITTED',
   AUTHORIZED_AND_COMMITTED: 'AUTHORIZED_AND_COMMITTED',
+  /**
+   * A CUSTOM aggregation was satisfied — and it is NOT the global success token.
+   *
+   * ── THE HOLE THIS CLOSES, REPRODUCED BEFORE IT WAS WRITTEN ──────────────────────────────
+   *
+   *   valid grant + committed + NO attestation + NO root, required: ['issuer_grant']
+   *     -> AUTHORIZED_AND_COMMITTED, authorized_and_committed: true
+   *
+   * Nothing was forged. The caller simply asked for less, and the function handed back the token
+   * every consumer reads as "authorized and committed". `required[]` was a strictness dial that
+   * also selected the NAME of success, so narrowing the dial upgraded the verdict — the strongest
+   * word in the vocabulary, reachable by asking for the least.
+   *
+   * A caller may still choose its own authorities. What it may no longer do is call the result by
+   * the global name. `AUTHORIZED_AND_COMMITTED` is now reachable ONLY through a closed, versioned
+   * profile whose authority set the caller does not get to shorten.
+   */
+  CUSTOM_REQUIREMENTS_SATISFIED: 'CUSTOM_REQUIREMENTS_SATISFIED',
 });
 
 /** What each authority is allowed to be missing for, so a caller can choose its own strictness. */
@@ -66,6 +85,36 @@ const AUTHORITY = Object.freeze({
   ONE_RUN_ROOT: 'one_run_root',
   PROVIDER_WITNESS: 'provider_witness',
 });
+
+/**
+ * CLOSED, VERSIONED ASSURANCE PROFILES.
+ *
+ * A profile fixes its authority set. The caller names the profile; it does not get to edit what
+ * the profile means, and the version in the name is what lets the set change later without
+ * silently changing what an older caller was promised.
+ *
+ * `TRUSTED_EXECUTOR_INTEGRITY_V1` is the honest ceiling of a single-machine chain: the decision
+ * receipt verified, the issuer's grant verified, the executor's attestation verified, and one
+ * signed root binding the set to one run. It says nothing about a third party, and the name is
+ * chosen so it cannot be read as one — `EXTERNALLY_WITNESSED_EXECUTION_V1` is a different profile
+ * and no producer can satisfy it today (no signed-witness format exists), which is why it is not
+ * declared here as an empty promise.
+ */
+const PROFILE = Object.freeze({
+  TRUSTED_EXECUTOR_INTEGRITY_V1: Object.freeze({
+    name: 'TRUSTED_EXECUTOR_INTEGRITY_V1',
+    authorities: Object.freeze([
+      AUTHORITY.ISSUER_GRANT,
+      AUTHORITY.EXECUTOR_ATTESTATION,
+      AUTHORITY.ONE_RUN_ROOT,
+    ]),
+    // The receipt is mandatory in every profile and is not listed as an authority because it is
+    // not optional anywhere — it gates the whole predicate above the state machine.
+    proof_scope: 'TRUSTED_EXECUTOR',
+    externally_witnessed: false,
+  }),
+});
+const PROFILE_NAMES = Object.freeze(Object.keys(PROFILE));
 
 const sha256pref = (v) =>
   `sha256:${crypto.createHash('sha256').update(String(v), 'utf8').digest('hex')}`;
@@ -116,12 +165,55 @@ function grantClaims(token) {
  * @param {{artifact: object, executorKey}} [o.evidenceRoot]
  * @param {{signed: boolean}} [o.providerReadback]
  * @param {boolean} o.committed
- * @param {string[]} [o.required]  authorities this caller demands; default: grant + attestation.
+ * @param {string} [o.profile]     a CLOSED profile name (see PROFILE). Its authority set cannot be
+ *        edited by the caller, and only a profile can reach AUTHORIZED_AND_COMMITTED.
+ * @param {string[]} [o.required]  a CUSTOM authority set. Legal, and it can never produce the
+ *        global success token — a satisfied custom set reads CUSTOM_REQUIREMENTS_SATISFIED.
  */
 function verifiedExecutionBinding(o = {}) {
-  const required = new Set(Array.isArray(o.required) && o.required.length
-    ? o.required
-    : [AUTHORITY.ISSUER_GRANT, AUTHORITY.EXECUTOR_ATTESTATION]);
+  // ── WHICH SET, AND WHO CHOSE IT ─────────────────────────────────────────────────────────
+  //
+  // A profile and a custom set are different KINDS of question, so they are answered separately
+  // and never merged. Passing both is refused rather than resolved by precedence: a caller that
+  // names a profile and then also lists authorities is asking two things at once, and picking one
+  // silently is how a caller ends up believing it got the other.
+  const profileName = typeof o.profile === 'string' && o.profile ? o.profile : null;
+  const customRequired = Array.isArray(o.required) && o.required.length ? o.required : null;
+  if (profileName && customRequired) {
+    return {
+      v: BINDING_V,
+      authorized_and_committed: false,
+      requirements_satisfied: false,
+      profile: null,
+      proof_scope: null,
+      externally_witnessed: false,
+      state: STATE.UNAUTHORIZED,
+      authorities: {},
+      shortfalls: ['profile: both `profile` and `required` were supplied — a closed profile\'s '
+        + 'authority set is not editable, so this asks two different questions at once'],
+      does_not_prove: [],
+    };
+  }
+  if (profileName && !Object.prototype.hasOwnProperty.call(PROFILE, profileName)) {
+    // FAIL CLOSED on an unknown profile. Falling back to a default would let a typo — or a caller
+    // written against a future version — silently receive a weaker check than it named.
+    return {
+      v: BINDING_V,
+      authorized_and_committed: false,
+      requirements_satisfied: false,
+      profile: null,
+      proof_scope: null,
+      externally_witnessed: false,
+      state: STATE.UNAUTHORIZED,
+      authorities: {},
+      shortfalls: [`profile: unknown assurance profile "${profileName}"; known: ${PROFILE_NAMES.join(', ')}`],
+      does_not_prove: [],
+    };
+  }
+  const profile = profileName ? PROFILE[profileName] : null;
+  const required = new Set(profile
+    ? profile.authorities
+    : (customRequired || [AUTHORITY.ISSUER_GRANT, AUTHORITY.EXECUTOR_ATTESTATION]));
   const shortfalls = [];
   const authorities = {};
   const note = (name, ok, detail) => {
@@ -225,9 +317,31 @@ function verifiedExecutionBinding(o = {}) {
   if (!er || !er.artifact) {
     note(AUTHORITY.ONE_RUN_ROOT, false,
       'no cr.evidence.root.v1 was supplied, so these bytes are not shown to be one run');
+  } else if (typeof verifyEvidenceRootBinding !== 'function') {
+    // ── A MISSING VERIFIER IS A REFUSAL, NEVER A CRASH ───────────────────────────────────
+    //
+    // MEASURED on a consumer: agent-guard vendors an OLDER `verify-evidence.js` that does not
+    // export `verifyEvidenceRootBinding` (true on its HEAD too), so this line threw a TypeError
+    // the moment anyone passed an `evidenceRoot`. Latent there — that guard holds no root — and
+    // the SHAPE is what matters: a crash is not an answer, and a caller cannot tell "the core
+    // blew up" from "the core is unavailable" from "the binding failed".
+    //
+    // Every OTHER dependency this file has is already used unconditionally, so this is the one
+    // place a mixed vendor pin can leave a hole. Refusing here is the fail-closed answer, and it
+    // names the cause rather than reporting a generic unbound root.
+    note(AUTHORITY.ONE_RUN_ROOT, false,
+      'the evidence-root verifier is not available in this build (the vendored verify-evidence.js '
+      + 'does not export verifyEvidenceRootBinding) — the root was NOT checked, and an unchecked '
+      + 'root is refused rather than reported as unbound');
   } else {
-    const r = verifyEvidenceRootBinding(er.artifact, { executorKey: er.executorKey, sidecars: er.sidecars });
-    note(AUTHORITY.ONE_RUN_ROOT, r.ok === true, r.ok ? 'bound' : (r.failures[0] || 'unbound'));
+    let r;
+    try {
+      r = verifyEvidenceRootBinding(er.artifact, { executorKey: er.executorKey, sidecars: er.sidecars });
+    } catch (err) {
+      r = { ok: false, failures: [`the evidence-root verifier threw: ${(err && err.message) || 'error'}`] };
+    }
+    note(AUTHORITY.ONE_RUN_ROOT, r.ok === true,
+      r.ok ? 'bound' : ((r.failures && r.failures[0]) || 'unbound'));
   }
 
   // ── 4. THE PROVIDER WITNESS ────────────────────────────────────────────────────────────
@@ -273,11 +387,65 @@ function verifiedExecutionBinding(o = {}) {
   // Left as-is deliberately: making a bare boolean insufficient would change the input shape of
   // all five consumers at once, and that belongs with the closed-profile work (1465), not
   // half-done in a round that would leave them broken. The gap is named, not narrowed in silence.
-  const receiptOk = !!(o.receipt && o.receipt.verified === true);
-  const receiptAsserted = receiptOk && !(o.receipt.token && (o.receipt.keyring || o.receipt.publicKey));
-  if (!receiptOk) shortfalls.unshift('receipt: the decision receipt did not verify');
+  // ── THE DECISION RECEIPT, VERIFIED HERE WHEN IT CAN BE ─────────────────────────────────
+  //
+  // ── THE FOURTH CALLER-BOOLEAN THIS REPOSITORY HAS MET ──────────────────────────────────
+  //
+  //   providerReadback: { signed: true }   believed because it was set        (closed)
+  //   attestation:      { present: true }  believed because it was set        (closed)
+  //   call_hash present == "tool-call bound"                                  (pre-empted)
+  //   receipt:          { verified: true } believed because it was set        (this)
+  //
+  // `receipt.verified` is the CALLER's word. With no token and no keyring, nothing was checked and
+  // this function had no way to check it — and a caller that simply set the flag reached a
+  // satisfied verdict. `receipt_caller_asserted` recorded it, which is honest reporting and not a
+  // gate: a field nobody branches on does not stop anything.
+  //
+  // Now: when a token AND a key source are supplied, THIS function verifies the receipt. When they
+  // are not, the assertion is accepted only for a CUSTOM aggregation — where the caller owns its
+  // own question — and can never reach AUTHORIZED_AND_COMMITTED, which is the word every consumer
+  // reads as the answer.
+  const rc = o.receipt || {};
+  let receiptOk = false;
+  let receiptAsserted = false;
+  let receiptDetail = 'the decision receipt did not verify';
+  const keySource = rc.keyring || rc.publicKey;
+  if (typeof rc.token === 'string' && rc.token.length > 0 && keySource) {
+    let rv;
+    try {
+      rv = verifyReceipt(rc.token, {
+        ctx: { ...(rc.keyring ? { keyring: rc.keyring } : { publicKey: rc.publicKey }),
+          expectedKid: rc.expectedKid === undefined ? null : rc.expectedKid },
+        ...(Number.isFinite(rc.now) ? { now: rc.now } : {}),
+      });
+    } catch (err) {
+      rv = { valid: false, status: 'VERIFIER_ERROR', reason: (err && err.message) || 'error' };
+    }
+    receiptOk = rv.valid === true;
+    if (!receiptOk) receiptDetail = `the decision receipt did not verify (${rv.status}: ${rv.reason})`;
+  } else if (rc.verified === true) {
+    // Accepted, and MARKED. The state machine below refuses to hand this the global name.
+    receiptOk = true;
+    receiptAsserted = true;
+  } else if (rc.token || keySource) {
+    receiptDetail = 'the receipt was supplied without '
+      + `${rc.token ? 'a keyring or public key' : 'its token'}, so it could not be verified here`;
+  } else {
+    receiptDetail = 'no decision receipt was supplied';
+  }
+  if (!receiptOk) shortfalls.unshift(`receipt: ${receiptDetail}`);
+  if (receiptAsserted) {
+    shortfalls.push('decision_receipt: `verified` was taken on the caller\'s word — no token and '
+      + 'no keyring were supplied, so nothing was checked here');
+  }
 
-  let state = STATE.AUTHORIZED_AND_COMMITTED;
+  // THE NAME OF SUCCESS DEPENDS ON WHO CHOSE THE SET, not on how much of it passed. A custom
+  // aggregation that meets everything it asked for is satisfied — and says so in its own words.
+  // A CALLER-ASSERTED RECEIPT CAN NEVER BE THE GLOBAL CLAIM. It is not downgraded to a failure —
+  // a custom aggregation may legitimately own that determination — but the strongest word in the
+  // vocabulary is not available to a run whose receipt nobody verified.
+  let state = (profile && !receiptAsserted)
+    ? STATE.AUTHORIZED_AND_COMMITTED : STATE.CUSTOM_REQUIREMENTS_SATISFIED;
   if (!receiptOk || (required.has(AUTHORITY.ISSUER_GRANT) && !grantOk)) state = STATE.UNAUTHORIZED;
   else if (required.has(AUTHORITY.EXECUTOR_ATTESTATION) && !attOk) state = STATE.COMMIT_UNPROVEN;
   else if (required.has(AUTHORITY.ONE_RUN_ROOT) && !authorities[AUTHORITY.ONE_RUN_ROOT].ok) {
@@ -285,11 +453,31 @@ function verifiedExecutionBinding(o = {}) {
   } else if (required.has(AUTHORITY.PROVIDER_WITNESS) && !authorities[AUTHORITY.PROVIDER_WITNESS].ok) {
     state = STATE.RECORDED_UNWITNESSED;
   } else if (!committed) state = STATE.NOT_COMMITTED;
+  // The default set (no profile, no custom list) is the historical grant+attestation pair. It is
+  // an implicit choice by the caller, not a profile, so it lands in the custom lane too.
+
 
   return {
     v: BINDING_V,
     authorized_and_committed: state === STATE.AUTHORIZED_AND_COMMITTED,
+    /**
+     * Did the set THIS CALLER ASKED FOR pass? True for a satisfied profile and for a satisfied
+     * custom aggregation alike.
+     *
+     * Separated from `authorized_and_committed` on purpose. A caller that only wants to know
+     * whether its own question was answered should not have to string-compare a state name, and
+     * — more importantly — should not be tempted to read the global claim because it was the only
+     * boolean available. That temptation is how `required: ['issuer_grant']` came to mean
+     * "authorized and committed" in the first place.
+     */
+    requirements_satisfied: state === STATE.AUTHORIZED_AND_COMMITTED
+      || state === STATE.CUSTOM_REQUIREMENTS_SATISFIED,
     state,
+    /** Which closed profile answered this, or null when the caller aggregated its own set. */
+    profile: profile ? profile.name : null,
+    /** Stated on every result so a reader never has to infer it from the state name. */
+    proof_scope: profile ? profile.proof_scope : null,
+    externally_witnessed: profile ? profile.externally_witnessed : false,
     authorities,
     shortfalls,
     /** True when `receipt.verified` was taken on the caller's word rather than established here. */
@@ -313,4 +501,7 @@ function verifiedExecutionBinding(o = {}) {
   };
 }
 
-module.exports = { verifiedExecutionBinding, STATE, AUTHORITY, BINDING_V, grantClaims, attestationClaims };
+module.exports = {
+  verifiedExecutionBinding, STATE, AUTHORITY, PROFILE, PROFILE_NAMES, BINDING_V,
+  grantClaims, attestationClaims,
+};

@@ -919,7 +919,21 @@ function check(file) {
     const g = iss.grant || {};
     const at = Date.parse(g.not_before || g.iat || artifact.started_at);
     const b = verifiedExecutionBinding({
-      receipt: { verified: artifact.transcript_verifies === true },
+      // ── THE RECEIPT ITSELF, so the core verifies it rather than believing this file ──────
+      //
+      // The released core (v1.0.0) stopped taking `receipt.verified` on a caller's word: with no
+      // token and no key source it marks the result caller-asserted and refuses it the global
+      // claim. That is the fourth caller-boolean this ecosystem has closed, and this file was
+      // still passing one — a boolean THIS file computed, about a token it never handed over.
+      //
+      // The artifact carries the chain receipt the grant was issued against, and the issuer
+      // keyring is already loaded for the grant two lines below.
+      receipt: {
+        token: iss.chain_receipt || '',
+        keyring: issuerKeys,
+        expectedKid: null,
+        ...(Number.isFinite(at) ? { now: at + 1000 } : {}),
+      },
       grant: {
         token: iss.execution_grant || '',
         keyring: issuerKeys,
@@ -933,7 +947,19 @@ function check(file) {
     });
     line(`authorization        : ${b.state}`);
     for (const sf of b.shortfalls) line(`  - ${sf}`);
-    if (requireEvidenceRoot && !b.authorized_and_committed) {
+    // ── THE FIELD THIS SURFACE IS ENTITLED TO ───────────────────────────────────────────
+    //
+    // This asks a CUSTOM authority set (issuer_grant + one_run_root — no executor attestation is
+    // handed to this call), and the released core will not answer a narrower question with the
+    // widest word: a satisfied custom set reads CUSTOM_REQUIREMENTS_SATISFIED, never
+    // AUTHORIZED_AND_COMMITTED.
+    //
+    // MEASURED on a rooted artifact, old core vs v1.0.0:
+    //   REGI: AUTHORIZED_AND_COMMITTED / a&c true
+    //   UJ  : CUSTOM_REQUIREMENTS_SATISFIED / a&c FALSE, requirements_satisfied true
+    // Reading `authorized_and_committed` after the re-vendor would have made this refuse every
+    // artifact — and a check that refuses everything looks exactly like a check that works.
+    if (requireEvidenceRoot && b.requirements_satisfied !== true) {
       mismatches.push(`assurance: the authorization binding is ${b.state}`);
     }
   }

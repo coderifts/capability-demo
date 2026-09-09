@@ -42,9 +42,46 @@ const sha256 = (p) => crypto.createHash('sha256').update(fs.readFileSync(p)).dig
 describe('1330 — vendored verifier-core', () => {
   const { source, files } = parseManifest();
 
-  it('the manifest names its source commit', () => {
-    assert.match(source, /^receipt-verifier [0-9a-f]{40}$/,
-      'the pin must name the repository and the exact commit the bytes came from');
+  it('the manifest names a RELEASED TAG, not just a commit', () => {
+    // A bare commit is a name only someone with this repository can resolve. A tag is one anyone
+    // can check out — which is the difference between a pin and a note. The peeled commit stays,
+    // because a tag can be moved and the commit cannot.
+    assert.match(source, /^receipt-verifier v\d+\.\d+\.\d+ [0-9a-f]{40}$/,
+      'the pin must name the release tag AND the peeled commit the bytes came from');
+    assert.match(source, /51a8224439959a5b46c0b09e9a2cd67117f05d56$/,
+      'the peeled commit does not match the released v1.0.0');
+  });
+
+  it('every vendored file is byte-identical to receipt-verifier v1.0.0', (t) => {
+    // ── MEASURED: THIS SUITE HAD NO UPSTREAM COMPARISON ────────────────────────────────────
+    //
+    // It checked that each file matched its recorded digest — which proves the manifest was
+    // recomputed, and nothing about where the bytes came from. Three files here were stale
+    // against the released tag for as long as that was the only check, and the digests agreed
+    // with them the whole time. A pin that matches bytes nobody traced is arithmetic.
+    const { spawnSync } = require('node:child_process');
+    const SOURCE = path.join(process.env.HOME || '', 'receipt-verifier');
+    if (!fs.existsSync(SOURCE)) {
+      t.skip('receipt-verifier is not checked out beside this repo — the digests were checked, '
+        + 'upstream parity was NOT (not passed)');
+      return;
+    }
+    const TAG = 'v1.0.0';
+    const peeled = spawnSync('git', ['-C', SOURCE, 'rev-parse', `${TAG}^{commit}`], { encoding: 'utf8' });
+    assert.equal(peeled.status, 0, `receipt-verifier has no ${TAG} tag`);
+    assert.equal(peeled.stdout.trim(), '51a8224439959a5b46c0b09e9a2cd67117f05d56',
+      `${TAG} points somewhere other than the commit this pin names`);
+    let compared = 0;
+    for (const { file } of files) {
+      const r = spawnSync('git', ['-C', SOURCE, 'show', `${TAG}:${file}`], { maxBuffer: 1 << 24 });
+      // A vendored file absent at the tag is skipped here and still covered by its digest row.
+      if (r.status !== 0) continue;
+      compared += 1;
+      assert.ok(fs.readFileSync(path.join(DIR, file)).equals(r.stdout),
+        `${file} has drifted from receipt-verifier@${TAG}`);
+    }
+    assert.ok(compared >= 8,
+      `only ${compared} file(s) compared against ${TAG} — parity over almost nothing`);
   });
 
   it('covers enough files to be the real dependency, not a stub', () => {

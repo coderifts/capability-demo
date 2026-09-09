@@ -1,15 +1,29 @@
-receipt-verifier 02153c9b7ffc7ff672fe5471433f3c3b01e0d694
-# verified-execution-binding.js is vendored at 1e41542296551139c41e2d4b4cff2e67bc42aa06 (1459 — the one predicate).
-# evidence-root.js, verify-evidence.js and verify-prove-transcript.js are vendored at
-# 7887719fa6e2bd1f70907f119e1c2a9b7c6a84ff (1432). The other files keep their own earlier
-# revisions on purpose — a single source-commit line would be tidier and untrue.
+receipt-verifier v1.0.0 51a8224439959a5b46c0b09e9a2cd67117f05d56
+# ── ONE RELEASED TAG, AND IT IS NOW TRUE ────────────────────────────────────────────────────
+#
+# Line 1 used to be a bare commit, and the note under it said the files "keep their own earlier
+# revisions on purpose — a single source-commit line would be tidier and untrue". That was honest
+# about a mixed set. MEASURED across the WHOLE directory before this changed: every file here is
+# byte-identical to receipt-verifier v1.0.0, so the single line is no longer tidier-and-untrue —
+# it is simply true, and it is a name a stranger can resolve. A working tree or a bare commit in a
+# repo nobody else has is not a provenance.
+#
+# Three files were stale and were re-copied FROM THE TAG (not from a local HEAD):
+#   verified-execution-binding.js  e48ea29b -> 9d0259e9   (closed profiles, receipt verification)
+#   verify.js                      363e52c7 -> 348d3f85   (CLI docs only: 0 non-comment lines)
+#   verify-grant.js                127b53de -> 4a0ad5bd   (the reserved inert v2 fields)
+# verify-attest.js already matched (035105de) and was not touched.
+#
+# demo/test/vendor-core.test.js compares these bytes against `git show v1.0.0:<file>` when
+# receipt-verifier is beside this repo, so the tag is checked and not merely asserted.
+#
 verify-evidence.js           98cd9b989a25095e0442f91f68a1adecd6e6a2a5b05902bf2580b8cba973c5e2
 verify-prove-transcript.js   3bb17bd4f16d5ee3cf3fbb754b4df9aa570a615ca94ff2a97b751c4fabd3bd0d
 evidence-root.js             4d5476fc44bbfc2a847feeb313a1c6c08ef7fd832a2348ef3c244bd8d3f03fcd
-verified-execution-binding.js e48ea29b9f8b0c5b1754187788cbaf78cdaf0b505848c05d1ae3ffebb30218f2
+verified-execution-binding.js 9d0259e916f2bcd32029744c3e9ec81448bcefa46e6ad3f054c8a650dc0482b7
 verify-bundle.js             190de0dda70c4d15dcd21fb6bb6b279313e48f90bf2e477463580968d0987127
-verify.js                    363e52c72ec4b913e1f3edc8e2029848feaeacb1efa6c07960fe5e5f195c23b3
-verify-grant.js              127b53de3be77196862c10a8812221de0a5112cf1d3feae12d347a6021852df7
+verify.js                    348d3f851cd79bf63298b51da422d11be980820576ab0bf0a2990b9f007d6249
+verify-grant.js              4a0ad5bd7bb8282e086bea99dcaf8ca278370d80019c5681d2942bf11bc87504
 verify-attest.js             035105de0f163d112038624eb2bf93cee059a565216fd8b03489964f6b0b2fa8
 verify-toolset.js            2f0987a28f3e7d3758d71f59799d1a5c6190aaa882f8f887809b2bff434e2df8
 arity.js                     721fcac58b960b5e2aa1af91edb6cfc87ebe828a6da73879967ef79a1ca474e8
