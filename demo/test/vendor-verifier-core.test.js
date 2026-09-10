@@ -48,12 +48,12 @@ describe('1330 — vendored verifier-core', () => {
     // because a tag can be moved and the commit cannot.
     assert.match(source, /^receipt-verifier v\d+\.\d+\.\d+ [0-9a-f]{40}$/,
       'the pin must name the release tag AND the peeled commit the bytes came from');
-    assert.match(source, /51a8224439959a5b46c0b09e9a2cd67117f05d56$/,
+    assert.match(source, /ac683b16c19662c9124c8cdab785223b28d2d0c6$/,
       'the peeled commit does not match the released tag');
     // THE TAG IS NOW NAMED, not just shaped. `v\d+\.\d+\.\d+` above accepts any version, which is
     // right for the shape and useless for the pin: it passed unchanged while the pin moved from
     // v1.0.0 to v1.0.1, so it can never notice a downgrade to an UNSIGNED tag on the same commit.
-    assert.match(source, /^receipt-verifier v1\.0\.1 /,
+    assert.match(source, /^receipt-verifier v1\.0\.2 /,
       'the manifest does not name v1.0.1 — the signed tag this consumer is pinned to');
     // AND THE SIGNER, which is what v1.0.1 adds. The signature itself is verified below; this is
     // the record the verification is checked AGAINST, without which any good signature by anyone
@@ -63,7 +63,7 @@ describe('1330 — vendored verifier-core', () => {
       'the pin names a signed tag but records no signer fingerprint to check it against');
   });
 
-  it('every vendored file is byte-identical to the SIGNED receipt-verifier v1.0.1', (t) => {
+  it('every vendored file is byte-identical to the SIGNED receipt-verifier v1.0.2', (t) => {
     // ── MEASURED: THIS SUITE HAD NO UPSTREAM COMPARISON ────────────────────────────────────
     //
     // It checked that each file matched its recorded digest — which proves the manifest was
@@ -77,10 +77,10 @@ describe('1330 — vendored verifier-core', () => {
         + 'upstream parity was NOT (not passed)');
       return;
     }
-    const TAG = 'v1.0.1';
+    const TAG = 'v1.0.2';
     const peeled = spawnSync('git', ['-C', SOURCE, 'rev-parse', `${TAG}^{commit}`], { encoding: 'utf8' });
     assert.equal(peeled.status, 0, `receipt-verifier has no ${TAG} tag`);
-    assert.equal(peeled.stdout.trim(), '51a8224439959a5b46c0b09e9a2cd67117f05d56',
+    assert.equal(peeled.stdout.trim(), 'ac683b16c19662c9124c8cdab785223b28d2d0c6',
       `${TAG} points somewhere other than the commit this pin names`);
 
     // ── THE TAG IS VERIFIED, NOT MERELY RESOLVED ────────────────────────────────────────────

@@ -1,4 +1,4 @@
-receipt-verifier v1.0.1 51a8224439959a5b46c0b09e9a2cd67117f05d56
+receipt-verifier v1.0.2 ac683b16c19662c9124c8cdab785223b28d2d0c6
 # ── ONE RELEASED TAG, AND IT IS NOW TRUE ────────────────────────────────────────────────────
 #
 # Line 1 used to be a bare commit, and the note under it said the files "keep their own earlier
@@ -24,15 +24,22 @@ receipt-verifier v1.0.1 51a8224439959a5b46c0b09e9a2cd67117f05d56
 # can move. v1.0.1 is annotated and SSH-signed, so the pin now resolves to an identity and not
 # only to bytes.
 #
-#   tag object   06dd74f36f60e0b4d22dd4667732fe0a27575287
-#   peeled commit 51a8224439959a5b46c0b09e9a2cd67117f05d56
+#   tag object   99567ea1c88b9b6e348118eeacd03592e3f1075f
+#   peeled commit ac683b16c19662c9124c8cdab785223b28d2d0c6
 #   signer       zsobpeter@gmail.com
 #   fingerprint  SHA256:7yRXTm9zKGicfFpzL+7lpwFoPaoSwxAJlabB3jwxw2Y
 #
 # Verify it yourself, in a checkout of receipt-verifier:
 #
-#   git tag -v v1.0.1
+#   git tag -v v1.0.2
 #   -> Good "git" signature for zsobpeter@gmail.com with ED25519 key SHA256:7yRXTm9zKGicfFpzL+7lpwFoPaoSwxAJlabB3jwxw2Y
+#
+# WHY v1.0.2 AND NOT v1.0.1: the CORE IS BYTE-IDENTICAL between them — every hash line
+# below is unchanged, and this re-pin moves none of them. v1.0.2 adds two things to the
+# RELEASE: RECEIPT_FORMAT.md section 14 (the authority model) is in the tagged tree, and
+# verification/allowed_signers ships in the repo so `git tag -v` names a principal on a
+# machine that has never seen this project. A doc committed after a tag is not in that
+# release, however committed it is — which is why the tag moved rather than the bytes.
 #
 # The peeled commit is UNCHANGED from v1.0.0 — the core is byte-identical and this re-pin moves no
 # hash line. What it adds is who stands behind the bytes.
