@@ -1,7 +1,7 @@
 {
   "name": "@coderifts/prove",
   "private": false,
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Reference offline enforcement for cr.exec.v1 execution grants + a demo API where mutation without a grant is 403.",
   "license": "MIT",
   "workspaces": [
@@ -37,6 +37,7 @@
     "demo/package.json",
     "demo/SELF-HOST.md",
     "packages/verifier-core/",
+    "packages/middleware/package.json",
     "packages/middleware/src/",
     "examples/atomic-v2/",
     "examples/sample-transcript/",
