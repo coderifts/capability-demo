@@ -20,7 +20,12 @@
  */
 
 const { STRENGTH, REASON, checkInput } = require('./adapter-spi');
-const { normalizeGrant } = require('@coderifts/capability-express/src/verify-grant');
+// RELATIVE, like demo/offline-check.js:14 which requires the same file and works. MEASURED on the
+// published 0.1.12 tarball: packages/middleware/src/verify-grant.js IS shipped (23 944 B, node:crypto
+// only), but the npm name resolves only when the middleware is installed as a dependency — which it
+// is not from an unpacked tarball, so the README's first command died with
+// "Cannot find module '@coderifts/capability-express/src/verify-grant'".
+const { normalizeGrant } = require('../../packages/middleware/src/verify-grant');
 const crypto = require('node:crypto');
 
 const PG_UNIQUE_VIOLATION = '23505';
