@@ -1064,9 +1064,106 @@ function check(file) {
   return off.valid && mismatches.length === 0 ? 0 : 1;
 }
 
-// ── entry ───────────────────────────────────────────────────────────────────────────────────
+// ── CLI ─────────────────────────────────────────────────────────────────────────────────────
+//
+// 1880 — argument parsing BEFORE any initialization. MEASURED on 0.1.12: `npx @coderifts/prove
+// --help` generated demo keys and then attempted a full proof (docker / DATABASE_URL / pg),
+// because ensureKeys() and runAll() ran before argv was read, and --help was not a flag at all.
+// Help, version, and an unknown argument must have zero side effects.
 
-async function main() {
+const PKG = require(path.join(REPO, 'package.json'));
+
+const USAGE = `Usage: coderifts-prove [options]
+
+  -h, --help                 print this usage and exit (no keys, no docker, no database)
+  -V, --version              print the package version and exit
+  --check <transcript.json>  re-verify a transcript offline (no database, no network)
+  --keys <registry.json>     keyring for --check (default: sidecar or local demo keyring)
+  --git-target               build the bare-git target during a full run
+  --no-git-target            skip the git target during a full run
+  --require-evidence-root    --check: refuse a transcript that does not name an evidence root
+
+A full run (no --check) needs docker or DATABASE_URL. --help and --version never start one.
+
+Exit: 0 ok · 2 usage / refused · 3 missing pg driver for a full run
+`;
+
+/**
+ * @param {string[]} argv  process.argv (node, script, ...args)
+ * @returns {{help:boolean, version:boolean, check:string|null, keys:string|null,
+ *            gitTarget:boolean|undefined, requireEvidenceRoot:boolean, unknown:string|null,
+ *            error:string|null}}
+ */
+function parseCli(argv) {
+  const args = argv.slice(2);
+  const out = {
+    help: false,
+    version: false,
+    check: null,
+    keys: null,
+    gitTarget: undefined,
+    requireEvidenceRoot: false,
+    unknown: null,
+    error: null,
+  };
+  let wantsTarget = false;
+  let refusesTarget = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a === '-h' || a === '--help') out.help = true;
+    else if (a === '-V' || a === '--version') out.version = true;
+    else if (a === '--check') {
+      const file = args[++i];
+      if (!file || file.startsWith('-')) {
+        out.error = 'usage: coderifts-prove --check <transcript.json>';
+        return out;
+      }
+      out.check = file;
+    } else if (a === '--keys') {
+      const file = args[++i];
+      if (!file || file.startsWith('-')) {
+        out.error = 'usage: coderifts-prove --check <transcript.json> --keys <registry.json>';
+        return out;
+      }
+      out.keys = file;
+    } else if (a === '--git-target') wantsTarget = true;
+    else if (a === '--no-git-target') refusesTarget = true;
+    else if (a === '--require-evidence-root') out.requireEvidenceRoot = true;
+    else {
+      out.unknown = a;
+      out.error = `unrecognized argument ${a}`;
+      return out;
+    }
+  }
+  if (wantsTarget && refusesTarget) {
+    out.error = 'usage: --git-target and --no-git-target are contradictory; pass one';
+    return out;
+  }
+  if (wantsTarget) out.gitTarget = true;
+  else if (refusesTarget) out.gitTarget = false;
+  return out;
+}
+
+function usage(stream = process.stdout) {
+  stream.write(USAGE);
+}
+
+async function main(argv = process.argv) {
+  const opts = parseCli(argv);
+  if (opts.help) {
+    usage(process.stdout);
+    return 0;
+  }
+  if (opts.version) {
+    process.stdout.write(`${PKG.version}\n`);
+    return 0;
+  }
+  if (opts.error) {
+    process.stderr.write(`${opts.error}\n`);
+    usage(process.stderr);
+    return 2;
+  }
+
   // 1330 — a freshly installed package has no keys: demo/keys/* is gitignored, and both the run
   // path (loadExecutor, demo/src/server.js:74) and the check path (the executor registry read
   // below) readFileSync them with no fallback. Generating here, once, before either path needs
@@ -1076,6 +1173,8 @@ async function main() {
   // keys are DEMO keys — the kid says DEMO-KEY-DO-NOT-USE — and they are generated on the
   // reader's machine, so a transcript they produce proves the chain RUNS, not that CodeRifts
   // signed anything.
+  //
+  // 1880 — this runs AFTER help/version/unknown, so those three have zero side effects.
   try {
     const { ensureKeys } = require(path.join(DEMO, 'gen-keys.js'));
     const k = ensureKeys();
@@ -1090,31 +1189,15 @@ async function main() {
     return 2;
   }
 
-  const argv = process.argv.slice(2);
-  // EXPLICIT BEATS AMBIENT. Both spellings exist because the env var shipped first; a flag wins
-  // over it, and passing both contradictory flags is refused rather than resolved by argument
-  // order — a run that silently picks one would make its own artifact hard to explain.
-  const wantsTarget = argv.includes('--git-target');
-  const refusesTarget = argv.includes('--no-git-target');
-  if (wantsTarget && refusesTarget) {
-    line('usage: --git-target and --no-git-target are contradictory; pass one');
-    return 2;
-  }
-  const gitTarget = wantsTarget ? true : (refusesTarget ? false : undefined);
-  const ci = argv.indexOf('--check');
-  if (ci !== -1) {
-    const file = argv[ci + 1];
-    if (!file) {
-      line('usage: node bin/prove-all.js --check <transcript.json>');
-      return 2;
-    }
-    return check(file);
-  }
-  const out = await runAll({ gitTarget });
+  if (opts.check) return check(opts.check);
+  const out = await runAll({ gitTarget: opts.gitTarget });
   return out.exitCode;
 }
 
-module.exports = { runAll, check, renderMarkdown, refuseProdUrl, ARTIFACT_V, PROD_HOST_PATTERNS };
+module.exports = {
+  runAll, check, renderMarkdown, refuseProdUrl, ARTIFACT_V, PROD_HOST_PATTERNS,
+  parseCli, USAGE, PKG,
+};
 
 if (require.main === module) {
   main()
