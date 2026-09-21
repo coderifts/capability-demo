@@ -65,17 +65,21 @@ const V2_REQUIRED_STRINGS = Object.freeze([
  *
  * The admitted key set is closed: an unknown field is `MALFORMED/unknown_field`, which is the
  * right default and also means a future field cannot be introduced without every deployed
- * verifier refusing the grants that carry it. Reserving the two names now is what keeps that
+ * verifier refusing the grants that carry it. Reserving the names now is what keeps that
  * introduction from being a breaking change later.
  *
  * ── WHAT THEY DO NOT DO, WHICH IS THE POINT ─────────────────────────────────────────────────
  *
  * NOTHING. A grant carrying `call_hash` is graded EXACTLY as one without it. There is no check,
- * no comparison, and no `intended` field they bind to.
+ * no comparison, and no `intended` field they bind to. Same for `applied_policy_hash` (1942):
+ * admitted so a later producer can emit it without every deployed verifier going MALFORMED.
+ * This verifier does not read it as the evaluated policy, does not compare it to `policy_hash`,
+ * and does not fail a grant that omits it.
  *
  * A VERIFIER THAT READS THEIR PRESENCE AS AUTHORIZATION IS WRONG. `call_hash` present does not
  * mean a tool call was bound; `executor_image_digest` present does not mean an executor image was
- * pinned. Nothing signs a promise that the value is true, nothing compares it to anything, and an
+ * pinned; `applied_policy_hash` present does not mean the evaluator's policy was bound. Nothing
+ * signs a promise that the value is true, nothing compares it to anything, and an
  * attacker who can mint a grant can put any value in them. Presence is not proof — it is a slot.
  *
  * They are unsigned-by-default only in the sense that no separate signature covers them: the v2
@@ -86,7 +90,7 @@ const V2_REQUIRED_STRINGS = Object.freeze([
  * When a gate for them lands it will be a NEW check with its own negative fixtures, and this
  * comment is what a reader should be shown if anyone claims otherwise before then.
  */
-const V2_RESERVED_INERT = Object.freeze(['call_hash', 'executor_image_digest']);
+const V2_RESERVED_INERT = Object.freeze(['call_hash', 'executor_image_digest', 'applied_policy_hash']);
 const TARGET_SCHEMES = Object.freeze(['fs', 'git', 'api', 'db', 'registry', 'deploy']);
 const DEFAULT_FETCH_URL = 'https://app.coderifts.com/api/v1/attestation/public-key';
 

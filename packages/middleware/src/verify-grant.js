@@ -423,7 +423,9 @@ function parseGrantTokenV2(token) {
   if (!Number.isInteger(payload.max_attempts) || payload.max_attempts < 1) {
     return { ok: false, status: 'MALFORMED', reason: 'bad_max_attempts', payload };
   }
-  const allowed = new Set([...REQUIRED_STRINGS_V2, 'max_attempts']);
+  // Reserved names are ADMITTED, never inspected. Twin of receipt-verifier V2_RESERVED_INERT (v1.0.3).
+  const V2_RESERVED_INERT = ['call_hash', 'executor_image_digest', 'applied_policy_hash'];
+  const allowed = new Set([...REQUIRED_STRINGS_V2, 'max_attempts', ...V2_RESERVED_INERT]);
   for (const k of Object.keys(payload)) {
     if (!allowed.has(k)) return { ok: false, status: 'MALFORMED', reason: 'unknown_field', payload };
   }

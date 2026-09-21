@@ -427,9 +427,17 @@ function verifyChain(tokens, second, third) {
   return verifyChainInner(tokens, ctx, opts);
 }
 
-// Reusable API — require('./verify') imports the pure verify logic WITHOUT running the CLI. The
-// GitHub Action + other embedders use these directly (verifyReceipt/verifyChain/deriveStatus/…);
-// the receipt format + taxonomy are frozen in RECEIPT_FORMAT.md.
+// Reusable API — require('./verify') imports the pure verify logic WITHOUT running the CLI; the
+// receipt format + taxonomy are frozen in RECEIPT_FORMAT.md.
+//
+// WHO ACTUALLY CALLS THESE, measured across the public surface on 2026-09-13:
+//   verifyChain    — cli.js:219 (--chain, with a test) and the Python verifier's public API
+//                    (coderifts_verifier/_verify.py verify_chain).
+//   verifyReceipt  — the contract-gate Action.
+// The previous wording said "the GitHub Action + other embedders use these directly" and listed
+// verifyChain first. That is false for the Action: contract-gate calls verifyReceipt and never
+// verifyChain — its copy of this file only carries the definition. Naming the callers instead of
+// a category keeps the claim checkable.
 module.exports = {
   verifyReceipt,
   verifyChain,
