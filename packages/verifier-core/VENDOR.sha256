@@ -1,4 +1,4 @@
-receipt-verifier v1.0.3 523e0a2b822088990f500b9eea3868309439c53c
+receipt-verifier v1.1.5 f7eb51f681de95e52c817fd7f035bf1838219d67
 # ── ONE RELEASED TAG, AND IT IS NOW TRUE ────────────────────────────────────────────────────
 #
 # Line 1 used to be a bare commit, and the note under it said the files "keep their own earlier
@@ -24,28 +24,28 @@ receipt-verifier v1.0.3 523e0a2b822088990f500b9eea3868309439c53c
 # can move. v1.0.1 is annotated and SSH-signed, so the pin now resolves to an identity and not
 # only to bytes.
 #
-#   tag object   bb5753681275920e7e23351c6b41632957e6238f
-#   peeled commit 523e0a2b822088990f500b9eea3868309439c53c
+#   tag object   d2e8097b5a26d2fab776c8b0d876cf5bed5f2e99
+#   peeled commit f7eb51f681de95e52c817fd7f035bf1838219d67
 #   signer       zsobpeter@gmail.com
 #   fingerprint  SHA256:7yRXTm9zKGicfFpzL+7lpwFoPaoSwxAJlabB3jwxw2Y
 #
 # Verify it yourself, in a checkout of receipt-verifier:
 #
-#   git tag -v v1.0.3
+#   git tag -v v1.1.5
 #   -> Good "git" signature for zsobpeter@gmail.com with ED25519 key SHA256:7yRXTm9zKGicfFpzL+7lpwFoPaoSwxAJlabB3jwxw2Y
 #
-# WHY v1.0.3 AND NOT v1.0.2: the CORE IS NOT byte-identical. verify-grant.js admits
-# applied_policy_hash on V2_RESERVED_INERT (1942 verifier-admits; fail-closed otherwise
-# unchanged) and verify.js moved with it. This re-pin copies those bytes from the signed
-# tag, not from a working tree.
+# WHY v1.1.5 (2026-10-25): verify.js is NOT byte-identical to v1.0.3. It reads the key algorithm
+# from the SPKI OID and verifies with Ed25519 only, and a bad keyring entry is skipped instead of
+# failing the whole keyring. This package vendors no keyring. Every other vendored file is
+# byte-identical to v1.0.3. This re-pin copies those bytes from the signed tag, not from a working tree.
 #
-# The peeled commit is 523e0a2 — the K-phase-1 inert-admit commit the tag names.
+# The peeled commit is f7eb51f — the receipt-verifier 1.1.5 release commit the tag names.
 verify-evidence.js           98cd9b989a25095e0442f91f68a1adecd6e6a2a5b05902bf2580b8cba973c5e2
 verify-prove-transcript.js   3bb17bd4f16d5ee3cf3fbb754b4df9aa570a615ca94ff2a97b751c4fabd3bd0d
 evidence-root.js             4d5476fc44bbfc2a847feeb313a1c6c08ef7fd832a2348ef3c244bd8d3f03fcd
 verified-execution-binding.js 9d0259e916f2bcd32029744c3e9ec81448bcefa46e6ad3f054c8a650dc0482b7
 verify-bundle.js             190de0dda70c4d15dcd21fb6bb6b279313e48f90bf2e477463580968d0987127
-verify.js                    52d7c37611f9eecc862e3678d1ffcb4fd860ea4c5faf9a9df6d6d5b290bd8197
+verify.js                    6768ea2af5d34d64c95f04bd232dd1bab855131b0faa0b280db6fe02f58fc0e3
 verify-grant.js              ea55b8611d6f3bba2cb9c84d765ade15bb2afe2418499e2da6358ffb3faf6ad6
 verify-attest.js             035105de0f163d112038624eb2bf93cee059a565216fd8b03489964f6b0b2fa8
 verify-toolset.js            2f0987a28f3e7d3758d71f59799d1a5c6190aaa882f8f887809b2bff434e2df8

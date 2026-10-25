@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.14 - 2026-10-25
+
+- **Verifier core (signed receipt-verifier v1.1.5).** `packages/verifier-core/` is re-pinned from the
+  signed v1.0.3 to the signed v1.1.5 (peeled f7eb51f). Only `verify.js` moves: the key algorithm is
+  read from the SPKI OID and only an Ed25519 key verifies a receipt; a bad keyring entry is skipped
+  instead of failing the whole keyring. Every other vendored file is byte-identical to v1.0.3. This
+  package vendors no keyring.
+- **Since 0.1.13, on main.** The demo verifier core and its middleware admit reserved names from the
+  signed tag (`6bdb6b1`); the repository states its license, MIT (`284063d`).
+- `npm test`: 109 tests, 109 pass, 0 fail.
+
 ## 0.1.13 - 2026-09-20
 
 - **Packed entry (1879).** `examples/atomic-v2/run.js` is the documented ~30-second no-DB

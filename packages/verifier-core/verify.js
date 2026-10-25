@@ -152,7 +152,10 @@ function resolveEntry(ctx, payload) {
     return entry; // { publicKey, status, retired_at }
   }
   if (ctx.expectedKid !== null && payload.kid !== ctx.expectedKid) return null;
-  return { publicKey: ctx.publicKey, status: null, retired_at: null, revoked_at: null, compromised_at: null };
+  const single = { publicKey: ctx.publicKey, status: null, retired_at: null, revoked_at: null, compromised_at: null };
+  // 1.1.5: a --key PEM classified by classifyPublicKeyPem (cli.js) carries its algorithm verdict.
+  if (ctx.unsupportedAlg) single.unsupported_alg = ctx.unsupportedAlg;
+  return single;
 }
 
 /**
@@ -263,6 +266,14 @@ function verifyReceiptInner(token, ctx, opts = {}) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return { valid: false, status: 'MALFORMED', reason: 'bad_json' };
   }
+  // 1.1.1 (2026-10-12, audit-2 F6): a signed field is a string or absent — checked before the signature, so
+  // both verifiers answer alike. MEASURED: `expires_at: [...]` passed the '|' guard (string-only) and the v4
+  // expiry check (string-only), and an expired receipt verified VERIFIED_CURRENT.
+  for (const k of SIGNED_FIELDS) {
+    if (payload[k] !== undefined && typeof payload[k] !== 'string') {
+      return { valid: false, status: 'MALFORMED', reason: 'non_string_signed_field', field: k, payload };
+    }
+  }
 
   // 3. kid -- resolve the entry by kid (keyring) or gate the single key by expectedKid.
   // 1306(a): a served `{keys:[...]}` document is accepted here as well as a Map.
@@ -272,6 +283,11 @@ function verifyReceiptInner(token, ctx, opts = {}) {
   );
   if (!entry) {
     return { valid: false, status: 'UNKNOWN_KEY', reason: 'unknown_kid', payload };
+  }
+  // 3b. 1.1.5: only an Ed25519 key verifies a receipt (classifyPublicKeyPem).
+  const unsupportedAlg = entry.unsupported_alg || (entry.publicKey ? unsupportedKeyObjectAlg(entry.publicKey) : null);
+  if (unsupportedAlg) {
+    return { valid: false, status: 'INVALID_SIGNATURE', reason: `unsupported key algorithm: ${unsupportedAlg}`, payload };
   }
 
   // 4. signature (raw Ed25519 over the reconstructed UTF-8 bytes)
@@ -363,38 +379,154 @@ function keyFromPem(pem) {
   return crypto.createPublicKey(pem);
 }
 
+/*
+ * 1.1.5 (2026-10-25) — ONLY ED25519 VERIFIES A RECEIPT, IN BOTH PORTS.
+ *
+ * MEASURED 2026-10-25 (Node 24.12): a keyring entry carrying an ML-DSA-65 PEM loaded, and a receipt
+ * ML-DSA-signed under that kid came back { valid: true, VERIFIED_CURRENT } — crypto.verify(null, …)
+ * accepts any key type Node knows. verify.py already refused a non-Ed25519 key, but by throwing at load,
+ * so the same keyring took the whole Python run down while JS accepted. The algorithm is now read from
+ * the SPKI AlgorithmIdentifier OID by the same few lines in both ports (never from what a crypto library
+ * happens to support), and a declared `alg` other than Ed25519 is refused too, even over an Ed25519 PEM.
+ * Refused = valid:false, status INVALID_SIGNATURE (an existing status), reason
+ * "unsupported key algorithm: <alg>".
+ */
+const ED25519_OID = '1.3.101.112';
+const KEY_ALG_NAMES = Object.freeze({
+  '1.3.101.112': 'Ed25519',
+  '1.3.101.113': 'Ed448',
+  '1.2.840.10045.2.1': 'EC',
+  '1.2.840.113549.1.1.1': 'RSA',
+  '2.16.840.1.101.3.4.3.17': 'ML-DSA-44',
+  '2.16.840.1.101.3.4.3.18': 'ML-DSA-65',
+  '2.16.840.1.101.3.4.3.19': 'ML-DSA-87',
+});
+const SUPPORTED_DECLARED_ALGS = new Set(['ed25519', 'eddsa']);
+
+/** The DER bytes of a `PUBLIC KEY` PEM block, or null. Strict base64 (verify.py decodes the same way). */
+function spkiDerFromPem(pem) {
+  const m = /-----BEGIN PUBLIC KEY-----([\s\S]*?)-----END PUBLIC KEY-----/.exec(String(pem || ''));
+  if (!m) return null;
+  const body = m[1].replace(/\s+/g, '');
+  if (!body || body.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(body)) return null;
+  return Buffer.from(body, 'base64');
+}
+
+function readTlv(buf, off) {
+  if (off + 2 > buf.length) return null;
+  const tag = buf[off];
+  let len = buf[off + 1];
+  let p = off + 2;
+  if (len & 0x80) {
+    const n = len & 0x7f;
+    if (n < 1 || n > 4 || p + n > buf.length) return null;
+    len = 0;
+    for (let i = 0; i < n; i++) len = len * 256 + buf[p + i];
+    p += n;
+  }
+  if (p + len > buf.length) return null;
+  return { tag, start: p, end: p + len };
+}
+
+/** The AlgorithmIdentifier OID of an SPKI DER, dotted, or null when it is not an SPKI. */
+function spkiAlgorithmOid(der) {
+  const outer = readTlv(der, 0);
+  if (!outer || outer.tag !== 0x30 || outer.end !== der.length) return null;
+  const alg = readTlv(der, outer.start);
+  if (!alg || alg.tag !== 0x30) return null;
+  const oid = readTlv(der, alg.start);
+  if (!oid || oid.tag !== 0x06 || oid.end > alg.end || oid.end === oid.start) return null;
+  const bytes = der.subarray(oid.start, oid.end);
+  const first = bytes[0];
+  const a = first < 40 ? 0 : (first < 80 ? 1 : 2);
+  const parts = [a, first - 40 * a];
+  let v = 0;
+  for (let i = 1; i < bytes.length; i++) {
+    v = v * 128 + (bytes[i] & 0x7f);
+    if (!(bytes[i] & 0x80)) { parts.push(v); v = 0; } else if (i === bytes.length - 1) return null;
+  }
+  return parts.join('.');
+}
+
+/**
+ * Classify one PEM for receipt verification. Never throws.
+ *   { publicKey, key_sha256 }                         an Ed25519 key (key_sha256: hex sha256 of the SPKI DER)
+ *   { publicKey: null, key_sha256, unsupported_alg }  a parseable key of another algorithm, or a declared
+ *                                                     `alg` other than Ed25519
+ *   { unparseable: true }                             not an SPKI PEM at all
+ */
+function classifyPublicKeyPem(pem, declaredAlg) {
+  const der = spkiDerFromPem(pem);
+  if (!der) return { unparseable: true };
+  const oid = spkiAlgorithmOid(der);
+  if (!oid) return { unparseable: true };
+  const key_sha256 = crypto.createHash('sha256').update(der).digest('hex');
+  if (declaredAlg !== undefined && declaredAlg !== null && !SUPPORTED_DECLARED_ALGS.has(String(declaredAlg).toLowerCase())) {
+    return { publicKey: null, key_sha256, unsupported_alg: String(declaredAlg) || '(empty)' };
+  }
+  if (oid !== ED25519_OID) return { publicKey: null, key_sha256, unsupported_alg: KEY_ALG_NAMES[oid] || oid };
+  try {
+    return { publicKey: crypto.createPublicKey({ key: der, format: 'der', type: 'spki' }), key_sha256 };
+  } catch (_) {
+    return { unparseable: true };
+  }
+}
+
+/** For a caller-built KeyObject (library use): the algorithm when it is not Ed25519, else null. */
+function unsupportedKeyObjectAlg(key) {
+  const t = key && key.asymmetricKeyType;
+  if (!t || t === 'ed25519') return null;
+  const named = { ed448: 'Ed448', rsa: 'RSA', 'rsa-pss': 'RSA-PSS', ec: 'EC', 'ml-dsa-44': 'ML-DSA-44', 'ml-dsa-65': 'ML-DSA-65', 'ml-dsa-87': 'ML-DSA-87' };
+  return named[t] || t;
+}
+
 /**
  * Build a kid -> key map from a registry document
  * ({ keys: [{ kid, public_key_pem, status, valid_from, retired_at }] }).
  * Returns null when `keys` is missing/empty so the caller can try the legacy
  * single-key body. --keys still requires a non-empty keys[] (throws).
  */
-function keyringFromDocument(doc, source) {
+function keyringFromDocument(doc, source, warnings) {
   const keys = doc && Array.isArray(doc.keys) ? doc.keys : null;
   if (!keys || keys.length === 0) return null;
   const keyring = new Map();
-  for (const k of keys) {
-    if (!k || !k.kid || !k.public_key_pem) throw new Error(`registry entry missing kid/public_key_pem in ${source}`);
+  // 1.1.5: TOLERANT PER ENTRY. MEASURED 2026-10-25: one entry with a bad PEM, or with no
+  // public_key_pem, threw here and the whole keyring failed to load — the good keys beside it were
+  // unusable ("could not load public key", exit 2). Now that entry is skipped, the reason goes to
+  // `warnings` (the CLI prints them as keyring_warnings), and every other key still verifies.
+  const warn = (msg) => { if (Array.isArray(warnings)) warnings.push(msg); };
+  keys.forEach((k, i) => {
+    if (!k || typeof k !== 'object' || Array.isArray(k)) { warn(`registry entry #${i}: not an object — skipped`); return; }
+    if (!k.kid) { warn(`registry entry #${i}: missing kid — skipped`); return; }
+    if (!k.public_key_pem) { warn(`registry entry ${k.kid}: missing public_key_pem — skipped`); return; }
+    const key = classifyPublicKeyPem(k.public_key_pem, k.alg);
+    if (key.unparseable) { warn(`registry entry ${k.kid}: unparseable public_key_pem — skipped`); return; }
     // compromised_at MUST be carried through: deriveStatus reads it for the revoked rule
     // (RECEIPT_FORMAT.md 7.1). Dropping it here made the rule inert — every revoked key
     // returned UNDECIDABLE regardless of ts, which looks implemented and decides nothing.
-    keyring.set(k.kid, {
-      publicKey: keyFromPem(k.public_key_pem),
+    const entry = {
+      publicKey: key.publicKey,
       status: k.status || null,
       retired_at: k.retired_at || null,
       revoked_at: k.revoked_at || null,
       compromised_at: k.compromised_at || null,
-    });
-  }
+      key_sha256: key.key_sha256,
+    };
+    if (key.unsupported_alg) entry.unsupported_alg = key.unsupported_alg;
+    keyring.set(k.kid, entry);
+  });
   return keyring;
 }
 
+/** The active entry that can verify (an unsupported-algorithm entry cannot), else the first that can. */
 function pickActiveFromKeyring(keyring) {
   for (const [kid, entry] of keyring) {
-    if (entry.status === 'active') return { kid, entry };
+    if (entry.status === 'active' && entry.publicKey) return { kid, entry };
   }
-  const first = keyring.entries().next().value;
-  return first ? { kid: first[0], entry: first[1] } : null;
+  for (const [kid, entry] of keyring) {
+    if (entry.publicKey) return { kid, entry };
+  }
+  return null;
 }
 
 /**
@@ -402,7 +534,7 @@ function pickActiveFromKeyring(keyring) {
  * ({ keys: [{ kid, public_key_pem, status, valid_from, retired_at }] }). A --keys source may be
  * an http(s) URL or a local file path. Both active and retired keys are loaded.
  */
-async function loadKeyring(source) {
+async function loadKeyring(source, warnings) {
   let text;
   if (/^https?:\/\//i.test(source)) {
     const res = await fetch(source, { headers: { Accept: 'application/json' } });
@@ -412,14 +544,32 @@ async function loadKeyring(source) {
     text = fs.readFileSync(source, 'utf8');
   }
   const doc = JSON.parse(text);
-  const keyring = keyringFromDocument(doc, source);
+  const local = [];
+  const keyring = keyringFromDocument(doc, source, local);
+  if (Array.isArray(warnings)) warnings.push(...local);
   if (!keyring) throw new Error(`no keys[] in registry ${source}`);
+  if (keyring.size === 0) throw new Error(`no usable keys in registry ${source}: ${local.join('; ')}`);
   return keyring;
+}
+
+/**
+ * 1.1.4 (2026-10-18): a receipt used beside an envelope must be v4 — the rule moves here from cli.js
+ * (1.1.1, P66), so every consumer of the core gets it. MEASURED 2026-10-17: two gateways that vendored
+ * this core admitted a production-signed v2 receipt beside a forged ALLOW envelope, because the core
+ * answered valid:true; v1–v3 bind no envelope (no `bh`) and carry no expiry. Any envelope object counts,
+ * `{}` included (the CLI's JS truthiness). A bare token with no envelope stays a signature check, and
+ * verifyChain is unchanged (it checks links, not an envelope per link).
+ */
+function v4EnvelopeRule(result, opts) {
+  const v = result && result.payload && result.payload.v;
+  if (!opts || !opts.envelope || !result || !result.valid || !result.payload || v === 4) return result;
+  return { ...result, valid: false, signature_status: result.status, status: 'RECEIPT_VERSION_UNSUPPORTED',
+    reason: `receipt version v${v} binds no envelope and carries no expiry; only a v4 receipt is accepted with an envelope or --from-commit` };
 }
 
 function verifyReceipt(token, second, third) {
   const { ctx, opts } = split3ary('verifyReceipt', arguments.length, second, third);
-  return verifyReceiptInner(token, ctx, opts);
+  return v4EnvelopeRule(verifyReceiptInner(token, ctx, opts), opts);
 }
 
 function verifyChain(tokens, second, third) {
@@ -448,6 +598,9 @@ module.exports = {
   loadKeyring,
   keyFromPem,
   keyringFromDocument,
+  classifyPublicKeyPem,
+  spkiDerFromPem,
+  spkiAlgorithmOid,
   // Pure keyring helper. Exported for the command (cli.js fetchKeyInfo) after the split —
   // it takes a keyring and returns the active entry; it performs no I/O.
   pickActiveFromKeyring,
