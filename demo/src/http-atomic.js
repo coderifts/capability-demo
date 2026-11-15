@@ -1,6 +1,6 @@
 'use strict';
 /**
- * http.exclusive adapter — ENFORCING_EXCLUSIVE_HTTP_CAS (data plane 2. fázis).
+ * http.exclusive adapter — ENFORCING_EXCLUSIVE_HTTP_CAS (data plane phase 2).
  *
  * Mirrors demo/src/git-atomic.js with one substitution: the CAS is an HTTP
  * mutating request carrying `If-Match: <etag>`. The origin applies the write
