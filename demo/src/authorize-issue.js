@@ -6,7 +6,7 @@
  * Two-phase, labelled:
  *   1. ISSUANCE (this module) — may use the network. Live POST /api/v1/preflight
  *      with include_execution_grant when CODERIFTS_API_KEY is set; otherwise the
- *      recorded server grant captured 2026-09-05 (signed by kid 2026-07-k1).
+ *      recorded server grant captured 2026-11-16 (signed by kid 2026-10-k1).
  *      A live authorize carries the kid the server puts in the grant. Neither
  *      path is DEMO-KEY-DO-NOT-USE.
  *   2. VERIFY — parse the grant first, then Ed25519 + scope/receipt binding
@@ -54,9 +54,10 @@ const DEFAULT_REQUEST = Object.freeze({
   // hashes to sha256:eb1ec9e7…. That mismatch is why the chain carries two grants: POINT 1's
   // server grant could not be consumed, so POINTS 2-7 minted their own.
   //
-  // Pointing the request at the contract does NOT by itself make the chain continuous — the
-  // recorded fixture was captured under the old request and is unchanged. It makes the NEXT live
-  // authorize (CODERIFTS_API_KEY set) mint a grant the executor can actually consume.
+  // Pointing this default at the contract does not rewrite the recorded fixture. The fixture
+  // keeps the 2026-09-06 additive request (description: created to created successfully),
+  // recaptured 2026-11-16 under kid 2026-10-k1. A live authorize (CODERIFTS_API_KEY set) sends
+  // the contract bytes below, which is what the executor can consume.
   artifacts: [],
 });
 
@@ -100,7 +101,17 @@ function loadIssuerKeys(dir = FIXTURE_DIR, kid) {
     publicKey = null;
   }
   // The ring's own status. A missing status stays missing; it is not rewritten to 'active'.
-  return { registry, kid: row.kid, publicKey, status: row.status };
+  // The timestamp fields travel with the row so a revoked key can be decided against
+  // compromised_at rather than dropped on the way into the verifier.
+  return {
+    registry,
+    kid: row.kid,
+    publicKey,
+    status: row.status,
+    retired_at: row.retired_at ?? null,
+    revoked_at: row.revoked_at ?? null,
+    compromised_at: row.compromised_at ?? null,
+  };
 }
 
 function loadRecorded(dir = FIXTURE_DIR) {
@@ -168,6 +179,7 @@ function verifyIssued(issued, opts = {}) {
     publicKey: keys && keys.publicKey,
     keyKid: keys && keys.kid,
     keyStatus: keys && keys.status,
+    compromised_at: keys && keys.compromised_at,
     now,
     intended: {
       operation: parsed.payload.operation,

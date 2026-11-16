@@ -742,6 +742,21 @@ artifact around it is internally consistent with what was signed.
 `;
 }
 
+/**
+ * Issuer ring for the receipt verifier. `compromised_at` is copied from the ring entry.
+ * `retired_at` stays null on this path.
+ */
+function issuerReceiptKeyring(reg) {
+  return new Map((reg.keys || [])
+    .filter((k) => k && k.kid && k.public_key_pem)
+    .map((k) => [k.kid, {
+      publicKey: crypto.createPublicKey(k.public_key_pem),
+      status: k.status || 'active',
+      retired_at: null,
+      compromised_at: k.compromised_at ?? null,
+    }]));
+}
+
 // ── --check ─────────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -908,12 +923,7 @@ function check(file) {
         const reg = JSON.parse(fs.readFileSync(
           path.join(DEMO, 'fixtures', 'recorded-authorize', 'issuer-keys.json'), 'utf8',
         ));
-        return new Map((reg.keys || [])
-          .filter((k) => k && k.kid && k.public_key_pem)
-          .map((k) => [k.kid, {
-            publicKey: crypto.createPublicKey(k.public_key_pem),
-            status: k.status || 'active', retired_at: null, compromised_at: null,
-          }]));
+        return issuerReceiptKeyring(reg);
       } catch (_) { return null; }
     })();
     const g = iss.grant || {};
@@ -1196,7 +1206,7 @@ async function main(argv = process.argv) {
 
 module.exports = {
   runAll, check, renderMarkdown, refuseProdUrl, ARTIFACT_V, PROD_HOST_PATTERNS,
-  parseCli, USAGE, PKG,
+  parseCli, USAGE, PKG, issuerReceiptKeyring,
 };
 
 if (require.main === module) {

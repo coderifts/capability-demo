@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.1.16 - 2026-11-16
+
+- The middleware grant verifier refuses `keyStatus: 'revoked'` as `valid: false`, `UNKNOWN_KEY`.
+  The reason is `revoked_kid` when the grant's issued time is at or after `compromised_at`, and
+  `revoked_kid_undecidable` when the grant is earlier or `compromised_at` is missing. Issued time
+  is the vendored core v1 field: `iat` as an ISO string, or `iat` as numeric epoch seconds,
+  otherwise `ts`. A `cr.exec.v2` grant has none of those; its issued time is `not_before`.
+  `keyStatus: 'retired'` stays `UNKNOWN_KEY` / `retired_kid`. Any other status that is present and
+  not `active` is `UNKNOWN_KEY` / `unknown_key_status`. `active` and a missing status are unchanged.
+  The v1 branch and the v2 branch use this rule. `packages/verifier-core/` is unchanged: the core
+  does not export this decision, and its v2 branch does not read `compromised_at`.
+- `loadKeyring` copies `retired_at`, `revoked_at` and `compromised_at` from the pinned ring entry
+  and passes `compromised_at` into verification. `loadIssuerKeys` and `verifyIssued` carry the
+  same fields.
+- The recorded grant named in 0.1.15 (kid `2026-07-k1`, captured 2026-09-06, `not_before`
+  2026-09-06T09:46:37Z, ring entry `compromised_at` 2026-07-01T00:00:00.000Z) verifies
+  `UNKNOWN_KEY` / `revoked_kid` under this rule. Under 0.1.15 that same grant still verified
+  `GRANT_CURRENT`, because this verifier refused only `retired`. That refusal is covered by
+  `packages/middleware/test/key-status.test.js` with a synthetic grant. The recorded fixture is
+  no longer that grant.
+- `demo/fixtures/recorded-authorize` was recaptured 2026-11-16T19:18:11.179Z. Live
+  `POST /api/v1/preflight` with `include_execution_grant` over the measured artifact bytes,
+  challenge-first (`grant_version` v2, a fresh `state_nonce` that is not stored), returned
+  `ALLOW` / `CONTINUE`, kid `2026-10-k1`, `cr.exec.v2`. `pin.json` updates the issuance
+  artifact sha256 and byte length, `producer.version` to that capture time, `producer.digest`
+  to `kid:2026-10-k1`, and the subject digest to sha256 of the new grant token. The note names
+  `2026-10-k1` and says the previous recording was made under `2026-07-k1`, revoked on
+  2026-10-21. `inputs_sha256` is unchanged: it was the same constant at b518c35, de33f2f,
+  d57eeae and 2d7d09e, and it is not the hash of those files.
+- `examples/sample-transcript` was recaptured by `node bin/prove-all.js --no-git-target` with
+  `CODERIFTS_PROVIDER_READBACK` (profile `prove-db-provider-readback`). The run is kid
+  `2026-10-k1`, `cr.exec.v2`, source live, continuity true, POINT 8 `PROVEN` (unsigned provider
+  readback, not Conformance 7/7), verdict `PASS`, provenance `working_tree_dirty` false at
+  `2d7d09e52566933258db91c3f445345fc4f2c627`. `executor-keys.json` is the public executor
+  registry of that run.
+- `bin/prove-all.js` passes the ring entry's `compromised_at` into the receipt verifier.
+  A revoked receipt at or after that boundary is `REVOKED_KEY`; one before it, or one whose
+  row has no `compromised_at`, is `REVOKED_KEY_UNDECIDABLE`.
+  `demo/test/receipt-revoked-split.test.js` covers the split. `packages/verifier-core/` is
+  unchanged.
+
 ## 0.1.15 - 2026-11-16
 
 - Issuer verification selects the pinned ring entry by `payload.kid`. `loadIssuerKeys(dir, kid)`

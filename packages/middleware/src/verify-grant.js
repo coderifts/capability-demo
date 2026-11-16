@@ -12,9 +12,14 @@
  *   - keys come from a PINNED public key (PEM string or a keys file), never from a
  *     network lookup. There is no resolveVerifyKey() and no registry fetch: the
  *     middleware must behave identically with the network unplugged.
- *   - a pinned key with status 'retired' is refused (UNKNOWN_KEY / retired_kid),
- *     matching spec step 4: a grant is live execution permission, so retired keys
- *     never yield GRANT_CURRENT.
+ *   - a pinned key with status 'retired' is refused (UNKNOWN_KEY / retired_kid).
+ *     A grant is live execution permission, so a retired key never yields GRANT_CURRENT.
+ *   - status 'revoked' is refused the same way the vendored core v1 branch refuses it:
+ *     UNKNOWN_KEY, reason revoked_kid when the grant's issued time is at or after
+ *     compromised_at, otherwise revoked_kid_undecidable. Any other present status
+ *     that is not 'active' is UNKNOWN_KEY / unknown_key_status. The v2 branch uses
+ *     this same rule. The decision is local: the core does not export it, and the
+ *     core's own v2 branch does not read compromised_at.
  *
  * Dependency-free: node:crypto only.
  */
@@ -260,12 +265,56 @@ function parseGrantToken(token) {
  * @param {string} token
  * @param {object} opts
  * @param {import('node:crypto').KeyObject} opts.publicKey  PINNED key (required)
- * @param {string} [opts.keyStatus]  'active' | 'retired' — retired refuses (step 4)
+ * @param {string} [opts.keyStatus]  'active' | 'retired' | 'revoked' | other. Missing and
+ *        'active' continue. 'retired' and 'revoked' refuse. Any other present value refuses.
+ * @param {string} [opts.compromised_at]  ISO time from the pinned ring entry. Read only for
+ *        keyStatus 'revoked'.
  * @param {string} [opts.keyKid]     when set, payload.kid must equal it (step 4)
  * @param {object} [opts.intended]   { operation, target_id, audience, after_payload, scope_hash, receipt_token }
  * @param {number} [opts.now]        epoch ms
  * @returns {{ valid: boolean, status: string, reason: string|null, payload?: object }}
  */
+
+/**
+ * Issued-at in epoch milliseconds.
+ *
+ * The first three arms are the vendored core v1 expression (packages/verifier-core/verify-grant.js,
+ * the revoked branch): iat as an ISO string, iat as numeric epoch seconds, otherwise payload.ts.
+ * A cr.exec.v2 body has none of those fields. Its issuance time is not_before, which is the
+ * timestamp this package already treats as iat. Without that fallback every v2 revocation would
+ * be revoked_kid_undecidable, including a grant whose not_before is after compromised_at.
+ */
+function grantIssuedMs(payload) {
+  const rawIat = payload.iat;
+  const issued = typeof rawIat === 'string' ? Date.parse(rawIat)
+    : (Number.isFinite(Number(rawIat)) ? Number(rawIat) * 1000 : Date.parse(payload.ts));
+  if (Number.isFinite(issued)) return issued;
+  return typeof payload.not_before === 'string' ? Date.parse(payload.not_before) : issued;
+}
+
+/** null when this status does not refuse. The v1 and the v2 branch both call this. */
+function refuseKeyStatus(payload, opts) {
+  if (opts.keyStatus === 'retired') {
+    return { valid: false, status: 'UNKNOWN_KEY', reason: 'retired_kid', payload };
+  }
+  if (opts.keyStatus === 'revoked') {
+    const at = opts.compromised_at;
+    const boundary = typeof at === 'string' && at ? Date.parse(at) : NaN;
+    const issued = grantIssuedMs(payload);
+    const decided = Number.isFinite(boundary) && Number.isFinite(issued) && issued >= boundary;
+    return {
+      valid: false,
+      status: 'UNKNOWN_KEY',
+      reason: decided ? 'revoked_kid' : 'revoked_kid_undecidable',
+      payload,
+    };
+  }
+  if (opts.keyStatus != null && opts.keyStatus !== 'active') {
+    return { valid: false, status: 'UNKNOWN_KEY', reason: 'unknown_key_status', payload };
+  }
+  return null;
+}
+
 function verifyExecutionGrant(token, opts = {}) {
   // 1-3
   const parsed = parseGrantToken(token);
@@ -284,9 +333,8 @@ function verifyExecutionGrant(token, opts = {}) {
   if (opts.keyKid != null && opts.keyKid !== '' && payload.kid !== String(opts.keyKid)) {
     return { valid: false, status: 'UNKNOWN_KEY', reason: 'unknown_kid', payload };
   }
-  if (opts.keyStatus === 'retired') {
-    return { valid: false, status: 'UNKNOWN_KEY', reason: 'retired_kid', payload };
-  }
+  const refused = refuseKeyStatus(payload, opts);
+  if (refused) return refused;
 
   // 5
   let ok = false;
@@ -457,9 +505,8 @@ function verifyExecutionGrantV2(token, opts = {}) {
   if (opts.keyKid != null && opts.keyKid !== '' && payload.kid !== String(opts.keyKid)) {
     return { valid: false, status: 'UNKNOWN_KEY', reason: 'unknown_kid', payload };
   }
-  if (opts.keyStatus === 'retired') {
-    return { valid: false, status: 'UNKNOWN_KEY', reason: 'retired_kid', payload };
-  }
+  const refused = refuseKeyStatus(payload, opts);
+  if (refused) return refused;
 
   // The signature covers the body MINUS nothing — the whole payload is the message.
   let ok = false;

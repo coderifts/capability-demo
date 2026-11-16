@@ -270,8 +270,8 @@ POINT 1 of the flagship transcript is a **server authorize**, not a local mint.
 `demo/src/authorize-issue.js` POSTs `preflight_mode=authorize` +
 `include_execution_grant: true` to `https://app.coderifts.com/api/v1/preflight` when
 `CODERIFTS_API_KEY` is set (labelled `[ISSUANCE]`, outside the 21-trap). Without a
-key it verifies a **recorded** server-signed grant (kid `2026-07-k1`, captured
-2026-09-05) offline against the pinned well-known keyring, `now=iat`. That grant is
+key it verifies a **recorded** server-signed grant (kid `2026-10-k1`, captured
+2026-11-16) offline against the pinned well-known keyring, `now=iat`. That grant is
 not `DEMO-KEY-DO-NOT-USE`.
 
 `demo/issue-grant.js` still signs **data-plane** grants locally with the DEMO key

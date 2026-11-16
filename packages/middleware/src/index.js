@@ -115,7 +115,13 @@ function captureRawBody(opts = {}) {
  * A RETIRED entry stays in the ring rather than being filtered out, so a token signed by it is
  * refused as `retired_kid` and not as `unknown_kid`. Same verdict, a true reason.
  *
- * @returns {{byKid: Map<string,{publicKey: crypto.KeyObject, kid: string|null, status: string}>,
+ * A REVOKED entry stays too. retired_at, revoked_at and compromised_at are copied onto the ring
+ * entry, and compromised_at is handed to the verifier. keyStatus revoked is UNKNOWN_KEY:
+ * revoked_kid when the grant's issued time is at or after compromised_at, otherwise
+ * revoked_kid_undecidable.
+ *
+ * @returns {{byKid: Map<string,{publicKey: crypto.KeyObject, kid: string|null, status: string,
+ *            retired_at: string|null, revoked_at: string|null, compromised_at: string|null}>,
  *            any: {publicKey: crypto.KeyObject, kid: string|null, status: string}|null}}
  *          `any` is the un-named key of a `publicKeyPem` construction: it matches whatever kid a
  *          token claims, exactly as before. A keys FILE never produces one.
@@ -141,6 +147,9 @@ function loadKeyring({ publicKeyPem, keysFile, kid }) {
         publicKey: crypto.createPublicKey(entry.public_key_pem),
         kid: entry.kid || null,
         status: entry.status || 'active',
+        retired_at: entry.retired_at ?? null,
+        revoked_at: entry.revoked_at ?? null,
+        compromised_at: entry.compromised_at ?? null,
       });
     }
     return { byKid, any: null };
@@ -245,6 +254,7 @@ function requireExecutionGrant(options = {}) {
       publicKey: pinned.publicKey,
       keyKid: pinned.kid,
       keyStatus: pinned.status,
+      compromised_at: pinned.compromised_at,
       now: typeof now === 'function' ? now() : undefined,
       intended: isV2
         ? {
