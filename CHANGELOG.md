@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.15 - 2026-11-16
+
+- No behaviour change. `demo/src/http-atomic.js` carries an English-only comment (584b20c); the
+  vendored `docs/adapter-strength.v1.json` is checked against its generator by
+  `demo/test/adapter-strength-vendor.test.js` (4ccb732); the publish plan records the measured
+  `npx prove` recommendation (154176f). The shipped files differ from 0.1.14 only in that comment.
+
 ## 0.1.14 - 2026-10-25
 
 - **Verifier core (signed receipt-verifier v1.1.5).** `packages/verifier-core/` is re-pinned from the
