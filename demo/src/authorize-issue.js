@@ -6,12 +6,14 @@
  * Two-phase, labelled:
  *   1. ISSUANCE (this module) — may use the network. Live POST /api/v1/preflight
  *      with include_execution_grant when CODERIFTS_API_KEY is set; otherwise the
- *      recorded server grant captured 2026-09-05. Either way the bytes are a
- *      CodeRifts signature (kid 2026-07-k1), never DEMO-KEY-DO-NOT-USE.
- *   2. VERIFY — Ed25519 + scope/receipt binding against the pinned well-known
- *      keyring, with now=iat so a short-lived grant still checks as of issuance.
- *      No network. The 21-trap in POINT 10 wraps transcript verify, not this
- *      issuance call.
+ *      recorded server grant captured 2026-09-05 (signed by kid 2026-07-k1).
+ *      A live authorize carries the kid the server puts in the grant. Neither
+ *      path is DEMO-KEY-DO-NOT-USE.
+ *   2. VERIFY — parse the grant first, then Ed25519 + scope/receipt binding
+ *      against the pinned ring entry for payload.kid. The row's status is passed
+ *      through (not replaced with a constant). now=iat so a short-lived grant
+ *      still checks as of issuance. No network. The 21-trap in POINT 10 wraps
+ *      transcript verify, not this issuance call.
  *
  * The local data-plane (prove.js mkGrant → DEMO-KEY) is unchanged: the demo
  * executor cannot consume a CodeRifts server grant (no deployment_id, different
@@ -83,15 +85,22 @@ function defaultRequest() {
   };
 }
 
-function loadIssuerKeys(dir = FIXTURE_DIR) {
+function loadIssuerKeys(dir = FIXTURE_DIR, kid) {
   const registry = JSON.parse(fs.readFileSync(path.join(dir, 'issuer-keys.json'), 'utf8'));
-  const row = registry.keys[0];
-  return {
-    registry,
-    kid: row.kid,
-    publicKey: crypto.createPublicKey(row.public_key_pem),
-    status: row.status || 'active',
-  };
+  const list = Array.isArray(registry.keys) ? registry.keys : [];
+  const want = typeof kid === 'string' && kid.length > 0 ? kid : null;
+  const row = want ? list.find((k) => k && k.kid === want) : list[0];
+  if (!row || typeof row.public_key_pem !== 'string') {
+    return { registry, kid: want, publicKey: null, status: null };
+  }
+  let publicKey = null;
+  try {
+    publicKey = crypto.createPublicKey(row.public_key_pem);
+  } catch (_) {
+    publicKey = null;
+  }
+  // The ring's own status. A missing status stays missing; it is not rewritten to 'active'.
+  return { registry, kid: row.kid, publicKey, status: row.status };
 }
 
 function loadRecorded(dir = FIXTURE_DIR) {
@@ -148,17 +157,17 @@ function summarizeGrant(payload) {
 }
 
 function verifyIssued(issued, opts = {}) {
-  const keys = opts.keys || loadIssuerKeys(opts.dir);
   const parsed = parseGrantAny(issued.execution_grant);
   if (!parsed.ok) {
     return { valid: false, status: parsed.status, reason: parsed.reason, payload: parsed.payload };
   }
+  const keys = opts.keys || loadIssuerKeys(opts.dir, parsed.payload && parsed.payload.kid);
   const iatMs = issuedAtMs(parsed.payload);
   const now = Number.isFinite(opts.now) ? opts.now : (Number.isFinite(iatMs) ? iatMs + 1000 : Date.now());
   const result = verifyExecutionGrantAnyVersion(issued.execution_grant, {
-    publicKey: keys.publicKey,
-    keyKid: keys.kid,
-    keyStatus: keys.status,
+    publicKey: keys && keys.publicKey,
+    keyKid: keys && keys.kid,
+    keyStatus: keys && keys.status,
     now,
     intended: {
       operation: parsed.payload.operation,

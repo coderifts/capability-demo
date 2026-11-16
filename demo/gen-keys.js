@@ -38,11 +38,12 @@ function main() {
         + 'middleware reads production-shaped input.',
       // BINDING 2 — the SERVER issuer key travels with the demo key, not instead of it.
       //
-      // MEASURED: this keyring held only DEMO-KEY-DO-NOT-USE, so a grant signed by the CodeRifts
-      // issuer (kid 2026-07-k1) verified as UNKNOWN_KEY — the executor could not have consumed a
-      // server grant even if one were presented. The issuer half is public key material, pinned in
-      // demo/fixtures/recorded-authorize/issuer-keys.json and already trusted by the offline
-      // verify path; carrying it here lets the SAME executor verify both.
+      // MEASURED: this keyring held only DEMO-KEY-DO-NOT-USE, so a grant signed by a CodeRifts
+      // issuer kid verified as UNKNOWN_KEY — the executor could not have consumed a server grant
+      // even if one were presented. The issuer half is public key material, copied from
+      // demo/fixtures/recorded-authorize/issuer-keys.json (the pinned well-known ring, revoked
+      // rows included) and already trusted by the offline verify path; carrying it here lets the
+      // SAME executor verify both.
       //
       // Both, deliberately: dropping DEMO-KEY would break every local panel, and the point of the
       // keyring is which signatures are ACCEPTED, not which one is preferred.

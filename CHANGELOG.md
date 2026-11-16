@@ -2,10 +2,23 @@
 
 ## 0.1.15 - 2026-11-16
 
-- No behaviour change. `demo/src/http-atomic.js` carries an English-only comment (584b20c); the
-  vendored `docs/adapter-strength.v1.json` is checked against its generator by
+- Issuer verification selects the pinned ring entry by `payload.kid`. `loadIssuerKeys(dir, kid)`
+  returns that row; an unknown kid stays `UNKNOWN_KEY` / `unknown_kid`. `verifyIssued` parses the
+  grant first and passes the row's `status` into `verifyExecutionGrantAnyVersion`.
+- The pinned ring `demo/fixtures/recorded-authorize/issuer-keys.json` is the live
+  `GET /.well-known/coderifts-keys.json` measured 2026-11-16: `2026-10-k1` active first,
+  `2026-07-k1` revoked (`retired_at` 2026-10-21T00:00:00.000Z, `compromised_at`
+  2026-07-01T00:00:00.000Z). The two public keys match the evidence-bundle snapshot.
+- The recorded grant (captured 2026-09-06, kid `2026-07-k1`) still verifies `GRANT_CURRENT`.
+  Measured: `verifyExecutionGrantAnyVersion` with `keyStatus: 'revoked'` returns `GRANT_CURRENT`;
+  only `keyStatus: 'retired'` returns `UNKNOWN_KEY` / `retired_kid`. `pin.json` states the
+  2026-10-21 revocation.
+- `demo/test/issuer-ring-vendor.test.js` compares that snapshot to the live ring when
+  `CODERIFTS_API_KEY` is set, and skips by name when it is not.
+- `demo/src/http-atomic.js` carries an English-only comment (584b20c); the vendored
+  `docs/adapter-strength.v1.json` is checked against its generator by
   `demo/test/adapter-strength-vendor.test.js` (4ccb732); the publish plan records the measured
-  `npx prove` recommendation (154176f). The shipped files differ from 0.1.14 only in that comment.
+  `npx prove` recommendation (154176f).
 
 ## 0.1.14 - 2026-10-25
 

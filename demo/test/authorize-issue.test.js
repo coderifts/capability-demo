@@ -18,21 +18,33 @@ const {
 const { issue } = require('../issue-grant');
 
 describe('authorize issuance — recorded server grant', () => {
-  it('the recorded grant is a cr.exec.v2 ATOMIC grant from the well-known kid, not DEMO-KEY', () => {
+  it('the recorded grant is a cr.exec.v2 ATOMIC grant from kid 2026-07-k1, not DEMO-KEY', () => {
     // RE-PINNED to v2. The fixture used to hold a cr.exec.v1 BEARER grant, which no ATOMIC
     // executor could ever consume — that mismatch is what kept the chain carrying two grants.
     // It now holds the same challenge-first grant the live path issues, so the recorded and live
     // shapes agree instead of quietly differing.
+    //
+    // The ring's first entry is no longer that signer. Measured 2026-11-16: 2026-10-k1 is active
+    // and listed first; the recorded grant stays kid 2026-07-k1, and that row is revoked.
     const rec = loadRecorded();
-    const keys = loadIssuerKeys();
+    const front = loadIssuerKeys();
+    const recordedKey = loadIssuerKeys(FIXTURE_DIR, rec.grant.kid);
     assert.equal(rec.decision, 'ALLOW');
     assert.equal(rec.execution_action, 'CONTINUE');
     assert.match(rec.decision_id, /^dec_/);
     assert.match(rec.verdict_fingerprint, /^sha256:[0-9a-f]{64}$/);
     assert.equal(rec.grant.v, 'cr.exec.v2');
-    assert.equal(rec.grant.kid, keys.kid);
-    assert.notEqual(rec.grant.kid, DEMO_KID);
+    assert.equal(front.kid, '2026-10-k1');
+    assert.equal(front.status, 'active');
     assert.equal(rec.grant.kid, '2026-07-k1');
+    assert.notEqual(rec.grant.kid, DEMO_KID);
+    assert.notEqual(rec.grant.kid, front.kid);
+    assert.equal(recordedKey.kid, '2026-07-k1');
+    assert.equal(recordedKey.status, 'revoked');
+    assert.ok(recordedKey.publicKey);
+    const row = recordedKey.registry.keys.find((k) => k.kid === '2026-07-k1');
+    assert.equal(row.retired_at, '2026-10-21T00:00:00.000Z');
+    assert.equal(row.compromised_at, '2026-07-01T00:00:00.000Z');
     // ATOMIC, not bearer: nonce_hash is a real hash and not the issuer's sha256('') filler.
     assert.match(rec.grant.nonce_hash, /^sha256:[0-9a-f]{64}$/);
     assert.notEqual(rec.grant.nonce_hash, `sha256:${crypto.createHash('sha256').update('').digest('hex')}`);
@@ -54,12 +66,36 @@ describe('authorize issuance — recorded server grant', () => {
 
   it('offline verify is GRANT_CURRENT at iat against the pinned keyring (no network)', () => {
     const rec = fromRecorded();
+    const recordedKey = loadIssuerKeys(FIXTURE_DIR, rec.grant.kid);
+    // The signer is revoked in the ring. The verifier still returns GRANT_CURRENT for that
+    // status; it refuses only keyStatus retired.
+    assert.equal(recordedKey.status, 'revoked');
     const v = verifyIssued(rec);
     assert.equal(v.status, 'GRANT_CURRENT', v.reason);
     assert.equal(v.valid, true);
     assert.equal(v.ok, true);
     assert.equal(v.receipt_digest_ok, true);
     assert.equal(v.not_demo_key, true);
+    const retired = verifyIssued(rec, {
+      keys: { publicKey: recordedKey.publicKey, kid: recordedKey.kid, status: 'retired' },
+    });
+    assert.equal(retired.status, 'UNKNOWN_KEY');
+    assert.equal(retired.reason, 'retired_kid');
+    assert.equal(retired.ok, false);
+  });
+
+  it('an unknown kid stays UNKNOWN_KEY / unknown_kid', () => {
+    const rec = fromRecorded();
+    const missing = loadIssuerKeys(FIXTURE_DIR, 'no-such-kid');
+    assert.equal(missing.publicKey, null);
+    assert.equal(missing.status, null);
+    const payload = JSON.parse(Buffer.from(rec.execution_grant.split('.')[0], 'base64url').toString('utf8'));
+    payload.kid = 'no-such-kid';
+    const tampered = `${Buffer.from(JSON.stringify(payload)).toString('base64url')}.${rec.execution_grant.split('.')[1]}`;
+    const v = verifyIssued({ ...rec, execution_grant: tampered });
+    assert.equal(v.status, 'UNKNOWN_KEY');
+    assert.equal(v.reason, 'unknown_kid');
+    assert.equal(v.ok, false);
   });
 
   it('a DEMO-KEY self-mint is NOT this claim — the bite the panel named', () => {

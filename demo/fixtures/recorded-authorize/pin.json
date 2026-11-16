@@ -24,8 +24,8 @@
     {
       "path": "issuer-keys.json",
       "role": "negative",
-      "sha256": "5725f4a41e3a6c815e6b2b35624fc6b68ae304e0d4549c37c9e106e8582fe133",
-      "bytes": 280,
+      "sha256": "2a59abed5cf2ff821bcb9ffdd146f946366a2e1d95dc3831a47d0e70d734294e",
+      "bytes": 616,
       "source": "GET https://app.coderifts.com/.well-known/coderifts-keys.json"
     }
   ],
@@ -36,5 +36,5 @@
     "freshness": "HISTORICAL",
     "oidc_attested": false
   },
-  "note": "Server-signed cr.exec.v1 grant from a live authorize. Conformance/prove does not mint this. kid is 2026-07-k1 (CodeRifts well-known), not DEMO-KEY-DO-NOT-USE."
+  "note": "Recorded cr.exec.v2 grant captured 2026-09-06, signed by kid 2026-07-k1. That key was revoked on 2026-10-21 (retired_at 2026-10-21T00:00:00.000Z). verifyExecutionGrantAnyVersion still returns GRANT_CURRENT for keyStatus revoked; it refuses only keyStatus retired. The ring's first key is 2026-10-k1, status active."
 }

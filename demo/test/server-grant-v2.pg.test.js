@@ -136,8 +136,14 @@ describe('cr.exec.v2 — the executor consumes it, challenge-first', { skip: fal
     assert.ok(active.length >= 2, 'this test is only meaningful with a multi-key registry');
     // The guard used to pin `keys.find(first active)` and answer UNKNOWN_KEY for every other
     // entry in the very file it was given. A grant signed by the SECOND active key must verify.
+    // 2026-07-k1 is still in the ring and is revoked (retired_at 2026-10-21); the second active
+    // issuer key is 2026-10-k1. DEMO-KEY stays first.
     assert.notEqual(active[0], '2026-07-k1', 'DEMO-KEY is expected to be listed first');
-    assert.ok(active.includes('2026-07-k1'), 'the CodeRifts issuer key must be in the ring');
+    assert.ok(active.includes('2026-10-k1'), 'the current CodeRifts issuer key must be active');
+    const revoked = doc.keys.find((k) => k.kid === '2026-07-k1');
+    assert.ok(revoked, 'the revoked issuer key must stay in the ring');
+    assert.equal(revoked.status, 'revoked');
+    assert.equal(revoked.retired_at, '2026-10-21T00:00:00.000Z');
   });
 
   test('the raw contract bytes are written under a v2 grant that never carried the nonce', async () => {
