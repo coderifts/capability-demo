@@ -48,22 +48,23 @@ describe('1330 — vendored verifier-core', () => {
     // because a tag can be moved and the commit cannot.
     assert.match(source, /^receipt-verifier v\d+\.\d+\.\d+ [0-9a-f]{40}$/,
       'the pin must name the release tag AND the peeled commit the bytes came from');
-    assert.match(source, /f7eb51f681de95e52c817fd7f035bf1838219d67$/,
+    assert.match(source, /e1a346bcb62532a9151cfe180b5ac2a33786d9a1$/,
       'the peeled commit does not match the released tag');
     // THE TAG IS NOW NAMED, not just shaped. `v\d+\.\d+\.\d+` above accepts any version, which is
     // right for the shape and useless for the pin: it passed unchanged while the pin moved from
     // v1.0.0 to v1.0.1, so it can never notice a downgrade to an UNSIGNED tag on the same commit.
-    assert.match(source, /^receipt-verifier v1\.1\.5 /,
-      'the manifest does not name v1.1.5 — the signed tag this consumer is pinned to');
-    // AND THE SIGNER, which is what v1.0.1 adds. The signature itself is verified below; this is
-    // the record the verification is checked AGAINST, without which any good signature by anyone
-    // would satisfy it.
-    const header = fs.readFileSync(MANIFEST, 'utf8');
-    assert.match(header, /SHA256:7yRXTm9zKGicfFpzL\+7lpwFoPaoSwxAJlabB3jwxw2Y/,
-      'the pin names a signed tag but records no signer fingerprint to check it against');
+    assert.match(source, /^receipt-verifier v1\.2\.1 /,
+      'the manifest does not name v1.2.1 — the signed tag this consumer is pinned to');
+    // The pin comment is one sentence naming this tag and its peeled commit. The signature is
+    // checked below with git tag -v, against the releaser fingerprint, not by a string in the file.
+    const comments = fs.readFileSync(MANIFEST, 'utf8').split('\n')
+      .filter((l) => l.trim().startsWith('#'));
+    assert.equal(comments.length, 1, 'the pin comment is one sentence');
+    assert.match(comments[0], /v1\.2\.1/);
+    assert.match(comments[0], /e1a346bcb62532a9151cfe180b5ac2a33786d9a1/);
   });
 
-  it('every vendored file is byte-identical to the SIGNED receipt-verifier v1.1.5', (t) => {
+  it('every vendored file is byte-identical to the SIGNED receipt-verifier v1.2.1', (t) => {
     // ── MEASURED: THIS SUITE HAD NO UPSTREAM COMPARISON ────────────────────────────────────
     //
     // It checked that each file matched its recorded digest — which proves the manifest was
@@ -77,10 +78,10 @@ describe('1330 — vendored verifier-core', () => {
         + 'upstream parity was NOT (not passed)');
       return;
     }
-    const TAG = 'v1.1.5';
+    const TAG = 'v1.2.1';
     const peeled = spawnSync('git', ['-C', SOURCE, 'rev-parse', `${TAG}^{commit}`], { encoding: 'utf8' });
     assert.equal(peeled.status, 0, `receipt-verifier has no ${TAG} tag`);
-    assert.equal(peeled.stdout.trim(), 'f7eb51f681de95e52c817fd7f035bf1838219d67',
+    assert.equal(peeled.stdout.trim(), 'e1a346bcb62532a9151cfe180b5ac2a33786d9a1',
       `${TAG} points somewhere other than the commit this pin names`);
 
     // ── THE TAG IS VERIFIED, NOT MERELY RESOLVED ────────────────────────────────────────────
@@ -90,8 +91,9 @@ describe('1330 — vendored verifier-core', () => {
     // would keep passing after it moved, as long as the bytes moved with it.
     //
     // v1.0.1 is annotated and SSH-signed, so the pin resolves to an IDENTITY. This asserts that
-    // the signature verifies AND that it verifies against the fingerprint recorded in the pin —
-    // "signed" alone would accept a signature by anyone at all.
+    // the signature verifies AND that it verifies against the releaser's fingerprint —
+    // "signed" alone would accept a signature by anyone at all. The fingerprint is checked on
+    // the git tag -v verdict, not copied into the one-sentence pin comment.
     //
     // MEASURED: `git tag -v` exits 0 and writes its verdict to STDERR, not stdout. A check reading
     // stdout finds nothing there and can be written to "pass" on a tag it never verified.

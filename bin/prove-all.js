@@ -743,16 +743,19 @@ artifact around it is internally consistent with what was signed.
 }
 
 /**
- * Issuer ring for the receipt verifier. `compromised_at` is copied from the ring entry.
- * `retired_at` stays null on this path.
+ * Issuer ring for the receipt verifier. `compromised_at` is copied from the ring
+ * entry. `retired_at` and `revoked_at` are copied when they are non-empty strings,
+ * so the v1.2.1 table can reach RETIRED_KEY_UNANCHORED and KEY_REVOKED.
  */
 function issuerReceiptKeyring(reg) {
+  const stamp = (v) => (typeof v === 'string' && v.length > 0 ? v : null);
   return new Map((reg.keys || [])
     .filter((k) => k && k.kid && k.public_key_pem)
     .map((k) => [k.kid, {
       publicKey: crypto.createPublicKey(k.public_key_pem),
       status: k.status || 'active',
-      retired_at: null,
+      retired_at: stamp(k.retired_at),
+      revoked_at: stamp(k.revoked_at),
       compromised_at: k.compromised_at ?? null,
     }]));
 }

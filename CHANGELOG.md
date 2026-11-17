@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.17 - 2026-11-17
+
+- `packages/verifier-core` is pinned from signed receipt-verifier v1.1.5 to signed v1.2.1
+  (peeled `e1a346bcb62532a9151cfe180b5ac2a33786d9a1`). `verify.js` and `verify-grant.js` are
+  that tag's bytes. The other nine vendored files are unchanged.
+- The receipt branch copies `retired_at` and `revoked_at` with `compromised_at`. A revoked
+  receipt is `REVOKED_KEY` at every signing time, and a retired receipt signed before
+  `retired_at` is `RETIRED_KEY_UNANCHORED` with `valid` false.
+- The binding path's v2 grant gate fails closed on an unknown status word, including
+  `compromised`, as `UNKNOWN_KEY` / `unknown_key_status`.
+
 ## 0.1.16 - 2026-11-16
 
 - The middleware grant verifier refuses `keyStatus: 'revoked'` as `valid: false`, `UNKNOWN_KEY`.
